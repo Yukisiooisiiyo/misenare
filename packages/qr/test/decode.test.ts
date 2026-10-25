@@ -72,6 +72,28 @@ describe('QR コードの読み取り確認（別実装）', { skip: loaded ? fa
     assert.ok(tried.some((t) => t.endsWith('OK')), `どの大きさでも読めなかった: ${tried.join(' ')}`);
   });
 
+  it('【手がかり】どの段階で失敗しているか', async () => {
+    const qr = encodeQr('A');
+    const { data, width } = toPixels(qr, 6, 4);
+    const notes: string[] = [`jsQR=${typeof jsQR} name=${(jsQR as unknown as { name: string })?.name} arity=${(jsQR as unknown as { length: number })?.length}`, shape];
+    const bin = await import('jsqr/dist/binarizer/index.js').then((m: Record<string, unknown>) => m, () => null);
+    const loc = await import('jsqr/dist/locator/index.js').then((m: Record<string, unknown>) => m, () => null);
+    if (!bin || !loc) {
+      notes.push(`内部モジュールを読めない bin=${!!bin} loc=${!!loc}`);
+    } else {
+      const binarize = (bin.binarize ?? (bin.default as Record<string, unknown>)?.binarize) as
+        (d: Uint8ClampedArray, w: number, h: number, inv: boolean) => { binarized: unknown };
+      const locate = (loc.locate ?? (loc.default as Record<string, unknown>)?.locate) as (m: unknown) => Array<{ dimension: number }> | null;
+      notes.push(`binarize=${typeof binarize} locate=${typeof locate}`);
+      if (typeof binarize === 'function' && typeof locate === 'function') {
+        const { binarized } = binarize(data, width, width, true);
+        const found = locate(binarized);
+        notes.push(found ? `位置は見つかった dimension=${found.map((f) => f.dimension).join('/')}（期待 ${qr.size}）` : '位置が見つからない');
+      }
+    }
+    assert.fail(notes.join(' | '));
+  });
+
   it('招待リンクを読み取れる', () => {
     const url = 'https://misenare.example.com/app/#invite=9133359e-0555-4f01-bbdd-00f7c3b0e4eb.o7CJTg6IwFS-1-wPF7EyMMwBr2tcN72a-lxK-77Ojac';
     assert.equal(roundTrip(url), url);
