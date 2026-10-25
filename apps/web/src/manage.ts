@@ -19,6 +19,32 @@ export function action(label: string, cls: string, fn: () => Promise<void>): HTM
   return btn;
 }
 
+/**
+ * 取り消せない操作の確認。その場で「本当に？」を出す。
+ * window.confirm は、埋め込みで開いたときに黙って false になる環境があるので使わない。
+ */
+export function confirmAction(
+  label: string, cls: string, question: string, fn: () => Promise<void>, ariaLabel?: string,
+): HTMLElement {
+  const wrap = h('span', { class: 'confirm' });
+  const draw = (asking: boolean): void => {
+    clear(wrap);
+    if (!asking) {
+      wrap.append(h('button', {
+        type: 'button', class: cls, 'aria-label': ariaLabel ?? label, onclick: () => draw(true),
+      }, label));
+      return;
+    }
+    wrap.append(
+      h('span', { class: 'confirm-q' }, question),
+      action('はい', 'primary small', fn),
+      h('button', { type: 'button', class: 'secondary small', onclick: () => draw(false) }, 'やめる'),
+    );
+  };
+  draw(false);
+  return wrap;
+}
+
 /** 開閉できるまとまり。中身は開いたときに読み込む */
 export function panel(title: string, load: (body: HTMLElement) => Promise<void>): HTMLElement {
   const body = h('div', { class: 'panel-body' });
@@ -136,7 +162,6 @@ function mergeForm(): HTMLElement {
   const into = h('input', { id: 'minto', type: 'text', placeholder: '例：長期保証', autocomplete: 'off' });
   const submit = async (e: Event) => {
     e.preventDefault();
-    if (!window.confirm(`#${from.value.replace(/^#/, '')} を #${into.value.replace(/^#/, '')} に統合します。統合元のタグは使えなくなり、別名として残ります。`)) return;
     try {
       const r = await api<{ reindexed: number }>('POST', '/tags/merge', { from: from.value, into: into.value });
       toast(`統合しました（${r.reindexed}件のナレッジを付け替え）`);
@@ -151,6 +176,7 @@ function mergeForm(): HTMLElement {
     h('p', { class: 'hint' }, '全店舗の検索に効きます。統合元の名前で検索・投稿しても、統合先として扱われます。'),
     h('label', { for: 'mfrom' }, '統合元（なくすタグ）'), from,
     h('label', { for: 'minto' }, '統合先（残すタグ）'), into,
+    h('p', { class: 'hint' }, '統合元のタグは使えなくなり、別名として残ります。'),
     h('button', { type: 'submit', class: 'primary' }, '統合する'));
 }
 
@@ -208,15 +234,20 @@ export function staffPanel(storeId: string, meId: string): HTMLElement {
                 draw(u, row);
               })
             : null,
-          action(u.status === 'active' ? '無効にする' : '有効に戻す', 'secondary small', async () => {
-            const next = u.status === 'active' ? 'disabled' : 'active';
-            if (next === 'disabled' && !window.confirm(`${u.name}さんを無効にすると、その人のすべての端末からすぐに使えなくなります。`)) return;
-            await api('PATCH', `/users/${u.id}`, { status: next });
-            u.status = next;
-            if (next === 'disabled') u.devices = 0;
-            toast(next === 'disabled' ? '無効にしました' : '有効に戻しました');
-            draw(u, row);
-          })),
+          u.status === 'active'
+            ? confirmAction('無効にする', 'secondary small', `${u.name}さんの端末がすぐ使えなくなります。`, async () => {
+                await api('PATCH', `/users/${u.id}`, { status: 'disabled' });
+                u.status = 'disabled';
+                u.devices = 0;
+                toast('無効にしました');
+                draw(u, row);
+              })
+            : action('有効に戻す', 'secondary small', async () => {
+                await api('PATCH', `/users/${u.id}`, { status: 'active' });
+                u.status = 'active';
+                toast('有効に戻しました');
+                draw(u, row);
+              })),
       );
     };
     for (const u of users) {
@@ -249,8 +280,7 @@ export function importPanel(storeId: string): HTMLElement {
           h('span', {}, h('strong', {}, r.file_name), `（${r.drafts}件）`),
           h('span', { class: 'hint' }, `${r.created_by}さん・${relativeDate(r.created_at)}・残り${r.pending}件`),
           r.pending === 0 ? h('span', {}) : h('span', { class: 'row-actions' },
-            action('残りを取り下げる', 'secondary small', async () => {
-              if (!window.confirm(`${r.file_name} から取り込んだ、まだ承認していない${r.pending}件を取り下げます。`)) return;
+            confirmAction('残りを取り下げる', 'secondary small', `まだ承認していない${r.pending}件を取り下げます。`, async () => {
               const out = await api<{ discarded: number }>('POST', `/imports/${r.id}/discard`);
               toast(`${out.discarded}件を取り下げました`);
               remove();

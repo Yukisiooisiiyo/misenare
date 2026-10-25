@@ -5,7 +5,7 @@
 
 import { api } from './api.ts';
 import { clear, h, relativeDate, toast } from './dom.ts';
-import { action, countedList } from './manage.ts';
+import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
   id: string;
@@ -161,9 +161,9 @@ function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HT
         redraw();
       }),
       ...(canDelete
-        ? [action('消す', 'secondary small', async () => {
-            if (!window.confirm('この引き継ぎを消します。')) return;
+        ? [confirmAction('消す', 'secondary small', '消しますか？（履歴から戻せます）', async () => {
             await api('DELETE', `/handovers/${item.id}`);
+            toast('消しました（履歴から戻せます）');
             redraw();
           })]
         : [])),

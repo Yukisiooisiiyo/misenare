@@ -63,7 +63,7 @@ export const session = {
 
 const ME: Me = {
   id: 'bb000000-0000-0000-0000-000000000001',
-  name: 'あなた',
+  name: '山本',
   trustLevel: 'trusted',
   adminScope: 'none',
   stores: [STORE],
