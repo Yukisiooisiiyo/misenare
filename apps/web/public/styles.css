@@ -221,3 +221,7 @@ button.tag { cursor: pointer; }
 .photo-add { width: calc(50% - 4px); display: flex; align-items: center; }
 .photo-add .secondary { width: 100%; }
 @media (min-width: 600px) { .photo-item, .photo-add { width: calc(33.333% - 6px); } }
+
+/* 招待のQRコード */
+.qr { max-width: 260px; margin: 12px auto; }
+.qr svg { width: 100%; height: auto; display: block; }

@@ -9,7 +9,8 @@
     "watch": "node build.mjs --watch"
   },
   "dependencies": {
-    "@misenare/search-core": "*"
+    "@misenare/search-core": "*",
+    "@misenare/qr": "*"
   },
   "devDependencies": {
     "esbuild": "^0.24.0"

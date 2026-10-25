@@ -1,0 +1,10 @@
+{
+  "name": "@misenare/qr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "QR コード（バイトモード・レベル M）。招待リンクを紙や画面で渡すために使う。外部依存なし",
+  "exports": {
+    ".": "./src/qr.ts"
+  }
+}

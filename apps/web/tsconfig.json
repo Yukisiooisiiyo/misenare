@@ -1,8 +1,16 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": [
+      "ES2023",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "types": []
   },
-  "include": ["src/**/*.ts", "../../packages/search-core/src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "../../packages/search-core/src/**/*.ts",
+    "../../packages/qr/src/**/*.ts"
+  ]
 }

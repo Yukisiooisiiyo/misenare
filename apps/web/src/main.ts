@@ -6,6 +6,7 @@ import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } fro
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { action, countedList, importPanel, productPanel, staffPanel, tagPanel } from './manage.ts';
 import { photoSection } from './photos.ts';
+import { encodeQr, qrToSvg } from '@misenare/qr';
 
 const root = document.getElementById('app')!;
 let me: Me | null = null;
@@ -529,11 +530,17 @@ function inviteForm(): HTMLElement {
         storeId: storeId(), name: name.value, trustLevel: trusted.checked ? 'trusted' : 'visitor',
       });
       const link = `${location.origin}${location.pathname}#invite=${encodeURIComponent(r.token)}`;
+      const who = name.value;
       clear(out);
+      const qr = h('div', { class: 'qr' });
+      qr.innerHTML = qrToSvg(encodeQr(link), { label: `${who}さんの招待QRコード` });
       out.append(
-        h('p', {}, `${name.value}さんのスマホでこのリンクを開いてもらってください（1回限り・72時間有効）。`),
+        h('p', {}, `${who}さんのスマホでこのQRコードを読み取ってもらってください（1回限り・72時間有効）。`),
+        qr,
         h('textarea', { rows: 3, readonly: true, class: 'invite-link' }, link),
-        h('button', { type: 'button', class: 'secondary', onclick: async () => { await navigator.clipboard.writeText(link).catch(() => {}); toast('コピーしました'); } }, 'リンクをコピー'));
+        h('div', { class: 'actions' },
+          h('button', { type: 'button', class: 'secondary', onclick: async () => { await navigator.clipboard.writeText(link).catch(() => {}); toast('コピーしました'); } }, 'リンクをコピー'),
+          h('button', { type: 'button', class: 'secondary', onclick: () => printQr(who, qr.innerHTML) }, '印刷する')));
       name.value = '';
     } catch (err) {
       clear(out);
@@ -546,6 +553,22 @@ function inviteForm(): HTMLElement {
     h('label', { class: 'check' }, trusted, '最初から trusted にする（投稿がすぐ公開される）'),
     h('button', { type: 'submit', class: 'primary' }, '招待リンクを作る'),
     out);
+}
+
+/** 招待QRコードを1枚だけ別の窓で開いて印刷する（休憩室に貼る・手渡しする用） */
+function printQr(who: string, svg: string): void {
+  const w = window.open('', '_blank', 'width=480,height=640');
+  if (!w) { toast('印刷用の画面を開けませんでした。ブラウザの設定を確かめてください。'); return; }
+  w.document.write(
+    `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${who}さんの招待</title>`
+    + '<style>body{font-family:system-ui,sans-serif;text-align:center;padding:24px}'
+    + 'svg{width:min(80vw,320px);height:auto}p{font-size:14px;color:#333}</style></head><body>'
+    + `<h1>${who}さん</h1>${svg}`
+    + '<p>スマホのカメラで読み取ってください（1回限り・72時間有効）</p></body></html>',
+  );
+  w.document.close();
+  w.focus();
+  w.print();
 }
 
 void boot();

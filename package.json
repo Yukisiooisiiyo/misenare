@@ -12,7 +12,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "tsx --test --test-concurrency=1 packages/search-core/test/*.test.ts apps/api/test/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 packages/*/test/*.test.ts apps/api/test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p apps/web/tsconfig.json --noEmit",
     "db:migrate": "tsx apps/api/src/cli/migrate.ts",
     "bootstrap": "tsx apps/api/src/cli/bootstrap.ts",
