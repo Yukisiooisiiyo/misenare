@@ -279,3 +279,13 @@ button.tag { cursor: pointer; }
 .confirm-q { font-size: 13px; font-weight: 700; color: var(--pending); }
 .photo-item .confirm { position: absolute; top: 4px; right: 4px; }
 .photo-item .confirm-q { background: var(--surface); padding: 2px 6px; border-radius: 3px; }
+
+/* タグの読みの確認：読みをその場で直せるようにする */
+.reading-row { flex-wrap: wrap; align-items: center; gap: 8px; }
+.reading-head { display: inline-flex; align-items: center; gap: 8px; }
+.reading-field {
+  flex: 1 1 140px; min-width: 120px; font-size: 16px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  color: var(--text); font-family: inherit;
+}
+.reading-field:focus { outline: 2px solid var(--accent); outline-offset: 1px; }

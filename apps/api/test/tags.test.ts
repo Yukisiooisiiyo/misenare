@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import type { Db } from '../src/db/db.ts';
+import { one, type Db } from '../src/db/db.ts';
 import { DomainError } from '../src/domain/actor.ts';
 import { createKnowledge } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
-import { decideRelation, listRelations, mergeTags, proposeRelation } from '../src/domain/tagAdmin.ts';
+import { confirmReading, decideRelation, listReadingProposals, listRelations, mergeTags, proposeRelation } from '../src/domain/tagAdmin.ts';
 import { exportDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -106,5 +106,73 @@ describe('端末向けのタグ辞書', () => {
   it('関係も、見えるタグどうしのものだけを返す', async () => {
     const b = await run((q) => exportDictionary(q, storeBStaff, STORE_B));
     assert.equal(b.relations.length, 0);
+  });
+});
+
+describe('タグの読みの確認', () => {
+  it('案は検索に効かず、確かめて初めて効く', async () => {
+    await db.withTenant(T, async (q) => {
+      // ナレッジを作ると、そのタグが辞書に載る（辞書は使われているタグだけを返す）
+      const k = await createKnowledge(q, tokenizer, manager, {
+        storeId: STORE_A, title: '冷蔵庫の搬入', body: '2人で運ぶ', tagNames: ['冷蔵庫'],
+      });
+      await q.query(`UPDATE knowledge SET status = 'published' WHERE id = $1`, [k.id]);
+      const { id } = await one<{ id: string }>(q,
+        `UPDATE hashtags SET reading_proposed = 'レイゾウコ' WHERE name = '冷蔵庫' RETURNING id`);
+
+      // 確かめる前は reading が空なので、辞書には読みが入らない＝かなでは引けない
+      const before = await exportDictionary(q, manager, STORE_A);
+      assert.equal(before.tags.find((t) => t.name === '冷蔵庫')?.reading, null, '確かめる前に読みが効いている');
+
+      const pending = await listReadingProposals(q, manager);
+      assert.deepEqual(pending.map((p) => [p.name, p.proposed]), [['冷蔵庫', 'レイゾウコ']]);
+
+      await confirmReading(q, manager, id, 'レイゾウコ');
+      const after = await exportDictionary(q, manager, STORE_A);
+      assert.equal(after.tags.find((t) => t.name === '冷蔵庫')?.reading, 'レイゾウコ');
+      assert.deepEqual(await listReadingProposals(q, manager), [], '確かめたものは確認待ちに残らない');
+    });
+  });
+
+  it('案を直して登録できる（ここが要点）', async () => {
+    await db.withTenant(T, async (q) => {
+      const { id } = await one<{ id: string }>(q,
+        `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, '下取り', 'シタトリ') RETURNING id`, [T]);
+      await confirmReading(q, manager, id, 'シタドリ');
+      const row = await one<{ reading: string | null; reading_proposed: string | null }>(q,
+        `SELECT reading, reading_proposed FROM hashtags WHERE id = $1`, [id]);
+      assert.equal(row.reading, 'シタドリ');
+      assert.equal(row.reading_proposed, null);
+    });
+  });
+
+  it('「読みなし」で確定したら、もう案を出さない', async () => {
+    await db.withTenant(T, async (q) => {
+      const { id } = await one<{ id: string }>(q,
+        `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, 'リ券', 'リケン') RETURNING id`, [T]);
+      await confirmReading(q, manager, id, null);
+      const row = await one<{ reading: string | null; checked: boolean }>(q,
+        `SELECT reading, reading_checked_at IS NOT NULL AS checked FROM hashtags WHERE id = $1`, [id]);
+      assert.equal(row.reading, null);
+      assert.equal(row.checked, true);
+      assert.deepEqual(await listReadingProposals(q, manager), []);
+    });
+  });
+
+  it('ひらがなで入れてもカタカナに直り、それ以外は断る', async () => {
+    await db.withTenant(T, async (q) => {
+      const { id } = await one<{ id: string }>(q,
+        `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, '搬入', 'ハンニュウ') RETURNING id`, [T]);
+      const r = await confirmReading(q, manager, id, 'はんにゅう');
+      assert.equal(r.reading, 'ハンニュウ');
+      await assert.rejects(confirmReading(q, manager, id, '搬入'), /カタカナ/);
+      await assert.rejects(confirmReading(q, manager, id, 'ア'.repeat(31)), /30文字/);
+    });
+  });
+
+  it('visitor は読みを確かめられない', async () => {
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(listReadingProposals(q, visitor), /trusted 以上/);
+    });
   });
 });

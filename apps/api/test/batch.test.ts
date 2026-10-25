@@ -4,7 +4,7 @@ import { runNightly, type CandidateProvider } from '../src/batch/nightly.ts';
 import type { Db } from '../src/db/db.ts';
 import { createKnowledge, listStale, verifyKnowledge } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
-import { listRelations } from '../src/domain/tagAdmin.ts';
+import { confirmReading, listReadingProposals, listRelations } from '../src/domain/tagAdmin.ts';
 import { exportDictionary } from '../src/domain/tags.ts';
 import { suggestTags, TagDictionary } from '@misenare/search-core';
 import { freshDatabase, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
@@ -76,15 +76,39 @@ describe('夜間バッチ', () => {
     assert.equal(report!.candidatesFromProviders, 1);
   });
 
-  it('読みを返せるトークナイザーなら、タグに読みを付け、かなで漢字のタグが引ける', async () => {
+  it('読みは案として置かれ、人が確かめて初めてかなで引ける', async () => {
     const readings: Record<string, string> = { キャンペーン: 'キャンペーン', エアコン: 'エアコン', クーラー: 'クーラー' };
     const withReading = Object.assign(Object.create(tokenizer), { reading: (w: string) => readings[w] ?? (w === '大型家電' ? 'オオガタカデン' : null) });
     await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '大型家電の配送', body: '2名で。', tagNames: ['#大型家電'] }));
     const [report] = await runNightly(db, withReading);
     assert.ok(report!.readingsFilled >= 1);
-    const dict = await run((q) => exportDictionary(q, trusted, STORE_A));
-    const local = new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })));
-    assert.equal(suggestTags({ input: 'おおがた', dictionary: local }).candidates[0]?.name, '大型家電');
+
+    const localDict = async () => {
+      const dict = await run((q) => exportDictionary(q, trusted, STORE_A));
+      return new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })));
+    };
+
+    // 機械の読みは外すことがあるので、確かめるまでは効かせない
+    assert.equal(suggestTags({ input: 'おおがた', dictionary: await localDict() }).candidates.length, 0,
+      '確かめていない読みが検索に効いている');
+
+    const pending = await run((q) => listReadingProposals(q, trusted));
+    const target = pending.find((p) => p.name === '大型家電');
+    assert.ok(target, `確認待ちに出ない: ${pending.map((p) => p.name).join(',')}`);
+    assert.equal(target.proposed, 'オオガタカデン');
+
+    await run((q) => confirmReading(q, trusted, target.id, target.proposed));
+    assert.equal(suggestTags({ input: 'おおがた', dictionary: await localDict() }).candidates[0]?.name, '大型家電');
+  });
+
+  it('カタカナ語は見出しと読みが同じなので、確かめずに入れてよい', async () => {
+    const withReading = Object.assign(Object.create(tokenizer), { reading: (w: string) => (w === 'キャンペーン' ? 'キャンペーン' : null) });
+    await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: 'キャンペーンの案内', body: '今月末まで。', tagNames: ['#キャンペーン'] }));
+    await runNightly(db, withReading);
+    const pending = await run((q) => listReadingProposals(q, trusted));
+    assert.ok(!pending.some((p) => p.name === 'キャンペーン'), '確かめるまでもない語が確認待ちに出ている');
+    const row = await run((q) => q.query<{ reading: string | null }>(`SELECT reading FROM hashtags WHERE name = 'キャンペーン'`));
+    assert.equal(row[0]?.reading, 'キャンペーン');
   });
 
   it('一定期間、更新も確認もされていないナレッジを見直しの一覧に出し、確認すると外れる', async () => {

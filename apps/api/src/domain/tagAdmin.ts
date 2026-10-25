@@ -4,7 +4,7 @@
 //   関係の承認・却下 … trusted 以上（visitor の提案は候補として残る）
 //   タグの統合       … administrator（店長・本部）
 
-import { normalizeTagName, normalizeText, type Tokenizer } from '@misenare/search-core';
+import { hiraToKata, normalizeTagName, normalizeText, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -164,4 +164,75 @@ export async function mergeTags(db: Db, tokenizer: Tokenizer, actor: Actor, from
   for (const { knowledge_id } of affected) await indexKnowledge(db, tokenizer, knowledge_id);
   await refreshUseCounts(db, [fromId, intoId]);
   return { from: fromId, into: intoId, reindexed: affected.length };
+}
+
+// --- タグの読みの確認 ---------------------------------------------------------------
+//
+// 読みは「れいぞうこ」で #冷蔵庫 に当たるための別名になる。機械が出した読みは
+// 音読み訓読みの揺れや連濁で外すことがあるので、**人が見るまで検索には効かせない**。
+// 夜間バッチは reading_proposed に案を置くだけで、reading は人が決める。
+
+export interface ReadingProposal {
+  id: string;
+  name: string;
+  /** 機械が出した案 */
+  proposed: string;
+  /** このタグが付いているナレッジの数。多いものから確かめたい */
+  useCount: number;
+}
+
+/** 読みの案はカタカナと長音符だけ。ひらがなで来たらカタカナに直して受ける。 */
+export function normalizeReading(input: string): string {
+  const kata = hiraToKata(normalizeText(input)).replace(/\s+/g, '');
+  return kata;
+}
+
+export function validateReading(reading: string): void {
+  assert([...reading].length <= 30, 'invalid', '読みは30文字までです');
+  assert(/^[ァ-ヶー]+$/.test(reading), 'invalid', '読みはカタカナで入力してください');
+}
+
+/** 確認待ちの読み。使われている数が多い順に出す（直す価値が大きい順） */
+export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Promise<ReadingProposal[]> {
+  assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
+  const rows = await db.query<{ id: string; name: string; reading_proposed: string; use_count: number }>(
+    `SELECT id, name, reading_proposed, use_count
+       FROM hashtags
+      WHERE state = 'active' AND reading_proposed IS NOT NULL AND reading_checked_at IS NULL
+      ORDER BY use_count DESC, name
+      LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed, useCount: r.use_count }));
+}
+
+/**
+ * 読みを確定する。reading が null なら「読みなし」として確定する
+ * （以後この語に案は出さない）。どちらの場合も、もう確認待ちには出てこない。
+ */
+export async function confirmReading(
+  db: Db, actor: Actor, tagId: string, reading: string | null,
+): Promise<{ id: string; reading: string | null }> {
+  assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
+  let value: string | null = null;
+  if (reading !== null) {
+    value = normalizeReading(reading);
+    assert(value.length > 0, 'invalid', '読みを入力するか、「読みなし」を選んでください');
+    validateReading(value);
+  }
+  const rows = await db.query<{ id: string }>(
+    `UPDATE hashtags
+        SET reading = $2, reading_proposed = NULL,
+            reading_checked_at = now(), reading_checked_by = $3
+      WHERE id = $1 AND state = 'active'
+      RETURNING id`,
+    [tagId, value, actor.userId],
+  );
+  assert(rows.length === 1, 'not_found', 'タグが見つかりません');
+  return { id: tagId, reading: value };
+}
+
+/** いちど確かめた読みを直す。確認待ちに戻さず、その場で入れ替える。 */
+export async function updateReading(db: Db, actor: Actor, tagId: string, reading: string | null) {
+  return confirmReading(db, actor, tagId, reading);
 }

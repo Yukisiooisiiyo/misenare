@@ -100,6 +100,49 @@ function relationText(r: Relation): HTMLElement {
   return h('span', { class: 'relation' }, from, h('span', { class: 'hint' }, KIND_LABEL[r.kind]), tagChip(r.to_tag, { quiet: true }));
 }
 
+interface ReadingProposal { id: string; name: string; proposed: string; useCount: number }
+
+/**
+ * タグの読みの確認。
+ *
+ * 機械が出した読みは外すことがあるので、そのままでは検索に効かせない。
+ * ここで**書き換えられる形で**見せて、人が決めたものだけを登録する。
+ * 「この読みで登録しますか」を、読みを直せる入力欄と一緒に出すのが肝。
+ */
+export function readingPanel(): HTMLElement {
+  return panel('タグの読み（確認待ち）', async (body) => {
+    const rows = await api<ReadingProposal[]>('GET', '/tag-readings');
+    if (rows.length === 0) {
+      body.append(h('p', { class: 'hint' }, '確かめる読みはありません。'));
+      return;
+    }
+    body.append(
+      h('p', { class: 'hint' },
+        '読みを登録すると、かなでも引けるようになります（れいぞうこ → #冷蔵庫）。'
+        + '機械が出した案なので、違っていたら直してください。'),
+      ...countedList('確認待ち', rows, (r, remove) => {
+        const field = h('input', {
+          type: 'text', value: r.proposed, class: 'reading-field',
+          'aria-label': `#${r.name} の読み`, autocomplete: 'off', spellcheck: 'false',
+        });
+        const save = async (reading: string | null) => {
+          await api('POST', `/tag-readings/${r.id}`, { reading });
+          toast(reading === null ? '読みなしで登録しました' : `#${r.name} を「${reading}」で登録しました`);
+          remove();
+        };
+        return h('li', { class: 'row reading-row' },
+          h('span', { class: 'reading-head' },
+            h('span', { class: 'tag tag-inline' }, `#${r.name}`),
+            h('span', { class: 'hint' }, `${r.useCount}件`)),
+          field,
+          h('span', { class: 'row-actions' },
+            action('この読みで登録', 'primary small', () => save(field.value)),
+            action('読みなし', 'secondary small', () => save(null))));
+      }),
+    );
+  });
+}
+
 export function tagPanel(isAdmin: boolean): HTMLElement {
   return panel('タグ辞書', async (body) => {
     const candidates = await api<Relation[]>('GET', '/tag-relations?state=candidate');

@@ -13,6 +13,7 @@
 // kuromoji はこの環境に入れられないので、入っていなければ飛ばし、CI で必ず動かす。
 
 import assert from 'node:assert/strict';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { createMorphologicalTokenizer } from '../src/search/kuromojiTokenizer.ts';
 
@@ -62,11 +63,20 @@ const ANSWERS: Array<[word: string, reading: string]> = [
  */
 const AMBIGUOUS = ['食洗機', 'テレビ台', 'リサイクル券', '収集運搬料', 'ポイント還元', '家電リサイクル法', '取付', '下取', 'リ券'];
 
-/** GitHub Actions の注記として出す（成功しても数字が残るように） */
-function notice(title: string, body: string): void {
-  if (!process.env.GITHUB_ACTIONS) return;
-  const esc = body.replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A');
-  console.log(`::notice title=${title}::${esc}`);
+/**
+ * 測定の結果をファイルに残す。
+ *
+ * 直に ::notice:: を出すと、TAP レポーターが行頭に印を付けるので
+ * GitHub に拾われない。ファイルに書いて、次の手順から出す。
+ */
+const REPORT = process.env.READING_BENCH_OUT ?? 'reading-bench.md';
+let started = false;
+function record(title: string, body: string): void {
+  console.log(body);
+  if (!process.env.GITHUB_ACTIONS && !process.env.READING_BENCH_OUT) return;
+  const block = `## ${title}\n\n\`\`\`\n${body}\n\`\`\`\n\n`;
+  if (started) appendFileSync(REPORT, block);
+  else { writeFileSync(REPORT, block); started = true; }
 }
 
 describe('タグの読みの自動付与：精度の測定', { skip: kuromoji ? false : 'kuromoji が入っていません' }, () => {
@@ -100,8 +110,7 @@ describe('タグの読みの自動付与：精度の測定', { skip: kuromoji ? 
       ...(missing.length > 0 ? ['', `読みを返さなかった語（登録されないので実害なし）: ${missing.join('、')}`] : []),
     ].join('\n');
 
-    console.log(report);
-    notice('タグの読み：精度', report);
+    record('タグの読み：精度', report);
 
     // 衝突はゼロでなければならない。1件でもあれば、検索が別の語に当たる。
     assert.equal(collisions.length, 0, `誤った読みが他の語とぶつかった: ${collisions.map(([w, g]) => `${w}→${g}`).join(', ')}`);
@@ -113,8 +122,7 @@ describe('タグの読みの自動付与：精度の測定', { skip: kuromoji ? 
   it('読みが揺れる語で、どう振る舞うかを残す', () => {
     const rows = AMBIGUOUS.map((w) => `  ${w}: ${kuromoji!.reading(w) ?? '（読みを返さない）'}`);
     const report = ['読みが揺れる語・辞書に無さそうな語:', ...rows].join('\n');
-    console.log(report);
-    notice('タグの読み：揺れる語', report);
+    record('タグの読み：揺れる語', report);
     // 合否には使わない。人が見て判断するための記録。
     assert.ok(true);
   });

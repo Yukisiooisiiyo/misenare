@@ -95,6 +95,9 @@ jobs:
         run: |
           set -o pipefail
           npx tsx --test --test-reporter=tap apps/api/test/readingBench.test.ts | tee reading-bench.tap
+      - name: Publish reading accuracy
+        if: always()
+        run: node .github/scripts/notice-file.mjs reading-bench.md 'タグの読みの精度'
       - name: Report failures as annotations
         if: failure()
         run: |

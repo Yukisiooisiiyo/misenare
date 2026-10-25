@@ -410,6 +410,21 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   if (method === 'GET' && parts[0] === 'stores' && ['pending', 'pending-products', 'imports', 'users'].includes(parts[2] ?? '')) {
     return (parts[2] === 'pending-products' ? { products: [], changes: [] } : []) as T;
   }
+  if (method === 'GET' && rawPath.startsWith('/tag-readings')) {
+    return readingProposals as T;
+  }
+  if (method === 'POST' && parts[0] === 'tag-readings') {
+    const i = readingProposals.findIndex((r) => r.id === parts[1]);
+    if (i >= 0) {
+      const name = readingProposals[i]!.name;
+      readingProposals.splice(i, 1);
+      const reading = typeof body?.reading === 'string' ? body.reading : null;
+      // 本物と同じで、確かめた読みだけがタグに入る
+      const tag = tags.find((t) => t.name === name);
+      if (tag) tag.reading = reading;
+    }
+    return { ok: true } as T;
+  }
   if (method === 'GET' && rawPath.startsWith('/tag-relations')) {
     const state = params.get('state');
     if (state !== 'approved') return [] as T;
@@ -429,6 +444,16 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
 
   throw new ApiError(400, 'デモではこの操作はできません。本物の環境でお試しください。');
 }
+
+/**
+ * 読みの確認待ち。機械が出した案という設定で、**わざと1つ間違えてある**
+ * （下取り → シタトリ）。直して登録できることを触って確かめられるようにするため。
+ */
+const readingProposals: Array<{ id: string; name: string; proposed: string; useCount: number }> = [
+  { id: 'da000000-0000-0000-0000-000000000003', name: '引き取り', proposed: 'ヒキトリ', useCount: 3 },
+  { id: 'da000000-0000-0000-0000-000000000014', name: '設置', proposed: 'セッチ', useCount: 2 },
+  { id: 'ea000000-0000-0000-0000-000000000001', name: '下取り', proposed: 'シタトリ', useCount: 1 },
+];
 
 /** 画面から参照する、デモの印 */
 export const IS_DEMO = true;
