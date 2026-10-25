@@ -10,6 +10,8 @@ export interface Database {
    * 本番（pg）では BEGIN … COMMIT の中で `app.tenant_id` を設定し、行レベルセキュリティを効かせる。
    */
   withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T>;
+  /** テナントを設定せずに実行する（起動時の確認やマイグレーション用） */
+  raw(sql: string, params?: readonly unknown[]): Promise<unknown[]>;
   close(): Promise<void>;
 }
 

@@ -9,7 +9,7 @@ import {
   type TagRelation,
 } from '@misenare/search-core';
 import type { Db } from '../db/db.ts';
-import { assert, isTrusted, type Actor } from './actor.ts';
+import { assert, canAccessStore, isTrusted, type Actor } from './actor.ts';
 
 interface TagRow { id: string; name: string; reading: string | null; use_count: number; state: string }
 
@@ -96,33 +96,56 @@ export async function activateTags(db: Db, tagIds: string[]): Promise<void> {
 }
 
 /**
- * 端末に同期するタグ辞書。タグ・承認済みの関係・共起スコアを返し、候補表示は端末内で行う。
- * 共起は「同じナレッジに一緒に付いた」回数から NPMI で計算する。
+ * 端末に同期するタグ辞書。候補表示と「もしかして」は端末内で計算する。
+ * 店舗の範囲に絞る：その店舗から見えるナレッジ（自店舗＋全店共通の公開中）と、有効な商品に付いたタグだけを返す。
+ * 他店舗だけで使われているタグ名や、その使われ方（共起）は返さない。
+ * 使用回数と共起（NPMI）も、この範囲のナレッジだけで数える。
  */
-export async function exportDictionary(db: Db) {
-  const tags = await db.query<TagRow>(
-    `SELECT id, name, reading, use_count, state FROM hashtags WHERE state = 'active' ORDER BY use_count DESC`,
+export async function exportDictionary(db: Db, actor: Actor, storeId: string) {
+  assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗の辞書は取得できません');
+  const VISIBLE = `
+    SELECT kt.knowledge_id, kt.hashtag_id FROM knowledge_tags kt
+      JOIN knowledge k ON k.id = kt.knowledge_id
+     WHERE k.status = 'published' AND (k.scope = 'tenant' OR k.store_id = $1)`;
+  const tags = await db.query<{ id: string; name: string; reading: string | null; n: number }>(
+    `WITH v AS (${VISIBLE}),
+          used AS (
+            SELECT hashtag_id, count(*)::int AS n FROM v GROUP BY hashtag_id
+            UNION ALL
+            SELECT pt.hashtag_id, 0 FROM product_tags pt JOIN products p ON p.id = pt.product_id WHERE p.state = 'active'
+          )
+     SELECT h.id, h.name, h.reading, max(u.n)::int AS n
+       FROM used u JOIN hashtags h ON h.id = u.hashtag_id
+      WHERE h.state = 'active'
+      GROUP BY h.id, h.name, h.reading
+      ORDER BY n DESC, h.name`,
+    [storeId],
   );
+  const visibleIds = tags.map((t) => t.id);
   const relations = await db.query(
-    `SELECT kind, from_tag_id, from_text, to_tag_id FROM tag_relations WHERE state = 'approved'`,
+    `SELECT kind, from_tag_id, from_text, to_tag_id FROM tag_relations
+      WHERE state = 'approved' AND to_tag_id = ANY($1::uuid[])
+        AND (from_tag_id IS NULL OR from_tag_id = ANY($1::uuid[]))`,
+    [visibleIds],
   );
-  const total = (await db.query<{ n: number }>(`SELECT count(DISTINCT knowledge_id)::int AS n FROM knowledge_tags`))[0]!.n;
-  const perTag = await db.query<{ hashtag_id: string; n: number }>(
-    `SELECT hashtag_id, count(*)::int AS n FROM knowledge_tags GROUP BY hashtag_id`,
-  );
+  const total = (await db.query<{ n: number }>(
+    `WITH v AS (${VISIBLE}) SELECT count(DISTINCT knowledge_id)::int AS n FROM v`, [storeId],
+  ))[0]!.n;
   const pairs = await db.query<{ a: string; b: string; n: number }>(
-    `SELECT x.hashtag_id AS a, y.hashtag_id AS b, count(*)::int AS n
-       FROM knowledge_tags x JOIN knowledge_tags y
-         ON x.knowledge_id = y.knowledge_id AND x.hashtag_id < y.hashtag_id
+    `WITH v AS (${VISIBLE})
+     SELECT x.hashtag_id AS a, y.hashtag_id AS b, count(*)::int AS n
+       FROM v x JOIN v y ON x.knowledge_id = y.knowledge_id AND x.hashtag_id < y.hashtag_id
       GROUP BY 1, 2`,
+    [storeId],
   );
   const npmi = computeNpmi(
     total,
-    new Map(perTag.map((r) => [r.hashtag_id, r.n])),
+    new Map(tags.map((t) => [t.id, t.n])),
     new Map(pairs.map((p) => [pairKey(p.a, p.b), p.n])),
   );
   return {
-    tags: tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.use_count })),
+    storeId,
+    tags: tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.n })),
     relations,
     cooccurrence: Object.fromEntries([...npmi].filter(([, v]) => v > 0).map(([k, v]) => [k, Math.round(v * 1000) / 1000])),
   };

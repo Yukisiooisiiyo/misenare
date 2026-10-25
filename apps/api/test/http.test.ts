@@ -90,7 +90,7 @@ describe('HTTP API', () => {
   });
 
   it('端末に配るタグ辞書を返す', async () => {
-    const r = await call(visitor, 'GET', '/tags/dictionary');
+    const r = await call(visitor, 'GET', `/stores/${STORE_A}/tags/dictionary`);
     assert.ok(r.body.tags.some((t: { name: string }) => t.name === '電子レンジ'));
     assert.ok(Object.keys(r.body.cooccurrence).length > 0);
   });

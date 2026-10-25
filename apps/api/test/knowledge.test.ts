@@ -44,7 +44,7 @@ describe('投稿と承認（visitor / trusted）', () => {
     }));
     assert.equal(k.published, false);
     assert.equal((await run((q) => search(q, tokenizer, trusted, STORE_A, 'リサイクル'))).hits.length, 0);
-    const dict = await run((q) => exportDictionary(q));
+    const dict = await run((q) => exportDictionary(q, trusted, STORE_A));
     assert.ok(!dict.tags.some((t) => t.name === 'リサイクル'), '承認前のタグは辞書に入らない');
 
     const pending = await run((q) => listPending(q, trusted, STORE_A));
@@ -53,7 +53,7 @@ describe('投稿と承認（visitor / trusted）', () => {
 
     await run((q) => approveVersion(q, tokenizer, trusted, k.id, 1));
     assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, 'リサイクル'))), [k.id]);
-    const dict2 = await run((q) => exportDictionary(q));
+    const dict2 = await run((q) => exportDictionary(q, trusted, STORE_A));
     assert.ok(dict2.tags.some((t) => t.name === 'リサイクル'), '承認と同時にタグも有効になる');
   });
 

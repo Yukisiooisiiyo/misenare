@@ -17,12 +17,11 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: misenare
-          POSTGRES_PASSWORD: misenare
-          POSTGRES_DB: misenare_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
         ports: ['5432:5432']
         options: >-
-          --health-cmd "pg_isready -U misenare"
+          --health-cmd "pg_isready -U postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -36,6 +35,13 @@ jobs:
           node-version: 22
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      # アプリは一般ロールで接続する（スーパーユーザーは行レベルセキュリティを素通りするため）
+      - name: Create application role and database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "CREATE ROLE misenare LOGIN PASSWORD 'misenare' NOSUPERUSER NOBYPASSRLS"
+          psql -h localhost -U postgres -c "CREATE DATABASE misenare_test OWNER misenare"
       - run: npm install
       - run: npm run typecheck
       - name: Test

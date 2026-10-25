@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { SegmenterTokenizer } from '@misenare/search-core';
 import { migrate } from '../src/cli/migrate.ts';
 import type { Database } from '../src/db/db.ts';
+import { assertRlsEnforced } from '../src/db/safety.ts';
 import { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import type { Actor } from '../src/domain/actor.ts';
 
@@ -44,6 +45,8 @@ export async function freshDatabase(): Promise<TestDatabase> {
   execFileSync('psql', [DATABASE_URL, '-X', '-q', '-c', 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'], { stdio: 'pipe' });
   migrate(DATABASE_URL);
   const db = await openTestDatabase(DATABASE_URL);
+  // スーパーユーザーで接続すると RLS が効かず、他社のデータが見えるテストが「通ってしまう」ので止める
+  await assertRlsEnforced((sql) => db.raw(sql));
   await db.raw(`INSERT INTO tenants (id, name) VALUES ($1, 'テスト電機'), ($2, '別の会社')`, [T, OTHER_T]);
   await db.withTenant(T, async (q) => {
     await q.query(`INSERT INTO stores (id, tenant_id, name) VALUES ($1, $3, '本店'), ($2, $3, '駅前店')`, [STORE_A, STORE_B, T]);

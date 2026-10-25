@@ -29,6 +29,7 @@ import {
   type ProductPatch,
 } from '../domain/products.ts';
 import { recordSearchFeedback, search, zeroHitQueries } from '../domain/search.ts';
+import { decideRelation, deleteRelation, listRelations, mergeTags, proposeRelation, type RelationInput } from '../domain/tagAdmin.ts';
 import { exportDictionary } from '../domain/tags.ts';
 import {
   acceptInvitation,
@@ -151,6 +152,20 @@ function userPatchBody(v: unknown): UserPatch {
   return patch;
 }
 
+function relationBody(v: unknown): RelationInput {
+  const b = (v ?? {}) as Record<string, unknown>;
+  if (b.kind !== 'synonym' && b.kind !== 'includes' && b.kind !== 'alias') throw new HttpError(400, 'kind は synonym・includes・alias です');
+  if (typeof b.toTag !== 'string') throw new HttpError(400, 'toTag（タグ名）が必要です');
+  if (b.kind === 'alias' && typeof b.fromText !== 'string') throw new HttpError(400, 'alias には fromText（単語）が必要です');
+  if (b.kind !== 'alias' && typeof b.fromTag !== 'string') throw new HttpError(400, 'fromTag（タグ名）が必要です');
+  return {
+    kind: b.kind,
+    toTag: b.toTag,
+    ...(typeof b.fromTag === 'string' ? { fromTag: b.fromTag } : {}),
+    ...(typeof b.fromText === 'string' ? { fromText: b.fromText } : {}),
+  };
+}
+
 function intParam(v: string | undefined, name: string): number {
   const n = Number(v);
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, `${name} が正しくありません`);
@@ -178,7 +193,7 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // 端末に同期するタグ辞書（候補表示と「もしかして」は端末内で計算する）
-  r.get('/tags/dictionary', async (c) => json(await exportDictionary(c.db)));
+  r.get('/stores/:storeId/tags/dictionary', async (c, _req, p) => json(await exportDictionary(c.db, c.actor, p.storeId!)));
 
   // --- バーコード ----------------------------------------------------------
   r.get('/stores/:storeId/barcode/:jan', async (c, _req, p) =>
@@ -224,6 +239,25 @@ function routes(): Router<Ctx> {
     json(await rejectVersion(c.db, c.actor, p.id!, intParam(p.version, 'version'))));
   r.post('/knowledge/:id/versions/:version/revert', async (c, _req, p) =>
     json(await revertToVersion(c.db, c.tokenizer, c.actor, p.id!, intParam(p.version, 'version'))));
+
+  // --- タグ辞書の管理 -------------------------------------------------------
+  r.get('/tag-relations', async (c, req) => {
+    const state = new URL(req.url).searchParams.get('state') ?? 'candidate';
+    if (!['candidate', 'approved', 'rejected'].includes(state)) throw new HttpError(400, 'state は candidate・approved・rejected です');
+    return json(await listRelations(c.db, c.actor, state as 'candidate'));
+  });
+  r.post('/tag-relations', async (c, req) => json(await proposeRelation(c.db, c.actor, relationBody(await readJson(req))), 201));
+  r.post('/tag-relations/:relationId/approve', async (c, _req, p) => json(await decideRelation(c.db, c.actor, p.relationId!, 'approved')));
+  r.post('/tag-relations/:relationId/reject', async (c, _req, p) => json(await decideRelation(c.db, c.actor, p.relationId!, 'rejected')));
+  r.delete('/tag-relations/:relationId', async (c, _req, p) => {
+    await deleteRelation(c.db, c.actor, p.relationId!);
+    return json({ ok: true });
+  });
+  r.post('/tags/merge', async (c, req) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.from !== 'string' || typeof b.into !== 'string') throw new HttpError(400, 'from と into（タグ名）が必要です');
+    return json(await mergeTags(c.db, c.tokenizer, c.actor, b.from, b.into));
+  });
 
   // --- 利用者・端末 ---------------------------------------------------------
   r.get('/me', async (c) => json(await me(c.db, c.actor)));

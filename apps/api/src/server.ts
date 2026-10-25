@@ -6,6 +6,7 @@
 
 import { SegmenterTokenizer } from '@misenare/search-core';
 import type { Database } from './db/db.ts';
+import { assertRlsEnforced } from './db/safety.ts';
 import { createApp } from './http/app.ts';
 import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
@@ -24,6 +25,8 @@ async function openDatabase(): Promise<Database> {
 }
 
 const database = await openDatabase();
+// 行レベルセキュリティを素通りするロール（スーパーユーザーなど）では起動しない
+await assertRlsEnforced((sql) => database.raw(sql));
 const app = createApp({
   database,
   // MISENARE_DEV_AUTH=1 のときだけ開発用のヘッダー認証（本番環境では作れない）
