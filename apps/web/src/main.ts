@@ -4,6 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
+import { productPanel, staffPanel, tagPanel } from './manage.ts';
 
 const root = document.getElementById('app')!;
 let me: Me | null = null;
@@ -506,7 +507,8 @@ async function renderManage(): Promise<void> {
         return row;
       })),
     );
-    if (isAdmin()) section.append(inviteForm());
+    section.append(h('h2', {}, 'そのほかの管理'), productPanel(storeId()), tagPanel(isAdmin()));
+    if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
   }
