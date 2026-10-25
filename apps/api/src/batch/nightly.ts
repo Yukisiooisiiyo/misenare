@@ -17,6 +17,7 @@ import { indexKnowledge } from '../domain/indexer.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
 import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
+import { sweepChallenges } from '../domain/passkeys.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
 import type { Storage } from '../storage/storage.ts';
 
@@ -150,6 +151,7 @@ async function reindex(db: Db, tokenizer: Tokenizer, limit: number): Promise<num
 export async function runNightly(database: Database, tokenizer: Tokenizer, options: BatchOptions = {}): Promise<TenantReport[]> {
   // 会社に属さない片付け（試行回数の記録）は、会社ごとの処理の前に1回だけ
   await sweepRateLimits((sql, params) => database.raw(sql, params)).catch((err) => console.error('rate_limits の片付けに失敗', err));
+  await sweepChallenges((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの合言葉の片付けに失敗', err));
   const tenants = (await database.raw(`SELECT id FROM tenants ORDER BY created_at`)) as Array<{ id: string }>;
   const reports: TenantReport[] = [];
   for (const { id: tenantId } of tenants) {

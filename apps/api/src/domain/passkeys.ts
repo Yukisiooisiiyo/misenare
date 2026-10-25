@@ -99,10 +99,16 @@ export interface RegisterOptions {
   excludeCredentials: Array<{ type: 'public-key'; id: string }>;
 }
 
-/** 登録の準備。ログイン済みの端末から呼ぶ */
+/**
+ * 登録の準備。ログイン済みの端末から呼ぶ。
+ *
+ * 合言葉もこの取引（トランザクション）の中で書く。接続をまたぐ raw を
+ * 取引の中から呼ぶと、psql アダプタでは順番待ちが噛み合わず止まる。
+ */
 export async function startRegistration(
-  db: Db, raw: Raw, actor: Actor, site: SiteConfig, displayName: string,
+  db: Db, actor: Actor, site: SiteConfig, displayName: string,
 ): Promise<RegisterOptions> {
+  const raw: Raw = (sql, params) => db.query(sql, params);
   const existing = await db.query<{ credential_id: Buffer }>(
     `SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 AND disabled_at IS NULL`, [actor.userId],
   );
@@ -140,9 +146,10 @@ function toBuffer(value: unknown): Buffer {
 }
 
 export async function finishRegistration(
-  db: Db, raw: Raw, actor: Actor, site: SiteConfig,
+  db: Db, actor: Actor, site: SiteConfig,
   input: { clientDataJSON: string; attestationObject: string; name?: string },
 ) {
+  const raw: Raw = (sql, params) => db.query(sql, params);
   const clientDataJSON = base64url.decode(input.clientDataJSON);
   const challenge = readChallenge(clientDataJSON);
   const owner = await takeChallenge(raw, challenge, 'register');

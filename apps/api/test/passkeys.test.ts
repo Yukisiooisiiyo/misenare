@@ -24,9 +24,9 @@ const raw = (sql: string, params?: readonly unknown[]) => db.raw(sql, params);
 /** 登録を一通り行う */
 async function register(actor = trusted, name = 'テストの端末') {
   const device = fakeAuthenticator();
-  const options = await db.withTenant(T, (q) => startRegistration(q, raw, actor, SITE, 'テスト'));
+  const options = await db.withTenant(T, (q) => startRegistration(q, actor, SITE, 'テスト'));
   const created = device.create({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
-  const saved = await db.withTenant(T, (q) => finishRegistration(q, raw, actor, SITE, { ...created, name }));
+  const saved = await db.withTenant(T, (q) => finishRegistration(q, actor, SITE, { ...created, name }));
   return { device, saved, options };
 }
 
@@ -190,8 +190,10 @@ describe('パスキーの登録と、パスキーで入る', () => {
     );
     await db.withTenant(T, async (q) => {
       assert.equal((await listPasskeys(q, trusted)).find((p) => p.id === saved.id)!.disabled, true);
-      // 止まったあとは、正しい回数でも入れない
-      const third = await startLogin(raw, SITE);
+    });
+    // 止まったあとは、正しい回数でも入れない
+    const third = await startLogin(raw, SITE);
+    {
       await assert.rejects(
         loginWithPasskey(db, SITE, {
           ...device.get({ challenge: third.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId, signCount: 99 }),
@@ -199,7 +201,7 @@ describe('パスキーの登録と、パスキーで入る', () => {
         }),
         /登録されていません/,
       );
-    });
+    }
   });
 
   it('無効にされた利用者のパスキーでは入れない', async () => {

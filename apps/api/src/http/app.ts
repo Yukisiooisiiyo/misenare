@@ -98,7 +98,6 @@ interface Ctx {
   tokenizer: Tokenizer;
   storage: Storage;
   /** 会社に属さないテーブル（合言葉など）を触るため */
-  raw: (sql: string, params?: readonly unknown[]) => Promise<unknown[]>;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -434,7 +433,7 @@ function routes(): Router<Ctx> {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     const name = typeof b.name === 'string' ? b.name : '';
     const who = await me(c.db, c.actor);
-    return json(await startRegistration(c.db, c.raw, c.actor, site, name || who.name));
+    return json(await startRegistration(c.db, c.actor, site, name || who.name));
   });
   r.post('/passkeys/register/finish', async (c, req) => {
     const site = requireSite();
@@ -442,7 +441,7 @@ function routes(): Router<Ctx> {
     for (const key of ['clientDataJSON', 'attestationObject']) {
       if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
     }
-    return json(await finishRegistration(c.db, c.raw, c.actor, site, {
+    return json(await finishRegistration(c.db, c.actor, site, {
       clientDataJSON: b.clientDataJSON as string,
       attestationObject: b.attestationObject as string,
       ...(typeof b.name === 'string' ? { name: b.name } : {}),
@@ -550,7 +549,7 @@ export function createApp(deps: AppDeps) {
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
       matched.handler(
-        { actor, identity, db, tokenizer: deps.tokenizer, storage, raw: (sql, params) => deps.database.raw(sql, params) },
+        { actor, identity, db, tokenizer: deps.tokenizer, storage },
         req,
         matched.params,
       ),
