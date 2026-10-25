@@ -13,6 +13,9 @@ function literal(v: unknown): string {
   }
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
   if (v instanceof Date) return quote(v.toISOString());
+  // bytea は16進の書き方で渡す（standard_conforming_strings が on なので \x はそのまま届く）
+  if (Buffer.isBuffer(v)) return quote(`\\x${v.toString('hex')}`);
+  if (v instanceof Uint8Array) return quote(`\\x${Buffer.from(v).toString('hex')}`);
   if (Array.isArray(v)) {
     const items = v.map((x) => (x === null ? 'NULL' : `"${String(x).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`));
     return quote(`{${items.join(',')}}`);

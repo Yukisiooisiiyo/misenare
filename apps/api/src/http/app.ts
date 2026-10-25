@@ -39,6 +39,16 @@ import {
 } from '../domain/handovers.ts';
 import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
 import {
+  deletePasskey,
+  finishRegistration,
+  listPasskeys,
+  loginWithPasskey,
+  siteConfigFromEnv,
+  startLogin,
+  startRegistration,
+  type SiteConfig,
+} from '../domain/passkeys.ts';
+import {
   ackNotice,
   createNotice,
   deleteNotice,
@@ -85,6 +95,8 @@ interface Ctx {
   db: Db;
   tokenizer: Tokenizer;
   storage: Storage;
+  /** 会社に属さないテーブル（合言葉など）を触るため */
+  raw: (sql: string, params?: readonly unknown[]) => Promise<unknown[]>;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -229,6 +241,17 @@ function intParam(v: string | undefined, name: string): number {
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, `${name} が正しくありません`);
   return n;
 }
+
+/** パスキーの設定。WEBAUTHN_RP_ID を決めていなければ使えない */
+let cachedSite: SiteConfig | null | undefined;
+function requireSite(): SiteConfig {
+  if (cachedSite === undefined) cachedSite = siteConfigFromEnv();
+  if (!cachedSite) throw new HttpError(404, 'この環境ではパスキーを使えません（WEBAUTHN_RP_ID が未設定）');
+  return cachedSite;
+}
+
+/** テスト用：設定を読み直す */
+export function resetPasskeySite(): void { cachedSite = undefined; }
 
 function routes(): Router<Ctx> {
   const r = new Router<Ctx>();
@@ -395,6 +418,29 @@ function routes(): Router<Ctx> {
     return json(await mergeTags(c.db, c.tokenizer, c.actor, b.from, b.into));
   });
 
+  // --- パスキー -------------------------------------------------------------
+  r.post('/passkeys/register/start', async (c, req) => {
+    const site = requireSite();
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const name = typeof b.name === 'string' ? b.name : '';
+    const who = await me(c.db, c.actor);
+    return json(await startRegistration(c.db, c.raw, c.actor, site, name || who.name));
+  });
+  r.post('/passkeys/register/finish', async (c, req) => {
+    const site = requireSite();
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    for (const key of ['clientDataJSON', 'attestationObject']) {
+      if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+    }
+    return json(await finishRegistration(c.db, c.raw, c.actor, site, {
+      clientDataJSON: b.clientDataJSON as string,
+      attestationObject: b.attestationObject as string,
+      ...(typeof b.name === 'string' ? { name: b.name } : {}),
+    }), 201);
+  });
+  r.get('/passkeys', async (c) => json(await listPasskeys(c.db, c.actor)));
+  r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
+
   // --- 利用者・端末 ---------------------------------------------------------
   r.get('/me', async (c) => json(await me(c.db, c.actor)));
   r.post('/auth/logout', async (c) => {
@@ -493,7 +539,11 @@ export function createApp(deps: AppDeps) {
     if (!actor) throw new HttpError(401, 'この利用者は無効です');
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
-      matched.handler({ actor, identity, db, tokenizer: deps.tokenizer, storage }, req, matched.params),
+      matched.handler(
+        { actor, identity, db, tokenizer: deps.tokenizer, storage, raw: (sql, params) => deps.database.raw(sql, params) },
+        req,
+        matched.params,
+      ),
     );
   }
 
