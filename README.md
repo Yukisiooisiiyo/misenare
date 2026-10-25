@@ -3,27 +3,33 @@
 店舗スタッフ向けのナレッジSaaS。接客の合間にスマホで「この店のやり方」を検索できるようにする。
 仕様書：[店舗スタッフ向けナレッジSaaS 企画・仕様書](https://claude.ai/artifact/41XXzyVhS9KmMe6FnCFJBF)
 
-入っているもの：検索の中核、API、招待QRによる認証、夜間バッチ、スマホのブラウザで使う Web 版。
+入っているもの：検索の中核、API、招待QRによる認証、夜間バッチ、スマホのブラウザで使う Web 版、
+写真、既存マニュアルの取り込み、承認・管理の画面、Docker での配置。
 
 ## 構成
 
 ```
 packages/search-core   検索の中核（外部依存なし。サーバーと端末の両方で使う）
   normalize.ts           NFKC・小文字化、型番（KJ-55X85L など）を1語として取り出す
-  tokenizer.ts           単語分割（Intl.Segmenter）。kuromoji 等に差し替え可能（読みも返せる）
+  tokenizer.ts           単語分割（Intl.Segmenter）。kuromoji に差し替え可能（読みも返せる）
   tagDictionary.ts       タグ名・別名の最長一致、同義（双方向）・包含（一方向）の展開
   analyzer.ts            文書と検索文を同じ規則で検索語にする
   bm25f.ts               BM25F（タグ×3・タイトル×2・本文×1、長さ補正と飽和）
   suggest.ts             1文字ごとのタグ候補、「もしかして」、共起スコア（NPMI）
   kana.ts                ひらがな・ローマ字 → カタカナ（「てれ」「tere」で #テレビ）
+packages/qr            QR コードの作成（外部依存なし。招待リンクを紙や画面で渡すため）
 apps/api               API サーバー（Node.js 標準の Request/Response、依存は pg のみ）
-  domain/                ナレッジ（版・承認）、検索、商品（バーコード）、タグ辞書の管理、招待と利用者
-  http/                  ルーティング、認証、Web 版の配信、node:http アダプタ
+  domain/                ナレッジ（版・承認）、検索、商品（バーコード）、タグ辞書の管理、招待と利用者、写真、取り込み
+  http/                  ルーティング、認証、試行回数の制限、Web 版の配信、node:http アダプタ
   db/                    pg 実装（本番）と psql 実装（開発・テスト用）、RLS の安全確認
+  storage/               写真の保存先（ローカルのディレクトリ／S3。署名付きURLは依存なしで作る）
+  import/                既存マニュアルの読み取り（ZIP・Word・Excel・CSV・テキスト）
+  search/                形態素解析（kuromoji）での分割。入っていれば使う
   batch/nightly.ts       夜間バッチ
   cli/                   マイグレーション、最初の会社の作成、デモデータ
 apps/web               Web 版（依存なし。esbuild で1ファイルにまとめ、API が /app/ で配信）
 db/migrations          PostgreSQL 16 のスキーマ（行レベルセキュリティ付き）
+docs/deploy.md         本番に出すまでの手引き（環境変数・AWS・バックアップ）
 ```
 
 ## はじめかた
@@ -72,6 +78,8 @@ npm run bootstrap -- --tenant "会社名" --store "最初の店舗" --admin "本
 - 店長は自店舗のスタッフだけを招待でき、店長・本部の権限は付けられない（本部のみ）。
 - 無効化した利用者の端末は即座に使えなくなる。180日使われなかった端末セッションは無効。
 - 開発用に `MISENARE_DEV_AUTH=1` でヘッダー認証（`x-dev-tenant-id` / `x-dev-user-id`）を使える。本番環境では作れない。
+- 招待の受け取りは同じ接続元から10分に10回まで。無効なトークンが30回続いた接続元は、正しいトークンでも一時的に止める。
+- 招待はその場で QR コードになる。スタッフのスマホのカメラで読んでもらうか、印刷して渡す。
 
 ## 検索の仕組み（要点）
 
@@ -110,6 +118,7 @@ npm run bootstrap -- --tenant "会社名" --store "最初の店舗" --admin "本
 3. 外部の候補提供元（Sudachi の同義語辞書・日本語WordNet・単語ベクトル）を `CandidateProvider` で差し込める
 4. 公開ナレッジを索引し直す（未索引を優先、1社あたり上限つき）、タグの使用回数を数え直す
 5. トークナイザーが読みを返せるなら、タグに読みを付ける
+6. 送りかけのまま残った写真を片付ける
 
 ## API
 
@@ -149,21 +158,57 @@ Web 版からは `/api` を付けて呼ぶ（例：`/api/me`）。付けずに�
 | POST | `/tag-relations/:id/approve` `reject` | タグの関係の承認・却下 |
 | DELETE | `/tag-relations/:id` | タグの関係の削除 |
 | POST | `/tags/merge` | タグの統合（administrator） |
+| GET / POST | `/knowledge/:id/photos` | 写真の一覧／送り先の案内（枠を作る） |
+| PUT | `/photos/:id/data` | 写真の中身（保存先がローカルのときだけ。S3 なら端末から直接 S3 へ） |
+| POST | `/photos/:id/complete` | 送り終わりの記録。ここで一覧に出る |
+| GET | `/photos/:id/data` | 写真を見る（権限を確かめ、S3 なら署名付きURLに飛ばす） |
+| DELETE | `/photos/:id` | 写真を消す（付けた本人と承認できる人） |
+| POST | `/stores/:storeId/imports?name=` | 既存マニュアルから下書きをまとめて作る（trusted 以上） |
+| GET | `/stores/:storeId/imports` | 取り込んだ資料と、残っている下書きの数 |
+| POST | `/imports/:id/discard` | まだ承認していない下書きをまとめて取り下げる |
+
+## 写真
+
+- 端末で長辺 1600px に縮めてから送る（通信量と待ち時間を減らすため）。1件あたり8枚まで。
+- 保存先は差し替えられる。`S3_BUCKET` が無ければサーバーのディレクトリ（`PHOTO_DIR`）、
+  あれば S3 で、中身は端末と S3 が直接やり取りする（API を通らない）。S3 の署名付きURL は依存なしで作っている。
+- 見るときもナレッジと同じ権限を確かめる。未公開のナレッジの写真は、書いた人と承認できる人だけ。
+
+## 既存マニュアルの取り込み
+
+`.txt` `.md` `.csv` `.tsv` `.docx` `.xlsx` を読んで、承認待ちの下書きをまとめて作る（trusted 以上）。
+
+- Word は見出しスタイル、テキストと Markdown は見出し（`#` ■ 【】 第◯章）で区切る。見出しが無ければ空行で区切る。
+- Excel と CSV は1行1件。「タイトル」「本文」の列があればそれを使い、無ければ1列目をタイトルにする。
+- Word と Excel は中身が ZIP なので、中央ディレクトリだけを読む小さな ZIP 読み取りを自前で持っている（依存は増やさない）。
+- 取り込んだ人が trusted でも自動では公開しない。古い記述がそのまま検索に出ないよう、1件ずつ人が確かめる。
+- PDF はまだ読めない。
+
+## 本番に出す
+
+```bash
+docker build -t misenare .
+docker run --rm -e DATABASE_URL=… misenare npx tsx apps/api/src/cli/migrate.ts
+docker run -d -p 8787:8787 -e DATABASE_URL=… -e TRUST_PROXY=1 misenare
+```
+
+手元で一式動かすなら `docker compose up --build`。
+環境変数・AWS での置き方・バックアップは [docs/deploy.md](docs/deploy.md) に書いてある。
 
 ## テストと CI
 
-- `npm test`：検索コアの単体テストと、本物の PostgreSQL に対する API テスト（約100件）
-- CI（GitHub Actions）：psql アダプタと本番と同じ pg ドライバーの両方で、型チェック・Web 版のビルド・テストを実行
+- `npm test`：検索コアの単体テストと、本物の PostgreSQL に対する API テスト（約145件）
+- CI（GitHub Actions）
+  - `test`：psql アダプタと本番と同じ pg ドライバーの両方で、型チェック・Web 版のビルド・テスト
+  - `qr`：作った QR コードを別実装の読み取り器（jsQR・ZXing）に読ませて、本当に読めるか確かめる
+  - `kuromoji`：形態素解析を入れた状態で、分割と読みを確かめる
+  - `docker`：イメージを組み立て、マイグレーションを流し、起動して応答を確かめる（デプロイはしない）
 - `apps/web/e2e/smoke.mjs`：スマホの画面サイズでのブラウザ通し確認（Playwright。デモデータに対して実行）
 
 ## まだ無いもの
 
-- 形態素解析器の kuromoji / Lindera への切り替え（`Tokenizer` を実装して差し替える）。今の Intl.Segmenter では読みが取れないため、
-  「れいぞうこ」と打っても #冷蔵庫 は出ない（カタカナのタグは、ひらがな・ローマ字でも出る）
-- 写真のアップロード（端末で縮小して S3 へ直接）
-- 既存マニュアル（PDF・Word・Excel）の取込
-- 招待の QR コード表示（今はリンクをコピーして送る）
+- PDF の取り込み（Word・Excel・CSV・テキストはできる）
 - パスキー、チェーン向けの SSO
-- 管理画面のうち、タグ辞書の管理・利用者一覧・商品の承認待ちの画面（API はある）
-- 招待受け取りなど、認証まわりの試行回数の制限（レート制限）
-- AWS へのデプロイ設定
+- サーバーを複数台にしたときの試行回数の制限（今はサーバーの記憶の中で数えるので、台ごとの上限になる）
+- 監視・通知（`/health` はある）
+- 連絡事項・引き継ぎ（ナレッジ機能に絞っている）
