@@ -46,14 +46,21 @@ function mul(a: number, b: number): number {
   return a === 0 || b === 0 ? 0 : EXP[LOG[a]! + LOG[b]!]!;
 }
 
-/** 誤り訂正符号を作るための多項式 */
+/** テストから使う（誤り訂正の決まりを外から確かめるため） */
+export const multiplyGF = mul;
+export const expGF = (i: number): number => EXP[i % 255]!;
+
+/**
+ * 誤り訂正符号を作るための多項式 g(x) = (x - α^0)(x - α^1)…(x - α^(degree-1))。
+ * 係数は次数の高い方から並べる（poly[0] が最高次で、必ず 1）。
+ */
 function generatorPoly(degree: number): Uint8Array {
   let poly = Uint8Array.from([1]);
   for (let i = 0; i < degree; i++) {
     const next = new Uint8Array(poly.length + 1);
     for (let j = 0; j < poly.length; j++) {
-      next[j] = next[j]! ^ mul(poly[j]!, EXP[i]!);
-      next[j + 1] = next[j + 1]! ^ poly[j]!;
+      next[j] = next[j]! ^ poly[j]!;                 // x を掛けた分
+      next[j + 1] = next[j + 1]! ^ mul(poly[j]!, EXP[i]!); // α^i を掛けた分
     }
     poly = next;
   }

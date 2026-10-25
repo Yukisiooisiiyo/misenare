@@ -92,17 +92,6 @@ describe('QR コードの読み取り確認（別実装）', { skip: jsQR || zxi
     assert.ok(tried.some((t) => t.endsWith('OK')), `どの大きさでも読めなかった: ${tried.join(' ')}`);
   });
 
-  it('【手がかり】2つの読み取り器の結果を並べる', () => {
-    const qr = encodeQr('A');
-    const notes = [`jsQR=${typeof jsQR}`, `zxing=${typeof zxing}`];
-    for (const scale of [2, 4, 8]) {
-      const { data, width } = toPixels(qr, scale, 4);
-      notes.push(`${scale}x → jsQR:${jsQR ? JSON.stringify(jsQR(data, width, width)?.data ?? null) : '-'}`
-        + ` zxing:${zxing ? JSON.stringify(zxing(data, width, width)) : '-'}`);
-    }
-    assert.fail(notes.join(' | '));
-  });
-
   it('招待リンクを読み取れる', () => {
     const url = 'https://misenare.example.com/app/#invite=9133359e-0555-4f01-bbdd-00f7c3b0e4eb.o7CJTg6IwFS-1-wPF7EyMMwBr2tcN72a-lxK-77Ojac';
     assert.equal(roundTrip(url), url);

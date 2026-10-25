@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { encodeQr, errorCorrection, qrToSvg } from '../src/qr.ts';
+import { encodeQr, errorCorrection, expGF, multiplyGF, qrToSvg } from '../src/qr.ts';
 
 /** 盤の決まりごと（位置検出・タイミング・形式情報）を確かめる */
 function checkStructure(qr: ReturnType<typeof encodeQr>): void {
@@ -28,15 +28,26 @@ function checkStructure(qr: ReturnType<typeof encodeQr>): void {
 }
 
 describe('QR コード', () => {
-  it('誤り訂正符号を付けた列は、生成多項式で割り切れる', () => {
-    // 誤り訂正符号の決まり：データに符号を足した多項式は、生成多項式で余りなく割れる。
-    // 符号の値そのものを書き写すより、この性質を確かめるほうが確かめやすい。
+  it('誤り訂正符号が規格の例と一致する', () => {
+    // JIS X 0510 の例（1-M・「01234567」）のデータ符号に対する誤り訂正符号。
     const data = Uint8Array.from([0x10, 0x20, 0x0c, 0x56, 0x61, 0x80, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11]);
-    for (const length of [10, 16, 22, 26, 30]) {
-      const ec = errorCorrection(data, length);
-      assert.equal(ec.length, length);
-      const whole = Uint8Array.from([...data, ...ec]);
-      assert.deepEqual([...errorCorrection(whole, length)], new Array(length).fill(0), `${length} 個のとき余りが残った`);
+    assert.deepEqual(
+      [...errorCorrection(data, 10)],
+      [0xa5, 0x24, 0xd4, 0xc1, 0xed, 0x36, 0xc7, 0x87, 0x2c, 0x55],
+    );
+  });
+
+  it('データと誤り訂正符号を並べた列は、α^0〜α^(n-1) を入れると 0 になる', () => {
+    // 誤り訂正の決まりそのもの。生成多項式の作り方に依らない確かめ方なので、
+    // 符号の並べ方を間違えるとここで落ちる。
+    const data = Uint8Array.from([0x40, 0x14, 0x10, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec, 0x11, 0xec]);
+    for (const length of [7, 10, 16, 26]) {
+      const whole = [...data, ...errorCorrection(data, length)];
+      for (let i = 0; i < length; i++) {
+        let v = 0;
+        for (const c of whole) v = multiplyGF(v, expGF(i)) ^ c;
+        assert.equal(v, 0, `α^${i} を入れたら ${v} になった（誤り訂正 ${length} 個）`);
+      }
     }
   });
 
