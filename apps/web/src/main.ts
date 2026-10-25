@@ -4,7 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { productPanel, staffPanel, tagPanel } from './manage.ts';
+import { action, countedList, productPanel, staffPanel, tagPanel } from './manage.ts';
 
 const root = document.getElementById('app')!;
 let me: Me | null = null;
@@ -486,28 +486,23 @@ async function renderManage(): Promise<void> {
       api<Array<{ id: string; title: string; verified_at: string | null }>>('GET', `/stores/${storeId()}/stale`),
     ]);
     section.append(
-      h('h2', {}, `承認待ち（${pending.length}件）`),
-      pending.length === 0 ? h('p', { class: 'hint' }, '承認待ちはありません。') : h('ul', { class: 'rows' }, ...pending.map((p) => {
-        const row = h('li', { class: 'row' },
+      ...countedList('承認待ち', pending, (p, remove) =>
+        h('li', { class: 'row' },
           h('a', { href: `#/k/${p.id}` }, p.title),
           h('span', { class: 'hint' }, `${p.edited_by}さん・${p.is_new ? '新規' : '修正'}`),
           h('span', { class: 'row-actions' },
-            h('button', { type: 'button', class: 'primary small', onclick: async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/approve`); toast('公開しました'); row.remove(); } }, '公開する'),
-            h('button', { type: 'button', class: 'secondary small', onclick: async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/reject`); toast('却下しました'); row.remove(); } }, '却下する')));
-        return row;
-      })),
+            action('公開する', 'primary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/approve`); toast('公開しました'); remove(); }),
+            action('却下する', 'secondary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/reject`); toast('却下しました'); remove(); }))), 'h2'),
       h('h2', {}, '見つからなかった検索'),
       zero.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...zero.slice(0, 20).map((z) =>
         h('li', { class: 'row' }, h('span', {}, z.query), h('span', { class: 'hint' }, `${z.times}回`)))),
-      h('h2', {}, '半年以上確認されていないナレッジ'),
-      stale.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...stale.map((s) => {
-        const row = h('li', { class: 'row' },
+      ...countedList('半年以上確認されていないナレッジ', stale, (s, remove) =>
+        h('li', { class: 'row' },
           h('a', { href: `#/k/${s.id}` }, s.title),
-          h('button', { type: 'button', class: 'secondary small', onclick: async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); row.remove(); } }, '今も正しい'));
-        return row;
-      })),
+          h('span', { class: 'row-actions' },
+            action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
     );
-    section.append(h('h2', {}, 'そのほかの管理'), productPanel(storeId()), tagPanel(isAdmin()));
+    section.append(productPanel(storeId()), tagPanel(isAdmin()));
     if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));

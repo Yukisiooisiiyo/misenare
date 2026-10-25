@@ -40,6 +40,28 @@ export function panel(title: string, load: (body: HTMLElement) => Promise<void>)
   return el;
 }
 
+/**
+ * 見出しと一覧。行を片付けると件数が減り、なくなれば「ありません。」に変わる。
+ * render には、その行を片付けるための remove を渡す。
+ */
+export function countedList<T>(title: string, items: T[], render: (item: T, remove: () => void) => HTMLElement, level: 'h2' | 'h3' = 'h3'): HTMLElement[] {
+  const heading = h(level, {});
+  const list = h('ul', { class: 'rows' });
+  const empty = h('p', { class: 'hint' }, 'ありません。');
+  let left = items.length;
+  const draw = () => {
+    heading.textContent = `${title}（${left}件）`;
+    list.hidden = left === 0;
+    empty.hidden = left > 0;
+  };
+  for (const item of items) {
+    const row = render(item, () => { row.remove(); left -= 1; draw(); });
+    list.append(row);
+  }
+  draw();
+  return [heading, list, empty];
+}
+
 // --- タグ辞書 -------------------------------------------------------------------------
 
 interface Relation { id: string; kind: 'synonym' | 'includes' | 'alias'; from_tag: string | null; from_text: string | null; to_tag: string; source: string; evidence: number }
@@ -57,24 +79,18 @@ export function tagPanel(isAdmin: boolean): HTMLElement {
     const candidates = await api<Relation[]>('GET', '/tag-relations?state=candidate');
     const approved = await api<Relation[]>('GET', '/tag-relations?state=approved');
     body.append(
-      h('h3', {}, `承認待ちの関係（${candidates.length}件）`),
-      candidates.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...candidates.map((r) => {
-        const row = h('li', { class: 'row' },
+      ...countedList('承認待ちの関係', candidates, (r, remove) =>
+        h('li', { class: 'row' },
           relationText(r),
           h('span', { class: 'hint' }, `${SOURCE_LABEL[r.source] ?? r.source}・${r.evidence}回`),
           h('span', { class: 'row-actions' },
-            action('承認する', 'primary small', async () => { await api('POST', `/tag-relations/${r.id}/approve`); toast('承認しました'); row.remove(); }),
-            action('却下する', 'secondary small', async () => { await api('POST', `/tag-relations/${r.id}/reject`); toast('却下しました'); row.remove(); })));
-        return row;
-      })),
+            action('承認する', 'primary small', async () => { await api('POST', `/tag-relations/${r.id}/approve`); toast('承認しました'); remove(); }),
+            action('却下する', 'secondary small', async () => { await api('POST', `/tag-relations/${r.id}/reject`); toast('却下しました'); remove(); })))),
       relationForm(),
-      h('h3', {}, `登録済みの関係（${approved.length}件）`),
-      approved.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...approved.map((r) => {
-        const row = h('li', { class: 'row' }, relationText(r),
+      ...countedList('登録済みの関係', approved, (r, remove) =>
+        h('li', { class: 'row' }, relationText(r),
           h('span', { class: 'row-actions' },
-            action('外す', 'secondary small', async () => { await api('DELETE', `/tag-relations/${r.id}`); toast('外しました'); row.remove(); })));
-        return row;
-      })),
+            action('外す', 'secondary small', async () => { await api('DELETE', `/tag-relations/${r.id}`); toast('外しました'); remove(); })))),
       ...(isAdmin ? [mergeForm()] : []),
     );
   });
@@ -151,26 +167,19 @@ export function productPanel(storeId: string): HTMLElement {
   return panel('商品の承認待ち', async (body) => {
     const p = await api<PendingProducts>('GET', `/stores/${storeId}/pending-products`);
     body.append(
-      h('h3', {}, `登録（${p.products.length}件）`),
-      p.products.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...p.products.map((x) => {
-        const row = h('li', { class: 'row' },
+      ...countedList('登録', p.products, (x, remove) =>
+        h('li', { class: 'row' },
           h('a', { href: `#/scan?jan=${x.jan_code}` }, x.name),
           h('span', { class: 'hint' }, `${x.created_by}さん・${relativeDate(x.created_at)}`),
           h('span', { class: 'row-actions' },
-            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); row.remove(); })));
-        return row;
-      })),
-      h('h3', {}, `修正（${p.changes.length}件）`),
-      p.changes.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...p.changes.map((c) => {
-        const fields = Object.keys(c.payload).map((k) => FIELD_LABEL[k] ?? k).join('、');
-        const row = h('li', { class: 'row' },
-          h('span', {}, h('strong', {}, c.name), `（${fields}）`),
+            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); remove(); })))),
+      ...countedList('修正', p.changes, (c, remove) =>
+        h('li', { class: 'row' },
+          h('span', {}, h('strong', {}, c.name), `（${Object.keys(c.payload).map((k) => FIELD_LABEL[k] ?? k).join('、')}）`),
           h('span', { class: 'hint' }, `${c.requested_by}さん・${relativeDate(c.requested_at)}`),
           h('span', { class: 'row-actions' },
-            action('反映する', 'primary small', async () => { await api('POST', `/product-changes/${c.id}/approve`); toast('反映しました'); row.remove(); }),
-            action('却下する', 'secondary small', async () => { await api('POST', `/product-changes/${c.id}/reject`); toast('却下しました'); row.remove(); })));
-        return row;
-      })),
+            action('反映する', 'primary small', async () => { await api('POST', `/product-changes/${c.id}/approve`); toast('反映しました'); remove(); }),
+            action('却下する', 'secondary small', async () => { await api('POST', `/product-changes/${c.id}/reject`); toast('却下しました'); remove(); })))),
     );
   });
 }
