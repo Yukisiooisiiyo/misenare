@@ -128,9 +128,9 @@ describe('招待と端末セッション', () => {
 
 describe('試行回数の制限', () => {
   it('招待の受け取りは、同じ接続元から10分に10回まで', async () => {
-    const { RateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
     let now = 0;
-    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new RateLimiter(() => now) });
+    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter(() => now) });
     const accept = (ip: string) => limited(new Request('http://localhost/auth/accept', {
       method: 'POST', headers: { 'content-type': 'application/json', [CLIENT_IP_HEADER]: ip },
       body: JSON.stringify({ token: `${T}.${'B'.repeat(43)}` }),
@@ -143,8 +143,8 @@ describe('試行回数の制限', () => {
   });
 
   it('無効なトークンが30回続いた接続元は、正しいトークンでも一時的に止める', async () => {
-    const { RateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
-    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new RateLimiter() });
+    const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter() });
     const me = (ip: string, token: string) => limited(new Request('http://localhost/me', { headers: { authorization: `Bearer ${token}`, [CLIENT_IP_HEADER]: ip } }));
     for (let i = 0; i < 30; i++) assert.equal((await me('198.51.100.7', `${T}.${'C'.repeat(43)}`)).status, 401);
     const good = await hqSession();

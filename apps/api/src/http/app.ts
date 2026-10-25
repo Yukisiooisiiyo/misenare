@@ -55,7 +55,7 @@ import {
 } from '../domain/users.ts';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
-import { clientIp, RateLimiter, RULES } from './rateLimit.ts';
+import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter } from './rateLimit.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
 
 interface Ctx {
@@ -334,9 +334,11 @@ function routes(): Router<Ctx> {
   return r;
 }
 
-export function createApp(deps: { database: Database; auth: Authenticator; tokenizer: Tokenizer; limiter?: RateLimiter; storage?: Storage }) {
+export function createApp(deps: { database: Database; auth: Authenticator; tokenizer: Tokenizer; limiter?: Limiter; storage?: Storage }) {
   const router = routes();
-  const limiter = deps.limiter ?? new RateLimiter();
+  // RATE_LIMIT=db なら台をまたいで共有する。既定はサーバーの記憶の中（1台向け）
+  const limiter = deps.limiter
+    ?? (process.env.RATE_LIMIT === 'db' ? new DatabaseRateLimiter((sql, params) => deps.database.raw(sql, params)) : new MemoryRateLimiter());
   const storage = deps.storage ?? storageFromEnv();
   const tooMany = () => json({ error: 'rate_limited', message: '試行回数が多すぎます。しばらく待ってからもう一度お試しください。' }, 429);
 
@@ -346,7 +348,7 @@ export function createApp(deps: { database: Database; auth: Authenticator; token
     try {
       // ログイン前に呼ぶ唯一の API：招待トークンを端末のセッショントークンに交換する
       if (url.pathname === '/auth/accept' && req.method === 'POST') {
-        if (!limiter.take(`accept:${clientIp(req)}`, RULES.acceptInvitation)) return tooMany();
+        if (!(await limiter.take(clientKey(req, 'accept'), RULES.acceptInvitation))) return tooMany();
         const b = (await readJson<Record<string, unknown>>(req)) ?? {};
         const token = typeof b.token === 'string' ? b.token : '';
         const parsed = parseToken(token);
@@ -362,11 +364,11 @@ export function createApp(deps: { database: Database; auth: Authenticator; token
       checkParams(matched.params);
 
       // 無効なトークンでのアクセスが続く接続元からは、認証そのものを止める（トークンの総当たり対策）
-      const failKey = `authfail:${clientIp(req)}`;
-      if (limiter.blocked(failKey, RULES.failedAuth)) return tooMany();
+      const failKey = clientKey(req, 'authfail');
+      if (await limiter.blocked(failKey, RULES.failedAuth)) return tooMany();
       const identity = await deps.auth.identify(req);
       if (!identity) {
-        if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) limiter.take(failKey, RULES.failedAuth);
+        if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
         throw new HttpError(401, 'ログインしてください');
       }
       const actor = await loadActor(deps.database, identity);
