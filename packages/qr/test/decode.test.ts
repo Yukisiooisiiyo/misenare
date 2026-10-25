@@ -10,9 +10,22 @@ type Decoder = (data: Uint8ClampedArray, width: number, height: number) => { dat
 
 // 入っていないこともあるので、名前を変数にして読み込む（型チェックで「無い」と言われないように）
 const decoderModule = 'jsqr';
-const jsQR: Decoder | null = await import(decoderModule)
-  .then((m: { default?: Decoder }) => (m.default ?? m) as Decoder)
-  .catch(() => null);
+const loaded: Record<string, unknown> | null = await import(decoderModule).catch(() => null);
+
+/** CommonJS の読み込まれ方は環境で変わるので、関数が見つかるところまで辿る */
+function findDecoder(m: unknown, depth = 0): Decoder | null {
+  if (typeof m === 'function') return m as Decoder;
+  if (m && typeof m === 'object' && depth < 3) {
+    for (const key of ['default', 'jsQR']) {
+      const found = findDecoder((m as Record<string, unknown>)[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+const jsQR = loaded ? findDecoder(loaded) : null;
+const shape = loaded ? `keys=${Object.keys(loaded).join(',')} default=${typeof (loaded as { default?: unknown }).default}` : 'なし';
 
 /** QR をそのまま画素にする（1モジュール = scale 画素、周りに余白4モジュール） */
 function toPixels(qr: QrCode, scale = 4, quiet = 4): { data: Uint8ClampedArray; width: number } {
@@ -40,7 +53,25 @@ function roundTrip(text: string): string | null {
   return jsQR!(data, width, width)?.data ?? null;
 }
 
-describe('QR コードの読み取り確認（別実装）', { skip: jsQR ? false : 'jsqr が入っていません' }, () => {
+describe('QR コードの読み取り確認（別実装）', { skip: loaded ? false : 'jsqr が入っていません' }, () => {
+  it('読み取り器を関数として読み込めている', () => {
+    assert.equal(typeof jsQR, 'function', `読み取り器が見つからない: ${shape}`);
+  });
+
+  it('いろいろな大きさの画像で読める（読めない時は大きさの一覧を出す）', () => {
+    const text = 'A';
+    const qr = encodeQr(text);
+    const tried: string[] = [];
+    for (const scale of [1, 2, 4, 8]) {
+      for (const quiet of [0, 4, 8]) {
+        const { data, width } = toPixels(qr, scale, quiet);
+        const got = jsQR!(data, width, width)?.data ?? null;
+        tried.push(`${scale}x/余白${quiet}:${got === text ? 'OK' : got === null ? 'null' : '違う'}`);
+      }
+    }
+    assert.ok(tried.some((t) => t.endsWith('OK')), `どの大きさでも読めなかった: ${tried.join(' ')}`);
+  });
+
   it('招待リンクを読み取れる', () => {
     const url = 'https://misenare.example.com/app/#invite=9133359e-0555-4f01-bbdd-00f7c3b0e4eb.o7CJTg6IwFS-1-wPF7EyMMwBr2tcN72a-lxK-77Ojac';
     assert.equal(roundTrip(url), url);
