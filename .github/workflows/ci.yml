@@ -64,7 +64,7 @@ jobs:
         with:
           node-version: 22
       - run: npm install
-      - name: Install an independent QR decoder
+      - name: Install independent QR decoders
         run: npm install --no-save jsqr@1.4.0 @zxing/library@0.21.3
       - name: Verify QR codes can be read back
         run: |
@@ -73,3 +73,23 @@ jobs:
       - name: Report failures as annotations
         if: failure()
         run: node .github/scripts/annotate-tap.mjs qr-output.tap
+
+  # kuromoji（形態素解析）は辞書が大きく、ここでしか動かさないので別の仕事にする。
+  # 入っていないときは Intl.Segmenter に落ちることも、ここで一緒に確かめる。
+  kuromoji:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - name: Install kuromoji
+        run: npm install --no-save kuromoji@0.1.2
+      - name: Verify morphological tokenizer
+        run: |
+          set -o pipefail
+          npx tsx --test --test-reporter=tap apps/api/test/kuromoji.test.ts | tee kuromoji-output.tap
+      - name: Report failures as annotations
+        if: failure()
+        run: node .github/scripts/annotate-tap.mjs kuromoji-output.tap

@@ -173,7 +173,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { SegmenterTokenizer } = await import('@misenare/search-core');
+  const { chooseTokenizer } = await import('../search/kuromojiTokenizer.ts');
   const url = process.env.DATABASE_URL;
   if (!url) throw new Error('DATABASE_URL を設定してください');
   const database = process.env.DB_DRIVER === 'psql'
@@ -182,7 +182,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const { assertRlsEnforced } = await import('../db/safety.ts');
   await assertRlsEnforced((sql) => database.raw(sql));
   const { storageFromEnv } = await import('../storage/storage.ts');
-  const reports = await runNightly(database, new SegmenterTokenizer(), { storage: storageFromEnv() });
+  const reports = await runNightly(database, await chooseTokenizer(), { storage: storageFromEnv() });
   console.log(JSON.stringify(reports, null, 2));
   await database.close();
 }

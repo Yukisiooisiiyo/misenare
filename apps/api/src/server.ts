@@ -3,8 +3,9 @@
 //   PORT          … 既定 8787
 //   DB_DRIVER     … pg（既定。npm install が必要）/ psql（pg を入れられない開発環境向け）
 //   MISENARE_DEV_AUTH=1 … 開発用のヘッダー認証を使う（既定は招待QRの端末セッション）
+//   TOKENIZER=kuromoji … 形態素解析で分割する（npm install kuromoji が必要。既定は Intl.Segmenter）
 
-import { SegmenterTokenizer } from '@misenare/search-core';
+import { chooseTokenizer } from './search/kuromojiTokenizer.ts';
 import type { Database } from './db/db.ts';
 import { assertRlsEnforced } from './db/safety.ts';
 import { createApp } from './http/app.ts';
@@ -33,7 +34,7 @@ const app = createApp({
   database,
   // MISENARE_DEV_AUTH=1 のときだけ開発用のヘッダー認証（本番環境では作れない）
   auth: process.env.MISENARE_DEV_AUTH === '1' ? new DevHeaderAuthenticator() : new SessionAuthenticator(database),
-  tokenizer: new SegmenterTokenizer(),
+  tokenizer: await chooseTokenizer(),
 });
 // Web 版（apps/web をビルドした dist）を /app/ で、API を /api/ で配信する
 const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
