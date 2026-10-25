@@ -316,6 +316,22 @@ async function renderKnowledge(id: string): Promise<void> {
     return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
   const photos = photoSection(k.id, true);
+  // 確認できるのは trusted 以上。押したところだけを描き直す（写真や読んでいた位置を保つため）
+  const canVerify = isTrusted() && k.status === 'published';
+  const freshBox = h('div');
+  const drawFresh = () => {
+    clear(freshBox);
+    freshBox.append(freshnessDetail(k, canVerify
+      ? async () => {
+          await api('POST', `/knowledge/${k.id}/verify`);
+          k.verifiedAt = new Date().toISOString();
+          k.verifiedBy = me!.name;
+          toast('今も正しいと記録しました');
+          drawFresh();
+        }
+      : undefined));
+  };
+  drawFresh();
   shell('search', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
@@ -324,20 +340,26 @@ async function renderKnowledge(id: string): Promise<void> {
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
     photos.el,
-    freshnessDetail(k),
+    freshBox,
     h('div', { class: 'actions' },
       h('a', { href: `#/edit/${k.id}`, class: 'secondary' }, isTrusted() ? '編集する' : '修正を提案する')),
   ));
   disposeView = photos.dispose;
 }
 
-/** 詳細画面の新しさの表示：誰がいつ更新し、誰がいつ確認したか */
-function freshnessDetail(k: Knowledge): HTMLElement {
+/**
+ * 詳細画面の新しさの表示：誰がいつ更新し、誰がいつ確認したか。
+ * onVerify があれば「今も正しい」を出す。中身を変えずに確認日だけを新しくできる。
+ */
+function freshnessDetail(k: Knowledge, onVerify?: () => Promise<void>): HTMLElement {
   const f = freshness(k.updatedAt, k.verifiedAt);
   return h('div', { class: 'fresh-detail' },
     h('p', {}, `最終更新：${relativeDate(k.updatedAt)}${k.updatedBy ? `（${k.updatedBy}さん）` : ''}`),
     f.verified ? h('p', {}, `内容の確認：${relativeDate(k.verifiedAt)}${k.verifiedBy ? `（${k.verifiedBy}さん）` : ''}`) : null,
-    f.stale ? h('p', { class: 'fresh-warn' }, '1年以上、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。') : null);
+    f.stale ? h('p', { class: 'fresh-warn' }, '1年以上、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。') : null,
+    // 古いものほど押してほしいので、古いときだけ目立たせる
+    ...(onVerify ? [action(f.stale ? '今も正しい（確認日を更新）' : '今も正しい', f.stale ? 'primary' : 'secondary small', onVerify)] : []),
+  );
 }
 
 // --- 書く（投稿・編集） ------------------------------------------------------------
