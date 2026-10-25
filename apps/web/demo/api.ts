@@ -25,6 +25,7 @@ export interface Me {
   trustLevel: 'visitor' | 'trusted';
   adminScope: 'none' | 'store' | 'tenant';
   stores: Array<{ id: string; name: string }>;
+  staleDays?: number;
 }
 export interface Hit {
   id: string; title: string; snippet: string; tags: string[];
@@ -66,6 +67,8 @@ const ME: Me = {
   trustLevel: 'trusted',
   adminScope: 'none',
   stores: [STORE],
+  // 本物のサーバーと同じ値
+  staleDays: 180,
 };
 
 const tokenizer = new SegmenterTokenizer();

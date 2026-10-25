@@ -219,5 +219,7 @@ export async function me(db: Db, actor: Actor) {
       : `SELECT id, name FROM stores WHERE id = ANY($1::uuid[]) ORDER BY name`,
     actor.adminScope === 'tenant' ? [] : [actor.storeIds],
   );
-  return { ...u, trustLevel: actor.trustLevel, adminScope: actor.adminScope, stores };
+  // 画面側の「古い」の判定をサーバーと揃えるために配る
+  const { STALE_DAYS } = await import('./knowledge.ts');
+  return { ...u, trustLevel: actor.trustLevel, adminScope: actor.adminScope, stores, staleDays: STALE_DAYS };
 }

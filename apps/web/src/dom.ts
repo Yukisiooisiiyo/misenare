@@ -24,8 +24,18 @@ export function verifiedLabel(iso: string | null): string {
   return iso ? `${relativeDate(iso)}に確認` : '未確認';
 }
 
-/** 更新・確認のうち新しい方から、この日数を過ぎたら「古い可能性」として知らせる */
-export const STALE_DAYS = 365;
+/**
+ * 更新・確認のうち新しい方から、この日数を過ぎたら「古い可能性」として知らせる。
+ * 本当の値はサーバーが決め（apps/api/src/domain/knowledge.ts の STALE_DAYS）、
+ * /me で受け取って setStaleDays で入れ替える。ここの値は受け取る前の控え。
+ */
+let staleDays = 180;
+
+export function setStaleDays(days: number): void {
+  if (Number.isFinite(days) && days > 0) staleDays = days;
+}
+
+export function getStaleDays(): number { return staleDays; }
 
 export function parseDate(iso: string | null): Date | null {
   if (!iso) return null;
@@ -41,7 +51,7 @@ export function freshness(updatedAt: string | null, verifiedAt: string | null): 
   const u = parseDate(updatedAt);
   const v = parseDate(verifiedAt);
   const latest = Math.max(u?.getTime() ?? 0, v?.getTime() ?? 0);
-  const stale = latest === 0 || Date.now() - latest > STALE_DAYS * 86_400_000;
+  const stale = latest === 0 || Date.now() - latest > staleDays * 86_400_000;
   const verifiedLater = u !== null && v !== null && v.getTime() - u.getTime() > 86_400_000;
   return {
     updated: u ? `${relativeDate(updatedAt)}に更新` : '更新日不明',

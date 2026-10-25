@@ -65,6 +65,8 @@ export interface Me {
   trustLevel: 'visitor' | 'trusted';
   adminScope: 'none' | 'store' | 'tenant';
   stores: Array<{ id: string; name: string }>;
+  /** 「古い」とみなすまでの日数（サーバーが決める） */
+  staleDays?: number;
 }
 
 export interface Hit {

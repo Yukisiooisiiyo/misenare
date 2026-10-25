@@ -2,7 +2,7 @@
 // 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
 
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
-import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
+import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { action, countedList, importPanel, productPanel, staffPanel, tagPanel } from './manage.ts';
 import { photoSection } from './photos.ts';
@@ -22,6 +22,8 @@ async function boot(): Promise<void> {
   if (!session.token) return renderWelcome();
   try {
     me = await api<Me>('GET', '/me');
+    // 「古い」の判定はサーバーが決める（承認・管理の一覧と同じ値にするため）
+    if (me.staleDays) setStaleDays(me.staleDays);
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
       session.token = null;
@@ -347,6 +349,15 @@ async function renderKnowledge(id: string): Promise<void> {
   disposeView = photos.dispose;
 }
 
+/** 「半年以上」「1年以上」など、サーバーが決めた日数の言い方 */
+function staleLabel(): string {
+  const days = getStaleDays();
+  if (days % 365 === 0) return `${days / 365}年以上`;
+  if (days === 180) return '半年以上';
+  if (days % 30 === 0) return `${days / 30}か月以上`;
+  return `${days}日以上`;
+}
+
 /**
  * 詳細画面の新しさの表示：誰がいつ更新し、誰がいつ確認したか。
  * onVerify があれば「今も正しい」を出す。中身を変えずに確認日だけを新しくできる。
@@ -356,7 +367,7 @@ function freshnessDetail(k: Knowledge, onVerify?: () => Promise<void>): HTMLElem
   return h('div', { class: 'fresh-detail' },
     h('p', {}, `最終更新：${relativeDate(k.updatedAt)}${k.updatedBy ? `（${k.updatedBy}さん）` : ''}`),
     f.verified ? h('p', {}, `内容の確認：${relativeDate(k.verifiedAt)}${k.verifiedBy ? `（${k.verifiedBy}さん）` : ''}`) : null,
-    f.stale ? h('p', { class: 'fresh-warn' }, '1年以上、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。') : null,
+    f.stale ? h('p', { class: 'fresh-warn' }, `${staleLabel()}、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。`) : null,
     // 古いものほど押してほしいので、古いときだけ目立たせる
     ...(onVerify ? [action(f.stale ? '今も正しい（確認日を更新）' : '今も正しい', f.stale ? 'primary' : 'secondary small', onVerify)] : []),
   );
@@ -588,7 +599,7 @@ async function renderManage(): Promise<void> {
       h('h2', {}, '見つからなかった検索'),
       zero.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...zero.slice(0, 20).map((z) =>
         h('li', { class: 'row' }, h('span', {}, z.query), h('span', { class: 'hint' }, `${z.times}回`)))),
-      ...countedList('半年以上確認されていないナレッジ', stale, (s, remove) =>
+      ...countedList(`${staleLabel()}確認されていないナレッジ`, stale, (s, remove) =>
         h('li', { class: 'row' },
           h('a', { href: `#/k/${s.id}` }, s.title),
           h('span', { class: 'row-actions' },
