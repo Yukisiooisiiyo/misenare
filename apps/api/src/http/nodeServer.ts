@@ -1,6 +1,7 @@
 // node:http の上で (Request) => Promise<Response> 形式のハンドラを動かす。
 
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { CLIENT_IP_HEADER } from './rateLimit.ts';
 
 const MAX_BODY = 1024 * 1024; // 1MB（写真は端末から直接ストレージに上げるので、API には来ない）
 
@@ -24,6 +25,13 @@ export function serve(handler: (req: Request) => Promise<Response>, port: number
         if (Array.isArray(v)) v.forEach((x) => headers.append(k, x));
         else if (v !== undefined) headers.set(k, v);
       }
+      // 接続元の IP。外から同名のヘッダーが来ても上書きする。
+      // ロードバランサー（ALB）の後ろでは TRUST_PROXY=1 にし、X-Forwarded-For の最後（ALB が見た接続元）を使う
+      const forwarded = req.headers['x-forwarded-for'];
+      const fromProxy = process.env.TRUST_PROXY === '1' && typeof forwarded === 'string'
+        ? forwarded.split(',').map((x) => x.trim()).filter(Boolean).at(-1)
+        : undefined;
+      headers.set(CLIENT_IP_HEADER, fromProxy ?? req.socket.remoteAddress ?? 'unknown');
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
       const body = hasBody ? await readBody(req) : undefined;
       const response = await handler(new Request(url, { method: req.method ?? 'GET', headers, ...(body ? { body } : {}) }));

@@ -125,3 +125,30 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
   });
 });
+
+describe('試行回数の制限', () => {
+  it('招待の受け取りは、同じ接続元から10分に10回まで', async () => {
+    const { RateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    let now = 0;
+    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new RateLimiter(() => now) });
+    const accept = (ip: string) => limited(new Request('http://localhost/auth/accept', {
+      method: 'POST', headers: { 'content-type': 'application/json', [CLIENT_IP_HEADER]: ip },
+      body: JSON.stringify({ token: `${T}.${'B'.repeat(43)}` }),
+    }));
+    for (let i = 0; i < 10; i++) assert.equal((await accept('203.0.113.1')).status, 404);
+    assert.equal((await accept('203.0.113.1')).status, 429);
+    assert.equal((await accept('203.0.113.2')).status, 404, '別の接続元は止めない');
+    now += 10 * 60_000 + 1;
+    assert.equal((await accept('203.0.113.1')).status, 404, '時間がたてば戻る');
+  });
+
+  it('無効なトークンが30回続いた接続元は、正しいトークンでも一時的に止める', async () => {
+    const { RateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new RateLimiter() });
+    const me = (ip: string, token: string) => limited(new Request('http://localhost/me', { headers: { authorization: `Bearer ${token}`, [CLIENT_IP_HEADER]: ip } }));
+    for (let i = 0; i < 30; i++) assert.equal((await me('198.51.100.7', `${T}.${'C'.repeat(43)}`)).status, 401);
+    const good = await hqSession();
+    assert.equal((await me('198.51.100.7', good)).status, 429);
+    assert.equal((await me('198.51.100.8', good)).status, 200);
+  });
+});
