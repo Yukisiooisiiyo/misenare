@@ -33,15 +33,19 @@ export const AREAS = [
   { id: '30000000-0000-0000-0000-000000000003', name: '修理受付' },
 ];
 
-const TAG_NAMES = [
-  '冷蔵庫', '冷凍冷蔵庫', 'リサイクル', '引き取り', '搬入', '配送', 'テレビ', '修理',
-  '延長保証', '長期保証', 'レジ', 'エアコン', 'クーラー', '工事', '設置', '食洗機',
-  'ポイント', '大型家電',
+// 読みは本番では夜間バッチが形態素解析器で埋める。お試し版では手で持つ。
+// これがあると「れいぞうこ」や「reizouko」でも #冷蔵庫 に当たる。
+const TAG_NAMES: Array<[name: string, reading: string]> = [
+  ['冷蔵庫', 'レイゾウコ'], ['冷凍冷蔵庫', 'レイトウレイゾウコ'], ['リサイクル', 'リサイクル'],
+  ['引き取り', 'ヒキトリ'], ['搬入', 'ハンニュウ'], ['配送', 'ハイソウ'], ['テレビ', 'テレビ'],
+  ['修理', 'シュウリ'], ['延長保証', 'エンチョウホショウ'], ['長期保証', 'チョウキホショウ'],
+  ['レジ', 'レジ'], ['エアコン', 'エアコン'], ['クーラー', 'クーラー'], ['工事', 'コウジ'],
+  ['設置', 'セッチ'], ['食洗機', 'ショクセンキ'], ['ポイント', 'ポイント'], ['大型家電', 'オオガタカデン'],
 ];
-export const TAGS: DemoTag[] = TAG_NAMES.map((name, i) => ({
+export const TAGS: DemoTag[] = TAG_NAMES.map(([name, reading], i) => ({
   id: `da000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
   name,
-  reading: null,
+  reading,
 }));
 const tagId = (name: string): string => TAGS.find((t) => t.name === name)!.id;
 
@@ -50,6 +54,10 @@ export const RELATIONS: DemoRelation[] = [
   { kind: 'synonym', from: tagId('エアコン'), fromText: null, to: tagId('クーラー') },
   { kind: 'includes', from: tagId('冷蔵庫'), fromText: null, to: tagId('冷凍冷蔵庫') },
   { kind: 'alias', from: null, fromText: '映らない', to: tagId('修理') },
+  // 送り仮名の揺れは自動では寄らないので、別名として持つ
+  { kind: 'alias', from: null, fromText: '取付', to: tagId('設置') },
+  { kind: 'alias', from: null, fromText: '取り付け', to: tagId('設置') },
+  { kind: 'alias', from: null, fromText: 'リサイクル券', to: tagId('リサイクル') },
 ];
 
 const NOTES: Array<[string, string, string[], number]> = [

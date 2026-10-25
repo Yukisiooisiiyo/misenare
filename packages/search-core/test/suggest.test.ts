@@ -67,3 +67,30 @@ describe('補助関数', () => {
     assert.ok(Math.abs(npmi.get(pairKey('c', 'd'))!) < 1e-9);
   });
 });
+
+describe('表記の揺れからの候補', () => {
+  it('ひらがなで打っても候補に出る', () => {
+    const { dictionary } = deps();
+    const r = suggestTags({ input: 'てれ', dictionary });
+    assert.deepEqual(r.candidates.map((c) => c.name), ['テレビ', 'テレビ台']);
+  });
+
+  it('読みで打っても候補に出る', () => {
+    const { dictionary } = deps();
+    const r = suggestTags({ input: 'れいぞう', dictionary });
+    assert.ok(r.candidates.some((c) => c.name === '冷蔵庫'), r.candidates.map((c) => c.name).join(','));
+  });
+
+  it('別名で打つと、その別名が指すタグが候補に出る', () => {
+    const { dictionary } = deps();
+    const r = suggestTags({ input: '映らな', dictionary });
+    assert.ok(r.candidates.some((c) => c.name === '修理'), r.candidates.map((c) => c.name).join(','));
+  });
+
+  it('同じ意味のタグも一緒に返る（クーラー → エアコン）', () => {
+    const { dictionary } = deps();
+    const r = suggestTags({ input: 'くーらー', dictionary });
+    assert.deepEqual(r.candidates.map((c) => c.name), ['クーラー']);
+    assert.deepEqual(r.maybe.map((m) => [m.tag.name, m.reason]), [['エアコン', 'synonym']]);
+  });
+});

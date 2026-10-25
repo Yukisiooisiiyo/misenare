@@ -216,7 +216,7 @@ function renderNoticesTab(): void {
 // --- 探す -------------------------------------------------------------------------
 
 async function renderSearch(initial: string): Promise<void> {
-  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: '#冷蔵庫 リサイクル', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
+  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: '冷蔵庫 リサイクル', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
   const suggest = h('div', { class: 'suggest', hidden: true });
   const results = h('div', { class: 'results', 'aria-live': 'polite' });
   let pendingPick: { suggestedTagId: string; pickedTagId: string } | null = null;
@@ -227,7 +227,9 @@ async function renderSearch(initial: string): Promise<void> {
   const lastToken = () => input.value.split(/\s+/).pop() ?? '';
   const updateSuggest = () => {
     const token = lastToken();
-    if (!dict || !token.startsWith('#') || token.length < 2) { suggest.hidden = true; return; }
+    // # が付いていなくても候補を出す。ひらがな・ローマ字でも引けるので、
+    // 「てれび」「terebi」と打っている途中で #テレビ と、その同義語が出る。
+    if (!dict || token.length < 2) { suggest.hidden = true; return; }
     const selected = input.value.split(/\s+/).slice(0, -1).filter((t) => t.startsWith('#')).map((t) => t.slice(1));
     renderSuggestions(suggest, token, dict.suggest(token, selected), pick, false);
   };
@@ -271,7 +273,7 @@ async function renderSearch(initial: string): Promise<void> {
 
   shell('search', h('section', { class: 'page' },
     h('div', { class: 'search-bar' }, input, h('a', { href: '#/scan', class: 'icon-button', 'aria-label': 'バーコードで調べる' }, 'JAN')),
-    h('p', { class: 'hint' }, '# を付けるとタグの候補が出ます'),
+    h('p', { class: 'hint' }, 'ひらがな・ローマ字でも候補が出ます（てれび／terebi → #テレビ）'),
     suggest,
     results,
   ));

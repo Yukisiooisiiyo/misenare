@@ -1,6 +1,6 @@
 // タグ辞書：タグ名・別名の最長一致と、同義・包含による展開。
 
-import { normalizeTagName, normalizeText } from './normalize.ts';
+import { foldTerm, normalizeTagName, normalizeText } from './normalize.ts';
 
 export interface TagEntry {
   id: string;
@@ -55,6 +55,11 @@ export class TagDictionary {
       map.set(entry.id, entry);
       this.byName.set(entry.name, entry);
       this.addPhrase(entry.name, entry.id);
+      // 読み（カタカナ）も別名として登録する。「れいぞうこ」で #冷蔵庫 に当たるようにするため。
+      // 読みは夜間バッチが形態素解析器で埋める。空ならこの経路は効かない。
+      if (entry.reading != null && entry.reading.length > 0) {
+        this.addPhrase(normalizeTagName(entry.reading), entry.id);
+      }
     }
     this.tags = map;
 
@@ -92,7 +97,13 @@ export class TagDictionary {
     for (const list of this.phrasesByHead.values()) list.sort((a, b) => b.phrase.length - a.phrase.length);
   }
 
-  private addPhrase(phrase: string, tagId: string): void {
+  /**
+   * 照合用の語句を1つ登録する。
+   * 鍵はカナに畳んでおく（foldTerm）。照合する文字列も同じように畳むので、
+   * 「てれび」でも「テレビ」でも同じ語句に当たる。
+   */
+  private addPhrase(rawPhrase: string, tagId: string): void {
+    const phrase = foldTerm(rawPhrase);
     if (phrase.length === 0) return;
     const head = phrase[0]!;
     if (!this.phrasesByHead.has(head)) this.phrasesByHead.set(head, []);
@@ -118,23 +129,42 @@ export class TagDictionary {
   scanPhrases(normalized: string): { tagIds: string[]; rest: string; spans: Array<{ tagId: string; text: string }> } {
     const tagIds: string[] = [];
     const spans: Array<{ tagId: string; text: string }> = [];
+    // 照合はカナに畳んだ写しに対して行い、取り出す文字列は元のまま使う。
+    // foldTerm は1文字を1文字に写すので、両者の位置はずれない。
+    const folded = foldTerm(normalized);
     let rest = '';
     let i = 0;
     while (i < normalized.length) {
-      const ch = normalized[i]!;
+      const ch = folded[i]!;
       const candidates = this.phrasesByHead.get(ch);
-      const hit = candidates?.find((c) => normalized.startsWith(c.phrase, i) && atWordBoundary(normalized, i, c.phrase.length));
+      const hit = candidates?.find((c) => folded.startsWith(c.phrase, i) && atWordBoundary(folded, i, c.phrase.length));
       if (hit) {
         tagIds.push(hit.tagId);
-        spans.push({ tagId: hit.tagId, text: hit.phrase });
+        // 元の表記で返す。単語に分け直すときに、書かれたとおりの文字を渡すため。
+        spans.push({ tagId: hit.tagId, text: normalized.slice(i, i + hit.phrase.length) });
         rest += ' ';
         i += hit.phrase.length;
       } else {
-        rest += ch;
+        rest += normalized[i]!;
         i += 1;
       }
     }
     return { tagIds, rest, spans };
+  }
+
+  /**
+   * 別名・読みも含めた前方一致。入力途中の語から候補のタグを返す。
+   * 「取付」→ #設置、「れいぞ」→ #冷蔵庫 のように、打っている言葉と
+   * 出てくるタグの字面が違ってもよい。鍵は呼ぶ側でカナに畳んでおく。
+   */
+  phrasePrefixMatches(foldedKey: string): Set<string> {
+    const out = new Set<string>();
+    if (foldedKey.length === 0) return out;
+    // 前方一致なら先頭の文字は必ず同じなので、その束だけ見れば足りる
+    for (const { phrase, tagId } of this.phrasesByHead.get(foldedKey[0]!) ?? []) {
+      if (phrase.startsWith(foldedKey)) out.add(tagId);
+    }
+    return out;
   }
 
   /** 同義（推移的） */

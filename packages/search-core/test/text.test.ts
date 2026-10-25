@@ -129,3 +129,36 @@ describe('解析', () => {
     assert.equal(q.terms.get('テレビ'), 1);
   });
 });
+
+describe('表記の揺れ', () => {
+  it('ひらがなで書いてもカタカナのタグに当たる', () => {
+    const { dictionary } = deps();
+    assert.deepEqual(dictionary.matchPhrases('てれびが映らない'), ['t-tv', 't-repair']);
+    assert.deepEqual(dictionary.matchPhrases('えあこんの工事'), ['t-ac']);
+  });
+
+  it('カタカナで書いてもひらがなの文書に当たる（索引側と検索側で同じ畳み方）', () => {
+    const d = deps();
+    const doc = analyzeDocument({ title: 'てれびの設置', body: 'てれびは2人で運ぶ', tagNames: [] }, d);
+    const q = analyzeQuery('テレビ', d);
+    const terms = [...q.terms.keys()];
+    assert.ok(terms.some((t) => doc.tf.title.has(t)), `題名に当たらない: ${terms.join(',')}`);
+  });
+
+  it('タグの読みで引ける（れいぞうこ → #冷蔵庫）', () => {
+    const { dictionary } = deps();
+    assert.deepEqual(dictionary.matchPhrases('れいぞうこの引き取り'), ['t-fridge']);
+    assert.deepEqual(dictionary.matchPhrases('レイゾウコ'), ['t-fridge']);
+  });
+
+  it('読みが無いタグは、その経路では引けない', () => {
+    const { dictionary } = deps();
+    // t-repair（修理）に読みを入れていないので「しゅうり」では当たらない
+    assert.deepEqual(dictionary.matchPhrases('しゅうり'), []);
+  });
+
+  it('畳んでも最長一致の順番は変わらない', () => {
+    const { dictionary } = deps();
+    assert.deepEqual(dictionary.matchPhrases('れいとうれいぞうこの搬入'), ['t-freezer', 't-carry']);
+  });
+});
