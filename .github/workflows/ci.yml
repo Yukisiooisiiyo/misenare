@@ -67,4 +67,9 @@ jobs:
       - name: Install an independent QR decoder
         run: npm install --no-save jsqr@1.4.0
       - name: Verify QR codes can be read back
-        run: npx tsx --test packages/qr/test/decode.test.ts
+        run: |
+          set -o pipefail
+          npx tsx --test --test-reporter=tap packages/qr/test/decode.test.ts | tee qr-output.tap
+      - name: Report failures as annotations
+        if: failure()
+        run: node .github/scripts/annotate-tap.mjs qr-output.tap
