@@ -121,8 +121,9 @@ jobs:
           psql -h localhost -U postgres -c "CREATE DATABASE misenare OWNER misenare"
       - name: Run migrations in the image
         run: |
+          set -o pipefail
           docker run --rm --network host -e DATABASE_URL=postgresql://misenare:misenare@localhost:5432/misenare \
-            misenare:ci npx tsx apps/api/src/cli/migrate.ts
+            misenare:ci npx tsx apps/api/src/cli/migrate.ts 2>&1 | tee migrate.log
       - name: Start the container and check it answers
         run: |
           docker run -d --name misenare --network host \
@@ -139,6 +140,7 @@ jobs:
           echo
           echo "--- /api/me（ログインしていないので 401 のはず）---"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8787/api/me)" = "401"
-      - name: Container logs
-        if: always()
-        run: docker logs misenare 2>&1 | tail -50
+      - name: Report failures as annotations
+        if: failure()
+        run: |
+          echo "::error title=docker failed::$( { tail -20 migrate.log 2>/dev/null; docker logs misenare 2>&1 | tail -20; } | sed 's/%/%25/g' | tr '\n' '~' | sed 's/~/%0A/g')"

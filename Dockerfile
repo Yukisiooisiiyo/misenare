@@ -21,6 +21,12 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=8787
 
+# マイグレーションは psql にファイルをそのまま流す（各ファイルが自分で BEGIN / COMMIT する）。
+# 運用で中身を確かめるときにも使えるので、本番のイメージにも入れておく。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/packages ./packages
