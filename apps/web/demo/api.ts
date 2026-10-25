@@ -74,6 +74,8 @@ const notices: DemoNotice[] = NOTICES.map((n) => ({ ...n }));
 const handovers: DemoHandover[] = HANDOVERS.map((h) => ({ ...h }));
 const tags = [...TAGS];
 let logId = 1;
+/** 見つからなかった検索（本物と同じく、管理画面で見られるようにする） */
+const zeroHits = new Map<string, number>();
 
 function ensureTag(name: string): string {
   const normalized = normalizeTagName(name);
@@ -183,6 +185,10 @@ function search(query: string): SearchResult {
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, 8)
     .map(([name, count]) => ({ name, count }));
+  if (hits.length === 0) {
+    const key = query.trim();
+    if (key) zeroHits.set(key, (zeroHits.get(key) ?? 0) + 1);
+  }
   return { hits, chips, logId: logId++ };
 }
 
@@ -349,8 +355,20 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     return { ok: true } as T;
   }
 
-  // --- 承認・管理（デモでは中身を空にする） ---
-  if (method === 'GET' && parts[0] === 'stores' && ['pending', 'stale', 'zero-hits', 'pending-products', 'imports', 'users'].includes(parts[2] ?? '')) {
+  // --- 承認・管理 ---
+  // 半年以上、更新も確認もされていないもの（本物の listStale と同じ判定）
+  if (method === 'GET' && parts[0] === 'stores' && parts[2] === 'stale') {
+    const half = Date.now() - 180 * 24 * 3600_000;
+    return knowledge
+      .filter((k) => Math.max(Date.parse(k.updatedAt), Date.parse(k.verifiedAt ?? k.updatedAt)) < half)
+      .sort((a, c) => (a.verifiedAt ?? '').localeCompare(c.verifiedAt ?? ''))
+      .map((k) => ({ id: k.id, title: k.title, verified_at: k.verifiedAt })) as T;
+  }
+  if (method === 'GET' && parts[0] === 'stores' && parts[2] === 'zero-hits') {
+    return [...zeroHits].sort((a, c) => c[1] - a[1]).map(([query, times]) => ({ query, times })) as T;
+  }
+  // 承認待ちは、デモでは全員 trusted なので本当に0件（すぐ公開される）
+  if (method === 'GET' && parts[0] === 'stores' && ['pending', 'pending-products', 'imports', 'users'].includes(parts[2] ?? '')) {
     return (parts[2] === 'pending-products' ? { products: [], changes: [] } : []) as T;
   }
   if (method === 'GET' && rawPath.startsWith('/tag-relations')) {
