@@ -107,12 +107,12 @@ async function load(db: Db, id: string) {
 export async function setHandoverState(db: Db, actor: Actor, id: string, state: 'open' | 'done') {
   const row = await load(db, id);
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この引き継ぎは触れません');
-  await db.query(
-    state === 'done'
-      ? `UPDATE handovers SET state = 'done', done_by = $2, done_at = now() WHERE id = $1`
-      : `UPDATE handovers SET state = 'open', done_by = NULL, done_at = NULL WHERE id = $1`,
-    [id, actor.userId],
-  );
+  // 問い合わせごとに値の数が違うので、分けて書く（psql では通っても pg では落ちるため）
+  if (state === 'done') {
+    await db.query(`UPDATE handovers SET state = 'done', done_by = $2, done_at = now() WHERE id = $1`, [id, actor.userId]);
+  } else {
+    await db.query(`UPDATE handovers SET state = 'open', done_by = NULL, done_at = NULL WHERE id = $1`, [id]);
+  }
   return { id, state };
 }
 

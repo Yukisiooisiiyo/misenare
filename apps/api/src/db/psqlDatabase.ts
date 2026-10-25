@@ -26,11 +26,20 @@ function quote(s: string): string {
 }
 
 export function interpolate(sql: string, params: readonly unknown[] = []): string {
-  return sql.replace(/\$(\d+)/g, (_, n: string) => {
+  const used = new Set<number>();
+  const text = sql.replace(/\$(\d+)/g, (_, n: string) => {
     const i = Number(n) - 1;
     if (i < 0 || i >= params.length) throw new Error(`missing parameter $${n}`);
+    used.add(i);
     return literal(params[i]);
   });
+  // 本番の pg ドライバーは、余った値があると「bind message supplies N parameters…」で落ちる。
+  // ここでも同じように止めておかないと、開発では通って本番で落ちる問い合わせができてしまう。
+  if (used.size !== params.length) {
+    const unused = params.map((_, i) => i).filter((i) => !used.has(i)).map((i) => `$${i + 1}`);
+    throw new Error(`unused parameter ${unused.join(', ')}: ${sql.trim().slice(0, 60)}`);
+  }
+  return text;
 }
 
 const END = '__MISENARE_END__';

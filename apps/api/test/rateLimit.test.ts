@@ -136,3 +136,13 @@ describe('窓の計算', () => {
     assert.ok(late.carryOver < 0.02, '窓の終わりではほとんど引き継がない');
   });
 });
+
+describe('開発用アダプタの値の数', () => {
+  it('余った値があれば止める（本番の pg ドライバーと同じように）', async () => {
+    const { interpolate } = await import('../src/db/psqlDatabase.ts');
+    assert.equal(interpolate('SELECT $1, $2', ['a', 'b']), "SELECT 'a', 'b'");
+    assert.equal(interpolate('SELECT $1, $1', ['a']), "SELECT 'a', 'a'", '同じ値を何度使ってもよい');
+    assert.throws(() => interpolate('SELECT $1', ['a', 'b']), /unused parameter \$2/);
+    assert.throws(() => interpolate('SELECT $1, $2', ['a']), /missing parameter \$2/);
+  });
+});
