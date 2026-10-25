@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:migrate": "tsx apps/api/src/cli/migrate.ts",
     "bootstrap": "tsx apps/api/src/cli/bootstrap.ts",
+    "batch:nightly": "tsx apps/api/src/batch/nightly.ts",
     "dev:api": "tsx watch apps/api/src/server.ts"
   },
   "devDependencies": {

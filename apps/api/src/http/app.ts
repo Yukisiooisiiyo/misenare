@@ -9,9 +9,11 @@ import {
   editKnowledge,
   getKnowledge,
   listPending,
+  listStale,
   listVersions,
   rejectVersion,
   revertToVersion,
+  verifyKnowledge,
   type KnowledgeInput,
 } from '../domain/knowledge.ts';
 import {
@@ -275,6 +277,8 @@ function routes(): Router<Ctx> {
 
   // --- 育てる・管理 ---------------------------------------------------------
   r.get('/stores/:storeId/pending', async (c, _req, p) => json(await listPending(c.db, c.actor, p.storeId!)));
+  r.get('/stores/:storeId/stale', async (c, _req, p) => json(await listStale(c.db, c.actor, p.storeId!)));
+  r.post('/knowledge/:id/verify', async (c, _req, p) => json(await verifyKnowledge(c.db, c.actor, p.id!)));
   r.get('/stores/:storeId/zero-hits', async (c, _req, p) => json(await zeroHitQueries(c.db, c.actor, p.storeId!)));
 
   return r;

@@ -288,3 +288,27 @@ export async function listPending(db: Db, actor: Actor, storeId: string) {
     [storeId],
   );
 }
+
+/** 半年以上確認されていない公開ナレッジ（鮮度管理。承認できる人が見直す） */
+export async function listStale(db: Db, actor: Actor, storeId: string, days = 180) {
+  assert(canModerate(actor, storeId), 'forbidden', '見直しの一覧を見る権限がありません');
+  return db.query<{ id: string; title: string; verified_at: string | null; verified_by: string | null }>(
+    `SELECT k.id, v.title, k.verified_at::text AS verified_at, u.name AS verified_by
+       FROM knowledge k
+       JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
+       LEFT JOIN users u ON u.id = k.verified_by
+      WHERE k.status = 'published' AND k.store_id = $1
+        AND k.verified_at < now() - make_interval(days => $2)
+      ORDER BY k.verified_at`,
+    [storeId, days],
+  );
+}
+
+/** 内容は変えずに「今も正しい」と確認した記録だけを残す（最終確認日・確認者を更新） */
+export async function verifyKnowledge(db: Db, actor: Actor, id: string) {
+  const k = await load(db, id, true);
+  assert(canModerate(actor, k.store_id), 'forbidden', '確認する権限がありません');
+  assert(k.status === 'published', 'conflict', '公開中のナレッジではありません');
+  await db.query(`UPDATE knowledge SET verified_by = $2, verified_at = now() WHERE id = $1`, [id, actor.userId]);
+  return { id };
+}
