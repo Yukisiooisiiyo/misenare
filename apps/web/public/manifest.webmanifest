@@ -1,0 +1,9 @@
+{
+  "name": "ミセナレ",
+  "short_name": "ミセナレ",
+  "start_url": "./#/home",
+  "display": "standalone",
+  "background_color": "#F2F4F3",
+  "theme_color": "#1F5FBF",
+  "lang": "ja"
+}

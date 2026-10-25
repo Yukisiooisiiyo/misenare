@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2023",
-    "lib": ["ES2023"],
+    "lib": [
+      "ES2023"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "allowImportingTsExtensions": true,
@@ -11,12 +13,14 @@
     "exactOptionalPropertyTypes": false,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "packages/*/src/**/*.ts",
     "packages/*/test/**/*.ts",
-    "apps/*/src/**/*.ts",
-    "apps/*/test/**/*.ts"
+    "apps/api/src/**/*.ts",
+    "apps/api/test/**/*.ts"
   ]
 }

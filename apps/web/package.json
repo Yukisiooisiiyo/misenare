@@ -1,0 +1,17 @@
+{
+  "name": "@misenare/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "スマホのブラウザで使う Web 版（探す・書く・バーコード）。API サーバーが /app/ で配信する",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch"
+  },
+  "dependencies": {
+    "@misenare/search-core": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}

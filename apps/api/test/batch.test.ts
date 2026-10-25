@@ -5,6 +5,8 @@ import type { Db } from '../src/db/db.ts';
 import { createKnowledge, listStale, verifyKnowledge } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
 import { listRelations } from '../src/domain/tagAdmin.ts';
+import { exportDictionary } from '../src/domain/tags.ts';
+import { suggestTags, TagDictionary } from '@misenare/search-core';
 import { freshDatabase, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
@@ -72,6 +74,17 @@ describe('夜間バッチ', () => {
     };
     const [report] = await runNightly(db, tokenizer, { candidateProviders: [provider] });
     assert.equal(report!.candidatesFromProviders, 1);
+  });
+
+  it('読みを返せるトークナイザーなら、タグに読みを付け、かなで漢字のタグが引ける', async () => {
+    const readings: Record<string, string> = { キャンペーン: 'キャンペーン', エアコン: 'エアコン', クーラー: 'クーラー' };
+    const withReading = Object.assign(Object.create(tokenizer), { reading: (w: string) => readings[w] ?? (w === '大型家電' ? 'オオガタカデン' : null) });
+    await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '大型家電の配送', body: '2名で。', tagNames: ['#大型家電'] }));
+    const [report] = await runNightly(db, withReading);
+    assert.ok(report!.readingsFilled >= 1);
+    const dict = await run((q) => exportDictionary(q, trusted, STORE_A));
+    const local = new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })));
+    assert.equal(suggestTags({ input: 'おおがた', dictionary: local }).candidates[0]?.name, '大型家電');
   });
 
   it('半年以上確認されていないナレッジを見直しの一覧に出し、確認すると外れる', async () => {

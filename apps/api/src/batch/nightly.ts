@@ -4,6 +4,7 @@
 //   3. 外部の候補提供元（Sudachi の同義語辞書・日本語WordNet・単語ベクトルなど）があれば、その候補も加える
 //   4. タグ辞書が変わっても索引が古いままにならないよう、公開ナレッジを索引し直す
 //   5. タグの使用回数を数え直す
+//   6. トークナイザーが読みを返せるなら、読みの無いタグに読みを付ける（かな入力で漢字のタグを引くため）
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
@@ -38,6 +39,21 @@ export interface TenantReport {
   candidatesFromProviders: number;
   reindexed: number;
   staleKnowledge: number;
+  readingsFilled: number;
+}
+
+/** トークナイザーが読みを返せるなら（kuromoji など）、読みの無いタグに読みを付ける */
+async function fillReadings(db: Db, tokenizer: Tokenizer): Promise<number> {
+  if (!tokenizer.reading) return 0;
+  const tags = await db.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE reading IS NULL AND state = 'active'`);
+  let filled = 0;
+  for (const t of tags) {
+    const r = tokenizer.reading(t.name);
+    if (!r) continue;
+    await db.query(`UPDATE hashtags SET reading = $2 WHERE id = $1`, [t.id, r]);
+    filled++;
+  }
+  return filled;
 }
 
 /** 期限切れのナレッジを expired にし、索引から外す */
@@ -128,6 +144,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
         const fromLogs = await candidatesFromPickedLogs(db, tenantId, options.pickedThreshold ?? 3, options.logDays ?? 30);
         const fromProviders = await candidatesFromProviders(db, tenantId, options.candidateProviders ?? []);
         const reindexed = await reindex(db, tokenizer, options.maxReindex ?? 5000);
+        const readingsFilled = await fillReadings(db, tokenizer);
         await db.query(
           `UPDATE hashtags h SET use_count =
              (SELECT count(*) FROM knowledge_tags kt WHERE kt.hashtag_id = h.id) +
@@ -137,7 +154,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
           `SELECT count(*)::int AS n FROM knowledge
             WHERE status = 'published' AND verified_at < now() - interval '180 days'`,
         );
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n };
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled };
       });
       reports.push(report);
     } catch (err) {

@@ -10,6 +10,8 @@ import { assertRlsEnforced } from './db/safety.ts';
 import { createApp } from './http/app.ts';
 import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
+import { createSite } from './http/site.ts';
+import { fileURLToPath } from 'node:url';
 
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL を設定してください');
@@ -33,5 +35,7 @@ const app = createApp({
   auth: process.env.MISENARE_DEV_AUTH === '1' ? new DevHeaderAuthenticator() : new SessionAuthenticator(database),
   tokenizer: new SegmenterTokenizer(),
 });
-serve(app, port);
+// Web 版（apps/web をビルドした dist）を /app/ で、API を /api/ で配信する
+const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
+serve(createSite(app, webDir), port);
 console.log(`misenare api listening on http://localhost:${port}`);

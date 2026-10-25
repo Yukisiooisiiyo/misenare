@@ -44,6 +44,7 @@ jobs:
           psql -h localhost -U postgres -c "CREATE DATABASE misenare_test OWNER misenare"
       - run: npm install
       - run: npm run typecheck
+      - run: npm run build:web
       - name: Test
         run: |
           set -o pipefail

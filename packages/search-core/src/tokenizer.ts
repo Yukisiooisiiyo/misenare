@@ -3,6 +3,12 @@
 export interface Tokenizer {
   /** 正規化済みの文字列を単語に区切る。助詞などの除外はこの後で行う。 */
   segment(normalized: string): string[];
+  /**
+   * 語のカタカナの読み（任意）。kuromoji などの形態素解析器なら返せる。
+   * タグの読み（hashtags.reading）を埋めるのに使い、「はんにゅう」と打って #搬入 が出るようになる。
+   * Intl.Segmenter では読みが取れないので実装しない。
+   */
+  reading?(word: string): string | null;
 }
 
 /**
