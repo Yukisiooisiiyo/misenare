@@ -24,12 +24,47 @@ export function verifiedLabel(iso: string | null): string {
   return iso ? `${relativeDate(iso)}に確認` : '未確認';
 }
 
+/** 更新・確認のうち新しい方から、この日数を過ぎたら「古い可能性」として知らせる */
+export const STALE_DAYS = 365;
+
+export function parseDate(iso: string | null): Date | null {
+  if (!iso) return null;
+  const d = new Date(iso.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'));
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * 情報の新しさの表示。最終更新日を主に出し、内容を変えずに確認した日の方が新しいときだけ添える。
+ * どちらも STALE_DAYS より前なら stale にする。
+ */
+export function freshness(updatedAt: string | null, verifiedAt: string | null): { updated: string; verified: string | null; stale: boolean } {
+  const u = parseDate(updatedAt);
+  const v = parseDate(verifiedAt);
+  const latest = Math.max(u?.getTime() ?? 0, v?.getTime() ?? 0);
+  const stale = latest === 0 || Date.now() - latest > STALE_DAYS * 86_400_000;
+  const verifiedLater = u !== null && v !== null && v.getTime() - u.getTime() > 86_400_000;
+  return {
+    updated: u ? `${relativeDate(updatedAt)}に更新` : '更新日不明',
+    verified: verifiedLater ? `${relativeDate(verifiedAt)}に確認` : null,
+    stale,
+  };
+}
+
+/** 検索結果などに添える、最終更新日の表示 */
+export function freshnessBadge(updatedAt: string | null, verifiedAt: string | null): HTMLElement {
+  const f = freshness(updatedAt, verifiedAt);
+  return h('span', { class: `fresh${f.stale ? ' fresh-stale' : ''}` },
+    h('span', {}, f.updated),
+    f.verified ? h('span', { class: 'fresh-verified' }, f.verified) : null,
+    f.stale ? h('span', { class: 'fresh-warn' }, '古い可能性があります') : null);
+}
+
 /** 日時を「今日 14:05」「3日前」「2026年4月2日」のように短く表す */
 export function relativeDate(iso: string | null): string {
   if (!iso) return '未確認';
   // PostgreSQL の text 表現（"2026-10-25 16:05:01.12+00"）も ISO 8601 に寄せて読む
-  const d = new Date(iso.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'));
-  if (Number.isNaN(d.getTime())) return '未確認';
+  const d = parseDate(iso);
+  if (!d) return '未確認';
   const days = Math.floor((Date.now() - d.getTime()) / 86_400_000);
   if (days < 1) return `今日 ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   if (days < 30) return `${days}日前`;

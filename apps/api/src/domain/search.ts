@@ -22,6 +22,9 @@ export interface SearchHit {
   tags: string[];
   score: number;
   matchedTerms: string[];
+  /** 内容が最後に変わった日時（公開中の版の編集日時） */
+  updatedAt: string;
+  /** 内容を変えずに「今も正しい」と確認した日時（承認・編集・確認のたび更新） */
   verifiedAt: string | null;
   verifiedBy: string | null;
 }
@@ -112,8 +115,8 @@ export async function rankByGroups(
 /** 検索結果の表示用の情報（タイトル・抜粋・タグ・確認日）を付ける */
 export async function describeHits(db: Db, ranked: Array<{ id: string; score: number; matchedTerms: string[] }>): Promise<SearchHit[]> {
   if (ranked.length === 0) return [];
-  const rows = await db.query<{ id: string; title: string; body: string; verified_at: string | null; verified_by: string | null; tags: string[] }>(
-    `SELECT k.id, v.title, v.body, k.verified_at::text AS verified_at, u.name AS verified_by,
+  const rows = await db.query<{ id: string; title: string; body: string; updated_at: string; verified_at: string | null; verified_by: string | null; tags: string[] }>(
+    `SELECT k.id, v.title, v.body, v.edited_at::text AS updated_at, k.verified_at::text AS verified_at, u.name AS verified_by,
             coalesce(array_agg(h.name ORDER BY h.use_count DESC) FILTER (WHERE h.id IS NOT NULL), '{}') AS tags
        FROM knowledge k
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
@@ -121,7 +124,7 @@ export async function describeHits(db: Db, ranked: Array<{ id: string; score: nu
        LEFT JOIN knowledge_tags kt ON kt.knowledge_id = k.id
        LEFT JOIN hashtags h ON h.id = kt.hashtag_id
       WHERE k.id = ANY($1::uuid[])
-      GROUP BY k.id, v.title, v.body, k.verified_at, u.name`,
+      GROUP BY k.id, v.title, v.body, v.edited_at, k.verified_at, u.name`,
     [ranked.map((r) => r.id)],
   );
   const byId = new Map(rows.map((r) => [r.id, r]));
@@ -135,6 +138,7 @@ export async function describeHits(db: Db, ranked: Array<{ id: string; score: nu
       tags: row.tags,
       score: Math.round(r.score * 1000) / 1000,
       matchedTerms: r.matchedTerms,
+      updatedAt: row.updated_at,
       verifiedAt: row.verified_at,
       verifiedBy: row.verified_by,
     }];

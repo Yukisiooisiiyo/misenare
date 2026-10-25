@@ -2,7 +2,7 @@
 // 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
 
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
-import { clear, h, relativeDate, tagChip, toast, verifiedLabel } from './dom.ts';
+import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 
 const root = document.getElementById('app')!;
@@ -235,7 +235,7 @@ function hitList(hits: Hit[], logId?: number): HTMLElement {
         h('span', { class: 'hit-title' }, hit.linked ? h('span', { class: 'linked' }, 'この商品の') : null, hit.title),
         h('span', { class: 'hit-snippet' }, hit.snippet),
         h('span', { class: 'hit-meta' }, ...hit.tags.slice(0, 4).map((t) => tagChip(t, { quiet: true })),
-          h('span', { class: 'verified' }, verifiedLabel(hit.verifiedAt)))))));
+          freshnessBadge(hit.updatedAt, hit.verifiedAt))))));
 }
 
 // --- ナレッジの詳細 ---------------------------------------------------------------
@@ -254,10 +254,19 @@ async function renderKnowledge(id: string): Promise<void> {
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
-    h('p', { class: 'verified' }, k.verifiedAt ? `${relativeDate(k.verifiedAt)}に${k.verifiedBy ?? ''}さんが確認` : '未確認'),
+    freshnessDetail(k),
     h('div', { class: 'actions' },
       h('a', { href: `#/edit/${k.id}`, class: 'secondary' }, isTrusted() ? '編集する' : '修正を提案する')),
   ));
+}
+
+/** 詳細画面の新しさの表示：誰がいつ更新し、誰がいつ確認したか */
+function freshnessDetail(k: Knowledge): HTMLElement {
+  const f = freshness(k.updatedAt, k.verifiedAt);
+  return h('div', { class: 'fresh-detail' },
+    h('p', {}, `最終更新：${relativeDate(k.updatedAt)}${k.updatedBy ? `（${k.updatedBy}さん）` : ''}`),
+    f.verified ? h('p', {}, `内容の確認：${relativeDate(k.verifiedAt)}${k.verifiedBy ? `（${k.verifiedBy}さん）` : ''}`) : null,
+    f.stale ? h('p', { class: 'fresh-warn' }, '1年以上、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。') : null);
 }
 
 // --- 書く（投稿・編集） ------------------------------------------------------------

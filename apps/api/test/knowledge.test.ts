@@ -36,6 +36,7 @@ describe('投稿と承認（visitor / trusted）', () => {
     const r = await run((q) => search(q, tokenizer, trusted, STORE_A, 'テレビ 修理'));
     assert.deepEqual(ids(r), [k.id]);
     assert.equal(r.hits[0]!.verifiedBy, 'ベテランパート');
+    assert.ok(!Number.isNaN(Date.parse(r.hits[0]!.updatedAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))), '最終更新日を返す');
   });
 
   it('visitor の投稿は承認待ちで、承認されるまで検索に出ない。新しいタグも承認待ち', async () => {
@@ -134,6 +135,15 @@ describe('編集と版', () => {
   it('承認待ち・却下の案には「戻す」で公開できない', async () => {
     const pend = (await run((q) => listVersions(q, trusted, id))).find((v) => v.state === 'pending')!;
     await rejects(run((q) => revertToVersion(q, tokenizer, trusted, id, pend.version)), 'conflict');
+  });
+
+  it('最終更新日は内容を変えた日、確認日は「今も正しい」とした日で、別々に返す', async () => {
+    await run((q) => q.query(`UPDATE knowledge_versions SET edited_at = now() - interval '400 days' WHERE knowledge_id = $1 AND state = 'published'`, [id]));
+    const before = await run((q) => getKnowledge(q, trusted, id));
+    assert.ok(Date.now() - Date.parse(before.updatedAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')) > 399 * 86_400_000);
+    assert.equal(before.updatedBy, 'ベテランパート');
+    const hit = (await run((q) => search(q, tokenizer, trusted, STORE_A, '#搬入'))).hits.find((h) => h.id === id)!;
+    assert.equal(hit.updatedAt, before.updatedAt);
   });
 
   it('過去版に戻すと、その内容で新しい版が作られる（履歴は消えない）', async () => {

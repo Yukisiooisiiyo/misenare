@@ -27,6 +27,9 @@ export interface KnowledgeView {
   title: string;
   body: string;
   tags: string[];
+  /** 内容が最後に変わった日時（表示中の版の編集日時） */
+  updatedAt: string;
+  updatedBy: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
   /** 公開中の版より新しい承認待ちの版 */
@@ -217,9 +220,11 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
   // 公開中の版。未公開なら最新の案（投稿者本人と承認者だけが見られる）
-  const v = await maybeOne<{ version: number; title: string; body: string; tag_ids: string[]; edited_by: string }>(
+  const v = await maybeOne<{ version: number; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null }>(
     db,
-    `SELECT version, title, body, tag_ids, edited_by FROM knowledge_versions
+    `SELECT version, title, body, tag_ids, edited_by, edited_at::text AS edited_at,
+            (SELECT name FROM users WHERE id = edited_by) AS editor
+       FROM knowledge_versions
       WHERE knowledge_id = $1 AND (version = $2 OR $2::int IS NULL)
       ORDER BY version DESC LIMIT 1`,
     [id, k.current_version],
@@ -252,6 +257,8 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     title: v.title,
     body: v.body,
     tags: tags.map((t) => t.name),
+    updatedAt: v.edited_at,
+    updatedBy: v.editor,
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
     pendingVersions: pending.map((p) => p.version),

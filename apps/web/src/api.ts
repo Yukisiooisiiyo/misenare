@@ -69,6 +69,7 @@ export interface Hit {
   title: string;
   snippet: string;
   tags: string[];
+  updatedAt: string;
   verifiedAt: string | null;
   verifiedBy: string | null;
   linked?: boolean;
@@ -88,6 +89,8 @@ export interface Knowledge {
   title: string;
   body: string;
   tags: string[];
+  updatedAt: string;
+  updatedBy: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
   pendingVersions: number[];
