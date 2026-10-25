@@ -23,6 +23,22 @@ export interface ExpandedTag {
   via: 'self' | 'synonym' | 'includes';
 }
 
+const ASCII_ALNUM = /[a-z0-9]/;
+
+/**
+ * 英数字で始まる・終わる語句は、前後が英数字でないときだけ一致とみなす。
+ * タグ #ac が "back" の中に当たらないようにするため。日本語どうしの境目は判定しない。
+ */
+function atWordBoundary(text: string, start: number, length: number): boolean {
+  const first = text[start]!;
+  const last = text[start + length - 1]!;
+  const before = start > 0 ? text[start - 1]! : '';
+  const after = text[start + length] ?? '';
+  if (ASCII_ALNUM.test(first) && ASCII_ALNUM.test(before)) return false;
+  if (ASCII_ALNUM.test(last) && ASCII_ALNUM.test(after)) return false;
+  return true;
+}
+
 export class TagDictionary {
   readonly tags: ReadonlyMap<string, TagEntry>;
   private readonly byName = new Map<string, TagEntry>();
@@ -99,16 +115,18 @@ export class TagDictionary {
    * matchPhrases と同じ照合をし、一致しなかった部分（rest）も返す。
    * 一致した部分は空白に置き換えるので、rest をそのまま単語分割に回せる。
    */
-  scanPhrases(normalized: string): { tagIds: string[]; rest: string } {
+  scanPhrases(normalized: string): { tagIds: string[]; rest: string; spans: Array<{ tagId: string; text: string }> } {
     const tagIds: string[] = [];
+    const spans: Array<{ tagId: string; text: string }> = [];
     let rest = '';
     let i = 0;
     while (i < normalized.length) {
       const ch = normalized[i]!;
       const candidates = this.phrasesByHead.get(ch);
-      const hit = candidates?.find((c) => normalized.startsWith(c.phrase, i));
+      const hit = candidates?.find((c) => normalized.startsWith(c.phrase, i) && atWordBoundary(normalized, i, c.phrase.length));
       if (hit) {
         tagIds.push(hit.tagId);
+        spans.push({ tagId: hit.tagId, text: hit.phrase });
         rest += ' ';
         i += hit.phrase.length;
       } else {
@@ -116,7 +134,7 @@ export class TagDictionary {
         i += 1;
       }
     }
-    return { tagIds, rest };
+    return { tagIds, rest, spans };
   }
 
   /** 同義（推移的） */

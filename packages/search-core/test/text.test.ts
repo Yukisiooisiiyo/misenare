@@ -3,6 +3,8 @@ import { describe, it } from 'node:test';
 import { analyzeDocument, analyzeQuery, analyzeText } from '../src/analyzer.ts';
 import { hiraToKata, romajiToKata, toReadingKey } from '../src/kana.ts';
 import { extractModelNumbers, normalizeTagName, normalizeText } from '../src/normalize.ts';
+import { TagDictionary } from '../src/tagDictionary.ts';
+import { SegmenterTokenizer } from '../src/tokenizer.ts';
 import { deps } from './fixtures.ts';
 
 describe('正規化', () => {
@@ -77,6 +79,30 @@ describe('解析', () => {
     const terms = analyzeText('食洗機の分岐水栓', deps());
     assert.ok(terms.includes('食洗機'), terms.join(','));
     assert.ok(!terms.includes('機'));
+  });
+
+  it('本文中のタグ名を、タグ語と分割後の単語で二重に数えない', () => {
+    const doc = analyzeDocument({ title: '冷蔵庫の搬入', body: '', tagNames: [] }, deps());
+    assert.equal(doc.tf.title.get('冷蔵庫'), 1);
+    // 冷凍冷蔵庫 はタグ語として1回、分割した「冷凍」「冷蔵庫」はそれぞれ1回
+    const d2 = analyzeDocument({ title: '冷凍冷蔵庫', body: '', tagNames: [] }, deps());
+    assert.deepEqual([...d2.tf.title].sort(), [['冷凍', 1], ['冷凍冷蔵庫', 1], ['冷蔵庫', 1]].sort());
+  });
+
+  it('英字の短いタグは単語の途中には当たらない（#ac が back に当たらない）', () => {
+    const d = new TagDictionary([{ id: 'ac', name: 'ac', useCount: 1 }]);
+    assert.deepEqual(d.matchPhrases('back up'), []);
+    assert.deepEqual(d.matchPhrases('ac 100v'), ['ac']);
+  });
+
+  it('型番の形をしたタグ（#iphone15）も、検索で同義・下位に展開される', () => {
+    const d = new TagDictionary(
+      [{ id: 'ip', name: 'iphone15', useCount: 1 }, { id: 'ipp', name: 'iphone15pro', useCount: 1 }],
+      [{ kind: 'includes', fromTagId: 'ip', toTagId: 'ipp' }],
+    );
+    const q = analyzeQuery('iPhone15 ケース', { tokenizer: new SegmenterTokenizer(), dictionary: d });
+    assert.deepEqual(q.matchedTagIds, ['ip']);
+    assert.equal(q.terms.get('iphone15pro'), 0.7);
   });
 
   it('タグ欄はタグ名を分割せず1語として数える', () => {

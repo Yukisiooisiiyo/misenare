@@ -32,12 +32,29 @@ export interface AnalyzeDeps {
  *                    #冷蔵庫 全般に広がらないようにする（包含は一方向）。
  */
 export function analyzeText(text: string, deps: AnalyzeDeps, splitTagSpans = true): string[] {
+  return scanText(text, deps, splitTagSpans).terms;
+}
+
+/** analyzeText と同じ処理で、文字列の中で認識できたタグ（型番の形のタグも含む）も返す。 */
+function scanText(text: string, deps: AnalyzeDeps, splitTagSpans: boolean): { terms: string[]; tagIds: string[] } {
   const normalized = normalizeText(text);
   const { modelNumbers, rest } = extractModelNumbers(normalized);
+  // 型番の形をしたタグ（#iphone15 など）は、型番として取り出した後でタグとして認識する
+  const modelTagIds = modelNumbers.flatMap((m) => {
+    const tag = deps.dictionary.getByName(m);
+    return tag ? [tag.id] : [];
+  });
   const scan = deps.dictionary.scanPhrases(rest);
   const tagTerms = scan.tagIds.map((id) => deps.dictionary.tags.get(id)!.name);
-  const words = filterTerms(deps.tokenizer.segment(splitTagSpans ? rest : scan.rest));
-  return [...modelNumbers, ...tagTerms, ...words];
+  const words = filterTerms(deps.tokenizer.segment(scan.rest));
+  if (splitTagSpans) {
+    // タグに一致した部分も単語に分けて加える。ただしタグ名そのものと同じ語は二重に数えない
+    for (const span of scan.spans) {
+      const name = deps.dictionary.tags.get(span.tagId)!.name;
+      for (const w of filterTerms(deps.tokenizer.segment(span.text))) if (w !== name) words.push(w);
+    }
+  }
+  return { terms: [...modelNumbers, ...tagTerms, ...words], tagIds: [...modelTagIds, ...scan.tagIds] };
 }
 
 function count(terms: string[]): Map<string, number> {
@@ -80,8 +97,8 @@ export interface AnalyzedQuery {
 
 export function analyzeQuery(query: string, deps: AnalyzeDeps, expandedWeight = 0.7): AnalyzedQuery {
   const stripped = query.replace(/[#＃]/g, ' ');
-  const { rest } = extractModelNumbers(normalizeText(stripped));
-  const matchedTagIds = [...new Set(deps.dictionary.matchPhrases(rest))];
+  const scanned = scanText(stripped, deps, false);
+  const matchedTagIds = [...new Set(scanned.tagIds)];
 
   const groups: Map<string, number>[] = [];
   const grouped = new Set<string>();
@@ -94,7 +111,7 @@ export function analyzeQuery(query: string, deps: AnalyzeDeps, expandedWeight = 
     }
     groups.push(g);
   }
-  for (const t of new Set(analyzeText(stripped, deps, false))) {
+  for (const t of new Set(scanned.terms)) {
     if (!grouped.has(t)) groups.push(new Map([[t, 1]]));
   }
 

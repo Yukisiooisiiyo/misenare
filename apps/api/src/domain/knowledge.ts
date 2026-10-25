@@ -6,6 +6,7 @@ import type { Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
+import { assertStore } from './scope.ts';
 import { activateTags, resolveTags } from './tags.ts';
 
 export interface KnowledgeInput {
@@ -38,6 +39,7 @@ interface KnowledgeRow {
   store_id: string | null;
   status: KnowledgeView['status'];
   current_version: number | null;
+  expires_at: string | null;
 }
 
 const MAX_TITLE = 100;
@@ -50,10 +52,12 @@ function validate(input: Pick<KnowledgeInput, 'title' | 'body' | 'tagNames'>) {
   assert(input.tagNames.some((t) => t.replace(/[#＃\s]/g, '').length > 0), 'invalid', 'ハッシュタグを1つ以上付けてください');
 }
 
-async function load(db: Db, id: string): Promise<KnowledgeRow> {
+/** lock = true なら行ロックを取る（同時編集で版番号が衝突しないように、変更系では必ず使う）。 */
+async function load(db: Db, id: string, lock = false): Promise<KnowledgeRow> {
   const row = await maybeOne<KnowledgeRow>(
     db,
-    `SELECT id, tenant_id, store_id, status, current_version FROM knowledge WHERE id = $1`,
+    `SELECT id, tenant_id, store_id, status, current_version, expires_at::text AS expires_at
+       FROM knowledge WHERE id = $1${lock ? ' FOR UPDATE' : ''}`,
     [id],
   );
   assert(row !== undefined, 'not_found', 'ナレッジが見つかりません');
@@ -65,25 +69,51 @@ async function nextVersion(db: Db, id: string): Promise<number> {
   return r.v;
 }
 
-/** 版を公開する：旧公開版を過去版にし、current_version を進め、確認日を更新し、索引に反映する。 */
+/**
+ * 版を公開する：旧公開版と、それより古い承認待ちの案を過去版にし、current_version と期限を進め、
+ * 確認日を更新し、索引に反映する。期限は版に持たせておき、公開した時点で初めて効かせる。
+ */
 async function publish(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number): Promise<void> {
   await db.query(
-    `UPDATE knowledge_versions SET state = 'superseded' WHERE knowledge_id = $1 AND state = 'published'`,
-    [id],
+    `UPDATE knowledge_versions SET state = 'superseded'
+      WHERE knowledge_id = $1 AND (state = 'published' OR (state = 'pending' AND version < $2))`,
+    [id, version],
   );
-  const v = await one<{ tag_ids: string[] }>(
+  const v = await one<{ tag_ids: string[]; expires_at: string | null }>(
     db,
     `UPDATE knowledge_versions SET state = 'published', decided_by = $3, decided_at = now()
-      WHERE knowledge_id = $1 AND version = $2 RETURNING tag_ids`,
+      WHERE knowledge_id = $1 AND version = $2 RETURNING tag_ids, expires_at`,
     [id, version, actor.userId],
   );
   await activateTags(db, v.tag_ids);
   await db.query(
-    `UPDATE knowledge SET status = 'published', current_version = $2, verified_by = $3, verified_at = now()
+    `UPDATE knowledge SET status = 'published', current_version = $2, expires_at = $3::timestamptz,
+            verified_by = $4, verified_at = now()
       WHERE id = $1`,
-    [id, version, actor.userId],
+    [id, version, v.expires_at, actor.userId],
   );
   await indexKnowledge(db, tokenizer, id);
+}
+
+async function insertVersion(
+  db: Db,
+  actor: Actor,
+  id: string,
+  version: number,
+  v: { title: string; body: string; tagIds: string[]; areaIds: string[]; expiresAt: string | null },
+) {
+  await db.query(
+    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, expires_at, state, edited_by)
+     VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::uuid[], $8::timestamptz, 'pending', $9)`,
+    [actor.tenantId, id, version, v.title, v.body, v.tagIds, v.areaIds, v.expiresAt, actor.userId],
+  );
+}
+
+async function assertAreas(db: Db, storeId: string | null, areaIds: string[] | undefined) {
+  if (!areaIds || areaIds.length === 0) return;
+  assert(storeId !== null, 'invalid', '全店共通のナレッジには売場を指定できません');
+  const n = await one<{ n: number }>(db, `SELECT count(*)::int AS n FROM areas WHERE id = ANY($1::uuid[]) AND store_id = $2`, [areaIds, storeId]);
+  assert(n.n === new Set(areaIds).size, 'invalid', 'この店舗の売場ではありません');
 }
 
 export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor, input: KnowledgeInput) {
@@ -92,19 +122,19 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
     assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジは本部のみ作成できます');
   } else {
     assert(canAccessStore(actor, input.storeId), 'forbidden', 'この店舗には投稿できません');
+    await assertStore(db, input.storeId);
   }
+  await assertAreas(db, input.storeId, input.areaIds);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const k = await one<{ id: string }>(
     db,
-    `INSERT INTO knowledge (tenant_id, scope, store_id, status, expires_at, created_by)
-     VALUES ($1, $2, $3, 'draft', $4, $5) RETURNING id`,
-    [actor.tenantId, input.storeId === null ? 'tenant' : 'store', input.storeId, input.expiresAt ?? null, actor.userId],
+    `INSERT INTO knowledge (tenant_id, scope, store_id, status, created_by)
+     VALUES ($1, $2, $3, 'draft', $4) RETURNING id`,
+    [actor.tenantId, input.storeId === null ? 'tenant' : 'store', input.storeId, actor.userId],
   );
-  await db.query(
-    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, state, edited_by)
-     VALUES ($1, $2, 1, $3, $4, $5::uuid[], $6::uuid[], 'pending', $7)`,
-    [actor.tenantId, k.id, input.title.trim(), input.body, tagIds, input.areaIds ?? [], actor.userId],
-  );
+  await insertVersion(db, actor, k.id, 1, {
+    title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [], expiresAt: input.expiresAt ?? null,
+  });
   if (isTrusted(actor)) await publish(db, tokenizer, actor, k.id, 1);
   return { id: k.id, version: 1, published: isTrusted(actor) };
 }
@@ -117,26 +147,24 @@ export async function editKnowledge(
   input: Omit<KnowledgeInput, 'storeId'>,
 ) {
   validate(input);
-  const k = await load(db, id);
+  const k = await load(db, id, true);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは編集できません');
   if (k.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジは本部のみ編集できます');
+  await assertAreas(db, k.store_id, input.areaIds);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const version = await nextVersion(db, id);
-  await db.query(
-    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, state, edited_by)
-     VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::uuid[], 'pending', $8)`,
-    [k.tenant_id, id, version, input.title.trim(), input.body, tagIds, input.areaIds ?? [], actor.userId],
-  );
-  if (input.expiresAt !== undefined) {
-    await db.query(`UPDATE knowledge SET expires_at = $2 WHERE id = $1`, [id, input.expiresAt]);
-  }
+  // 期限を指定しなければ今の期限を引き継ぐ。どちらの場合も公開（承認）されるまで効かない
+  await insertVersion(db, actor, id, version, {
+    title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [],
+    expiresAt: input.expiresAt !== undefined ? input.expiresAt : k.expires_at,
+  });
   const published = isTrusted(actor);
   if (published) await publish(db, tokenizer, actor, id, version);
   return { id, version, published };
 }
 
 export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number) {
-  const k = await load(db, id);
+  const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '承認する権限がありません');
   const v = await maybeOne<{ state: string }>(
     db,
@@ -152,7 +180,7 @@ export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor,
 }
 
 export async function rejectVersion(db: Db, actor: Actor, id: string, version: number) {
-  const k = await load(db, id);
+  const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '却下する権限がありません');
   const rows = await db.query(
     `UPDATE knowledge_versions SET state = 'rejected', decided_by = $3, decided_at = now()
@@ -166,20 +194,21 @@ export async function rejectVersion(db: Db, actor: Actor, id: string, version: n
 
 /** 過去版の内容で新しい版を作って公開する（履歴は消さない）。 */
 export async function revertToVersion(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number) {
-  const k = await load(db, id);
+  const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '過去版に戻す権限がありません');
-  const old = await maybeOne<{ title: string; body: string; tag_ids: string[]; area_ids: string[] }>(
+  const old = await maybeOne<{ title: string; body: string; tag_ids: string[]; area_ids: string[]; expires_at: string | null; state: string }>(
     db,
-    `SELECT title, body, tag_ids, area_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
+    `SELECT title, body, tag_ids, area_ids, expires_at::text AS expires_at, state
+       FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
     [id, version],
   );
   assert(old !== undefined, 'not_found', '版が見つかりません');
+  // 戻せるのは一度公開された版だけ。承認待ち・却下の案を戻しで公開すると承認を飛ばせてしまう
+  assert(old.state === 'superseded' || old.state === 'published', 'conflict', '一度も公開されていない版には戻せません');
   const next = await nextVersion(db, id);
-  await db.query(
-    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, state, edited_by)
-     VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::uuid[], 'pending', $8)`,
-    [k.tenant_id, id, next, old.title, old.body, old.tag_ids, old.area_ids, actor.userId],
-  );
+  await insertVersion(db, actor, id, next, {
+    title: old.title, body: old.body, tagIds: old.tag_ids, areaIds: old.area_ids, expiresAt: old.expires_at,
+  });
   await publish(db, tokenizer, actor, id, next);
   return { id, version: next };
 }
@@ -205,12 +234,15 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   );
   const meta = await one<{ verified_at: string | null; verified_by: string | null }>(
     db,
-    `SELECT k.verified_at, u.name AS verified_by FROM knowledge k LEFT JOIN users u ON u.id = k.verified_by WHERE k.id = $1`,
+    `SELECT k.verified_at::text AS verified_at, u.name AS verified_by FROM knowledge k LEFT JOIN users u ON u.id = k.verified_by WHERE k.id = $1`,
     [id],
   );
+  // 承認待ちの版は、承認できる人には全部、それ以外の人には自分の案だけを見せる
   const pending = await db.query<{ version: number }>(
-    `SELECT version FROM knowledge_versions WHERE knowledge_id = $1 AND state = 'pending' ORDER BY version`,
-    [id],
+    `SELECT version FROM knowledge_versions
+      WHERE knowledge_id = $1 AND state = 'pending' AND ($2 OR edited_by = $3)
+      ORDER BY version`,
+    [id, canModerate(actor, k.store_id), actor.userId],
   );
   return {
     id,
@@ -226,15 +258,20 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   };
 }
 
-/** 版の一覧（差分表示・戻し用） */
+/**
+ * 版の一覧（差分表示・戻し用）。公開された版（公開中・過去版）は誰でも見られる。
+ * 承認待ち・却下の案は、承認できる人と、その案を書いた本人にだけ見せる。
+ */
 export async function listVersions(db: Db, actor: Actor, id: string) {
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
-  return db.query(
+  return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string }>(
     `SELECT v.version, v.state, v.title, v.body, v.edited_at, u.name AS edited_by
        FROM knowledge_versions v JOIN users u ON u.id = v.edited_by
-      WHERE v.knowledge_id = $1 ORDER BY v.version DESC`,
-    [id],
+      WHERE v.knowledge_id = $1
+        AND (v.state IN ('published', 'superseded') OR $2 OR v.edited_by = $3)
+      ORDER BY v.version DESC`,
+    [id, canModerate(actor, k.store_id), actor.userId],
   );
 }
 

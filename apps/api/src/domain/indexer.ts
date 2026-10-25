@@ -2,7 +2,7 @@
 
 import { analyzeDocument, FIELDS, type Tokenizer } from '@misenare/search-core';
 import type { Db } from '../db/db.ts';
-import { loadDictionary, refreshUseCounts } from './tags.ts';
+import { canonicalTagIds, loadDictionary, refreshUseCounts } from './tags.ts';
 
 interface PublishedRow { tenant_id: string; title: string; body: string; tag_ids: string[] }
 
@@ -32,10 +32,10 @@ export async function indexKnowledge(db: Db, tokenizer: Tokenizer, knowledgeId: 
     return;
   }
 
-  // 有効なタグだけを索引に載せる（承認待ちのタグは載せない）
+  // 統合されたタグは統合先に置き換え、有効なタグだけを索引に載せる（承認待ちのタグは載せない）
   const tagRows = await db.query<{ id: string; name: string }>(
     `SELECT id, name FROM hashtags WHERE id = ANY($1::uuid[]) AND state = 'active'`,
-    [doc.tag_ids],
+    [await canonicalTagIds(db, doc.tag_ids)],
   );
   const dictionary = await loadDictionary(db);
   const analyzed = analyzeDocument(

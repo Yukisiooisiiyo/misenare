@@ -57,6 +57,15 @@ describe('HTTP API', () => {
     assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/products`, p)).status, 409);
   });
 
+  it('形の正しくない ID や本文は 500 ではなく 400 で返す', async () => {
+    assert.equal((await call(trusted, 'GET', '/stores/not-a-uuid/search?q=x')).status, 400);
+    assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { title: 'タイトルだけ' })).status, 400);
+    assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { title: 'x', body: 'y', tagNames: ['#x'], expiresAt: '明日' })).status, 400);
+    assert.equal((await call(trusted, 'PATCH', `/stores/${STORE_A}/products/${STORE_A}`, { tagNames: 'テレビ' })).status, 400);
+    assert.equal((await call(trusted, 'GET', '/stores/20000000-0000-0000-0000-0000000000ff/search?q=x')).status, 403);
+    assert.equal((await call(trusted, 'GET', `/knowledge/${STORE_A}`)).status, 404);
+  });
+
   it('visitor の投稿は承認待ちとして返り、承認 API で公開される', async () => {
     const created = await call(visitor, 'POST', `/stores/${STORE_A}/knowledge`, {
       title: '電子レンジの返品', body: '開封後は初期不良のみ。', tagNames: ['#電子レンジ', '#返品'],

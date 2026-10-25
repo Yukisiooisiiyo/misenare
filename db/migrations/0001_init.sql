@@ -130,6 +130,7 @@ CREATE TABLE knowledge_versions (
   tag_ids       uuid[] NOT NULL DEFAULT '{}',
   photo_ids     uuid[] NOT NULL DEFAULT '{}',
   area_ids      uuid[] NOT NULL DEFAULT '{}',
+  expires_at    timestamptz,             -- 公開時に knowledge.expires_at へ反映する（承認前に効かせない）
   state         text NOT NULL CHECK (state IN ('published', 'pending', 'superseded', 'rejected')),
   edited_by     uuid NOT NULL REFERENCES users(id),
   edited_at     timestamptz NOT NULL DEFAULT now(),
@@ -207,6 +208,8 @@ CREATE TABLE products (
   name        text NOT NULL,
   maker       text,
   state       text NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'pending', 'merged')),
+  -- 最初に登録された店舗。承認待ちの商品を承認できるのは、この店舗の trusted 以上
+  origin_store_id  uuid REFERENCES stores(id) ON DELETE SET NULL,
   created_by  uuid NOT NULL REFERENCES users(id),
   created_at  timestamptz NOT NULL DEFAULT now(),
   UNIQUE (tenant_id, jan_code)

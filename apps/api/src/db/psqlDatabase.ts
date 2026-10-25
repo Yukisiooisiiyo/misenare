@@ -43,6 +43,9 @@ export class PsqlDatabase implements Database {
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(connectionString: string) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('PsqlDatabase は開発・テスト専用です。本番では PgDatabase（DB_DRIVER=pg）を使ってください。');
+    }
     this.proc = spawn('psql', [connectionString, '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=0'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -93,18 +96,28 @@ export class PsqlDatabase implements Database {
     return task;
   }
 
-  async withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
-    const db: Db = { query: async <R>(sql: string, params?: readonly unknown[]) => (await this.run(sql, params)) as R[] };
-    await this.run('BEGIN');
-    try {
-      await this.run("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
-      const result = await fn(db);
-      await this.run('COMMIT');
-      return result;
-    } catch (err) {
-      await this.run('ROLLBACK');
-      throw err;
-    }
+  /**
+   * psql の接続は1本しかないので、トランザクションは1つずつ順番に実行する。
+   * 並行に流すと BEGIN や app.tenant_id が別のリクエストと混ざり、他社の権限で実行されかねない。
+   */
+  private txChain: Promise<unknown> = Promise.resolve();
+
+  withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
+    const task = this.txChain.then(async () => {
+      const db: Db = { query: async <R>(sql: string, params?: readonly unknown[]) => (await this.run(sql, params)) as R[] };
+      await this.run('BEGIN');
+      try {
+        await this.run("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+        const result = await fn(db);
+        await this.run('COMMIT');
+        return result;
+      } catch (err) {
+        await this.run('ROLLBACK');
+        throw err;
+      }
+    });
+    this.txChain = task.catch(() => undefined);
+    return task;
   }
 
   /** テナントを設定せずに実行する（マイグレーションやテストの準備用）。 */

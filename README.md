@@ -71,9 +71,12 @@ curl -H 'x-dev-tenant-id: <tenant uuid>' -H 'x-dev-user-id: <user uuid>' \
 | --- | --- | --- | --- |
 | ナレッジ・商品・タグの追加と編集 | 承認待ち | 即時反映 | 即時反映 |
 | 承認・却下・過去版への戻し | — | ○ | ○ |
-| 商品の削除、ユーザー管理 | — | — | ○ |
+| 商品の削除、ユーザー管理 | — | — | ○（商品マスタの削除は本部のみ） |
 
-店舗をまたぐ分離はアプリ側で、企業（テナント）をまたぐ分離は PostgreSQL の行レベルセキュリティで行う。
+- 承認待ちの案や却下された案は、書いた本人と承認できる人にしか見えない。
+- 期限（expiresAt）も版に持たせ、公開（承認）されるまで効かない。
+- 店舗をまたぐ分離はアプリ側で、企業（テナント）をまたぐ分離は PostgreSQL の行レベルセキュリティで行う。
+  外部キーの検査は行レベルセキュリティを無視するため、受け取った店舗・商品などの ID は RLS の効いた SELECT で存在を確かめてから使う。
 
 ## API
 
@@ -92,8 +95,11 @@ curl -H 'x-dev-tenant-id: <tenant uuid>' -H 'x-dev-user-id: <user uuid>' \
 | GET | `/stores/:storeId/barcode/:jan` | 商品カードと関連ナレッジ（未登録なら unknown） |
 | POST | `/stores/:storeId/products` | 商品の登録 |
 | PATCH | `/stores/:storeId/products/:id` | 商品名・売場・タグの編集（visitor は承認待ち） |
+| DELETE | `/stores/:storeId/products/:id` | 本部は商品ごと削除、店長は自店舗の売場情報だけ外す |
 | GET | `/stores/:storeId/products/:id/history` | 商品情報の変更履歴 |
-| POST | `/product-changes/:id/approve` | visitor の商品編集を承認 |
+| GET | `/stores/:storeId/pending-products` | 承認待ちの商品と、商品情報の変更依頼 |
+| POST | `/products/:id/approve` | visitor が登録した商品を承認（登録された店舗の trusted 以上） |
+| POST | `/product-changes/:id/approve` `reject` | visitor の商品編集を承認・却下 |
 | POST | `/knowledge/:id/products/:productId` | ナレッジと商品の紐づけ |
 
 ## まだ無いもの
@@ -105,3 +111,4 @@ curl -H 'x-dev-tenant-id: <tenant uuid>' -H 'x-dev-user-id: <user uuid>' \
 - 既存マニュアル（PDF・Word・Excel）の取込
 - タグの統合（merged）の画面と処理
 - 形態素解析器の kuromoji / Lindera への切り替え（`Tokenizer` を実装して差し替える）
+- 端末に配るタグ辞書（`/tags/dictionary`）は、今は全店舗のタグと共起をまとめて返す。店舗ごとに絞るかは要検討

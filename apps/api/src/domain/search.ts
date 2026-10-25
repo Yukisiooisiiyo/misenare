@@ -12,6 +12,7 @@ import {
 } from '@misenare/search-core';
 import type { Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, type Actor } from './actor.ts';
+import { assertStore } from './scope.ts';
 import { loadDictionary } from './tags.ts';
 
 export interface SearchHit {
@@ -77,7 +78,7 @@ export async function rankByGroups(
   if (ids.length === 0) return [];
 
   const lengthRows = await db.query<{ knowledge_id: string; tag_len: number; title_len: number; body_len: number; verified_at: string | null }>(
-    `SELECT s.knowledge_id, s.tag_len, s.title_len, s.body_len, k.verified_at
+    `SELECT s.knowledge_id, s.tag_len, s.title_len, s.body_len, k.verified_at::text AS verified_at
        FROM knowledge_stats s JOIN knowledge k ON k.id = s.knowledge_id
       WHERE s.knowledge_id = ANY($1::uuid[])`,
     [ids],
@@ -112,7 +113,7 @@ export async function rankByGroups(
 export async function describeHits(db: Db, ranked: Array<{ id: string; score: number; matchedTerms: string[] }>): Promise<SearchHit[]> {
   if (ranked.length === 0) return [];
   const rows = await db.query<{ id: string; title: string; body: string; verified_at: string | null; verified_by: string | null; tags: string[] }>(
-    `SELECT k.id, v.title, v.body, k.verified_at, u.name AS verified_by,
+    `SELECT k.id, v.title, v.body, k.verified_at::text AS verified_at, u.name AS verified_by,
             coalesce(array_agg(h.name ORDER BY h.use_count DESC) FILTER (WHERE h.id IS NOT NULL), '{}') AS tags
        FROM knowledge k
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
@@ -150,6 +151,7 @@ export async function search(
 ): Promise<SearchResult> {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗のナレッジは検索できません');
   assert(query.trim().length > 0 && query.length <= 200, 'invalid', '検索語は1〜200文字で入力してください');
+  await assertStore(db, storeId);
   const dictionary = await loadDictionary(db);
   const analyzed = analyzeQuery(query, { tokenizer, dictionary });
   const ranked = await rankByGroups(db, storeId, analyzed.groups, { limit: options.limit ?? 20 });
@@ -166,7 +168,7 @@ export async function search(
 
   const log = await db.query<{ id: number }>(
     `INSERT INTO search_logs (tenant_id, store_id, user_id, query, result_count)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+     VALUES ($1, $2, $3, $4, $5) RETURNING id::int AS id`,
     [actor.tenantId, storeId, actor.userId, query, hits.length],
   );
   return { hits, chips, logId: log[0]!.id };
@@ -179,6 +181,16 @@ export async function recordSearchFeedback(
   logId: number,
   feedback: { openedKnowledgeId?: string; suggestedTagId?: string; pickedTagId?: string },
 ) {
+  // 外部キーの検査は行レベルセキュリティを無視するので、自社のIDかを先に確かめる
+  if (feedback.openedKnowledgeId) {
+    const k = await db.query(`SELECT 1 FROM knowledge WHERE id = $1`, [feedback.openedKnowledgeId]);
+    assert(k.length === 1, 'not_found', 'ナレッジが見つかりません');
+  }
+  const tagIds = [feedback.suggestedTagId, feedback.pickedTagId].filter((x): x is string => typeof x === 'string');
+  if (tagIds.length > 0) {
+    const t = await db.query(`SELECT 1 FROM hashtags WHERE id = ANY($1::uuid[])`, [tagIds]);
+    assert(t.length === new Set(tagIds).size, 'not_found', 'タグが見つかりません');
+  }
   await db.query(
     `UPDATE search_logs SET
         opened_knowledge_id = coalesce($3, opened_knowledge_id),
@@ -193,7 +205,7 @@ export async function recordSearchFeedback(
 export async function zeroHitQueries(db: Db, actor: Actor, storeId: string, days = 30) {
   assert(canModerate(actor, storeId), 'forbidden', '0件ワードを見る権限がありません');
   return db.query<{ query: string; times: number; last_at: string }>(
-    `SELECT query, count(*)::int AS times, max(created_at) AS last_at
+    `SELECT query, count(*)::int AS times, max(created_at)::text AS last_at
        FROM search_logs
       WHERE store_id = $1 AND result_count = 0 AND created_at > now() - make_interval(days => $2)
       GROUP BY query ORDER BY times DESC, last_at DESC LIMIT 100`,

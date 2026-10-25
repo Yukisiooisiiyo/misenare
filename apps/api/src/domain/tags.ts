@@ -40,13 +40,10 @@ export async function resolveTags(db: Db, actor: Actor, names: string[]): Promis
   assert(normalized.every((n) => [...n].length <= 30), 'invalid', 'タグは30文字以内にしてください');
   const ids: string[] = [];
   for (const name of normalized) {
-    const existing = await db.query<{ id: string; state: string; merged_into: string | null }>(
-      `SELECT id, state, merged_into FROM hashtags WHERE name = $1`,
-      [name],
-    );
+    const existing = await db.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = $1`, [name]);
     const row = existing[0];
     if (row) {
-      ids.push(row.state === 'merged' && row.merged_into ? row.merged_into : row.id);
+      ids.push(...(await canonicalTagIds(db, [row.id])));
       continue;
     }
     const created = await db.query<{ id: string }>(
@@ -57,6 +54,27 @@ export async function resolveTags(db: Db, actor: Actor, names: string[]): Promis
     ids.push(created[0]!.id);
   }
   return [...new Set(ids)];
+}
+
+/**
+ * 統合（merged）されたタグを、最終的な統合先に置き換える（A→B→C なら C）。
+ * 循環していても止まるよう、たどるのは最大10段まで。
+ */
+export async function canonicalTagIds(db: Db, tagIds: string[]): Promise<string[]> {
+  if (tagIds.length === 0) return [];
+  const rows = await db.query<{ id: string; target: string }>(
+    `WITH RECURSIVE chain(start, id, merged_into, depth) AS (
+       SELECT h.id, h.id, h.merged_into, 0 FROM hashtags h WHERE h.id = ANY($1::uuid[])
+       UNION ALL
+       SELECT c.start, h.id, h.merged_into, c.depth + 1
+         FROM chain c JOIN hashtags h ON h.id = c.merged_into
+        WHERE c.depth < 10
+     )
+     SELECT DISTINCT ON (start) start AS id, id AS target FROM chain ORDER BY start, depth DESC`,
+    [tagIds],
+  );
+  const map = new Map(rows.map((r) => [r.id, r.target]));
+  return [...new Set(tagIds.flatMap((id) => (map.has(id) ? [map.get(id)!] : [])))];
 }
 
 /** タグの使用回数（ナレッジ＋商品）を数え直す。 */

@@ -12,10 +12,11 @@ import {
   linkKnowledgeToProduct,
   productHistory,
   registerProduct,
+  rejectProductChange,
   scanBarcode,
   updateProduct,
 } from '../src/domain/products.ts';
-import { AREA_BIG, AREA_KITCHEN, freshDatabase, jan, manager, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
+import { AREA_BIG, AREA_KITCHEN, freshDatabase, hq, jan, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 
 let db: PsqlDatabase;
 const run = <R>(fn: (q: Db) => Promise<R>): Promise<R> => db.withTenant(T, fn);
@@ -135,7 +136,7 @@ describe('商品情報の編集と履歴', () => {
     assert.equal(forTrusted.status, 'found', 'trusted は承認者として見える');
     if (forTrusted.status !== 'found') return;
     assert.equal(forTrusted.product.pending, true);
-    await run((q) => approveProduct(q, trusted, STORE_A, forTrusted.product.id));
+    await run((q) => approveProduct(q, trusted, forTrusted.product.id));
     const approved = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, VACUUM));
     assert.equal(approved.status === 'found' && approved.product.pending, false);
   });
@@ -145,7 +146,31 @@ describe('商品情報の編集と履歴', () => {
     const r = await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, VACUUM));
     if (r.status !== 'found') throw new Error('not found');
     await rejects(run((q) => deleteProduct(q, trusted, STORE_A, r.product.id)), 'forbidden');
-    await run((q) => deleteProduct(q, manager, STORE_A, r.product.id));
+    // 店長が外せるのは自店舗の売場情報だけ。商品マスタは全店共有なので残る
+    assert.deepEqual(await run((q) => deleteProduct(q, manager, STORE_A, r.product.id)), { removed: 'store' });
+    assert.equal((await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, VACUUM))).status, 'found');
+    assert.deepEqual(await run((q) => deleteProduct(q, hq, STORE_A, r.product.id)), { removed: 'tenant' });
     assert.equal((await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, VACUUM))).status, 'unknown');
+  });
+
+  it('他店舗の trusted は、別の店舗で登録された承認待ちの商品を見ることも承認することもできない', async () => {
+    const code = jan('490000000003');
+    await run((q) => registerProduct(q, visitor, STORE_A, { janCode: code, name: '電気ケトル', tagNames: ['#ケトル'] }));
+    assert.equal((await run((q) => scanBarcode(q, tokenizer, storeBStaff, STORE_B, code))).status, 'unknown');
+    const mine = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, code));
+    if (mine.status !== 'found') throw new Error('not found');
+    await rejects(run((q) => approveProduct(q, storeBStaff, mine.product.id)), 'forbidden');
+    await run((q) => approveProduct(q, trusted, mine.product.id));
+    assert.equal((await run((q) => scanBarcode(q, tokenizer, storeBStaff, STORE_B, code))).status, 'found');
+  });
+
+  it('visitor の商品編集は却下でき、却下後は反映されない', async () => {
+    const r = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, FRIDGE));
+    if (r.status !== 'found') throw new Error('not found');
+    const req = await run((q) => updateProduct(q, visitor, STORE_A, r.product.id, { name: 'いたずらの商品名' }));
+    await run((q) => rejectProductChange(q, trusted, req.requestId!));
+    await rejects(run((q) => approveProductChange(q, trusted, req.requestId!)), 'conflict');
+    const after = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, FRIDGE));
+    assert.equal(after.status === 'found' && after.product.name, '東芝 冷凍冷蔵庫 GR-W600');
   });
 });

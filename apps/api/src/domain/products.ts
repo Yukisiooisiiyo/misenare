@@ -6,6 +6,7 @@ import { analyzeQuery, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canAdminister, canModerate, isTrusted, type Actor } from './actor.ts';
 import { describeHits, rankByGroups, type SearchHit } from './search.ts';
+import { assertStore } from './scope.ts';
 import { activateTags, loadDictionary, refreshUseCounts, resolveTags } from './tags.ts';
 
 /** JAN（GTIN-8 / GTIN-13）のチェックデジットを検証する。 */
@@ -97,13 +98,14 @@ async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, p
 export async function scanBarcode(db: Db, tokenizer: Tokenizer, actor: Actor, storeId: string, janCode: string): Promise<ScanResult> {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗では読み取れません');
   assert(isValidJan(janCode), 'invalid', 'JANコードとして読み取れませんでした');
-  const p = await maybeOne<{ id: string; state: string; created_by: string }>(
+  await assertStore(db, storeId);
+  const p = await maybeOne<{ id: string; state: string; created_by: string; origin_store_id: string | null }>(
     db,
-    `SELECT id, state, created_by FROM products WHERE jan_code = $1`,
+    `SELECT id, state, created_by, origin_store_id FROM products WHERE jan_code = $1`,
     [janCode],
   );
-  // 承認待ちの商品は、登録した本人と承認できる人にだけ見せる
-  if (!p || (p.state === 'pending' && p.created_by !== actor.userId && !canModerate(actor, storeId))) {
+  // 承認待ちの商品は、登録した本人と、登録された店舗で承認できる人にだけ見せる
+  if (!p || (p.state === 'pending' && p.created_by !== actor.userId && !canModerate(actor, p.origin_store_id))) {
     return { status: 'unknown', janCode };
   }
   const product = await card(db, p.id, storeId);
@@ -160,6 +162,7 @@ export async function registerProduct(db: Db, actor: Actor, storeId: string, inp
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗では登録できません');
   assert(isValidJan(input.janCode), 'invalid', 'JANコードが正しくありません');
   assert(input.name.trim().length > 0 && input.name.length <= 100, 'invalid', '商品名を1〜100文字で入力してください');
+  await assertStore(db, storeId);
   const exists = await maybeOne(db, `SELECT 1 FROM products WHERE jan_code = $1`, [input.janCode]);
   assert(exists === undefined, 'conflict', 'この商品はすでに登録されています');
   await assertArea(db, storeId, input.areaId);
@@ -167,9 +170,9 @@ export async function registerProduct(db: Db, actor: Actor, storeId: string, inp
   const trusted = isTrusted(actor);
   const p = await one<{ id: string }>(
     db,
-    `INSERT INTO products (tenant_id, jan_code, name, maker, state, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-    [actor.tenantId, input.janCode, input.name.trim(), input.maker?.trim() || null, trusted ? 'active' : 'pending', actor.userId],
+    `INSERT INTO products (tenant_id, jan_code, name, maker, state, origin_store_id, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [actor.tenantId, input.janCode, input.name.trim(), input.maker?.trim() || null, trusted ? 'active' : 'pending', storeId, actor.userId],
   );
   const tagIds = await resolveTags(db, actor, input.tagNames);
   await setTags(db, actor, p.id, tagIds);
@@ -221,6 +224,7 @@ async function applyPatch(db: Db, actor: Actor, storeId: string, productId: stri
 /** 商品情報・売場・タグの編集。trusted は即時反映、visitor は承認待ち。 */
 export async function updateProduct(db: Db, actor: Actor, storeId: string, productId: string, patch: ProductPatch) {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗では編集できません');
+  await assertStore(db, storeId);
   const p = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [productId]);
   assert(p !== undefined, 'not_found', '商品が見つかりません');
   if (isTrusted(actor)) {
@@ -246,14 +250,54 @@ export async function approveProductChange(db: Db, actor: Actor, requestId: stri
   assert(r !== undefined, 'not_found', '依頼が見つかりません');
   assert(canModerate(actor, r.store_id), 'forbidden', '承認する権限がありません');
   assert(r.state === 'pending', 'conflict', 'この依頼は処理済みです');
+  const exists = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [r.entity_id]);
+  assert(exists !== undefined, 'not_found', '商品が削除されています');
   await applyPatch(db, actor, r.store_id, r.entity_id, r.payload, r.requested_by);
   await db.query(`UPDATE change_requests SET state = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, [requestId, actor.userId]);
   return { productId: r.entity_id };
 }
 
+export async function rejectProductChange(db: Db, actor: Actor, requestId: string) {
+  const r = await maybeOne<{ store_id: string; state: string }>(
+    db,
+    `SELECT store_id, state FROM change_requests WHERE id = $1 AND entity_type = 'product'`,
+    [requestId],
+  );
+  assert(r !== undefined, 'not_found', '依頼が見つかりません');
+  assert(canModerate(actor, r.store_id), 'forbidden', '却下する権限がありません');
+  const rows = await db.query(
+    `UPDATE change_requests SET state = 'rejected', decided_by = $2, decided_at = now()
+      WHERE id = $1 AND state = 'pending' RETURNING id`,
+    [requestId, actor.userId],
+  );
+  assert(rows.length === 1, 'conflict', 'この依頼は処理済みです');
+  return { requestId };
+}
+
+/** 承認待ちの商品と、商品情報の変更依頼の一覧 */
+export async function listPendingProducts(db: Db, actor: Actor, storeId: string) {
+  assert(canModerate(actor, storeId), 'forbidden', '承認待ちを見る権限がありません');
+  const products = await db.query(
+    `SELECT p.id, p.jan_code, p.name, p.created_at::text AS created_at, u.name AS created_by
+       FROM products p JOIN users u ON u.id = p.created_by
+      WHERE p.state = 'pending' AND p.origin_store_id = $1 ORDER BY p.created_at`,
+    [storeId],
+  );
+  const changes = await db.query(
+    `SELECT r.id, r.entity_id AS product_id, p.name, r.payload, r.requested_at::text AS requested_at, u.name AS requested_by
+       FROM change_requests r JOIN products p ON p.id = r.entity_id JOIN users u ON u.id = r.requested_by
+      WHERE r.state = 'pending' AND r.entity_type = 'product' AND r.store_id = $1 ORDER BY r.requested_at`,
+    [storeId],
+  );
+  return { products, changes };
+}
+
 /** visitor が登録した商品を承認する（タグも有効にする）。 */
-export async function approveProduct(db: Db, actor: Actor, storeId: string, productId: string) {
-  assert(canModerate(actor, storeId), 'forbidden', '承認する権限がありません');
+export async function approveProduct(db: Db, actor: Actor, productId: string) {
+  const p = await maybeOne<{ origin_store_id: string | null }>(db, `SELECT origin_store_id FROM products WHERE id = $1`, [productId]);
+  assert(p !== undefined, 'not_found', '商品が見つかりません');
+  // 承認できるのは、登録された店舗で承認できる人（店舗が消えていれば本部）
+  assert(canModerate(actor, p.origin_store_id), 'forbidden', '承認する権限がありません');
   const rows = await db.query(`UPDATE products SET state = 'active' WHERE id = $1 AND state = 'pending' RETURNING id`, [productId]);
   assert(rows.length === 1, 'conflict', 'この商品は承認待ちではありません');
   const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
@@ -266,6 +310,9 @@ export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: 
   const k = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM knowledge WHERE id = $1`, [knowledgeId]);
   assert(k !== undefined, 'not_found', 'ナレッジが見つかりません');
   assert(canModerate(actor, k.store_id) || (isTrusted(actor) && canAccessStore(actor, k.store_id)), 'forbidden', '紐づける権限がありません');
+  const p = await maybeOne<{ state: string }>(db, `SELECT state FROM products WHERE id = $1`, [productId]);
+  assert(p !== undefined, 'not_found', '商品が見つかりません');
+  assert(p.state === 'active', 'conflict', '承認待ちの商品には紐づけられません');
   await db.query(
     `INSERT INTO knowledge_products (tenant_id, knowledge_id, product_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
     [actor.tenantId, knowledgeId, productId],
@@ -275,7 +322,7 @@ export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: 
 export async function productHistory(db: Db, actor: Actor, storeId: string, productId: string) {
   assert(canAccessStore(actor, storeId), 'forbidden', '履歴を見る権限がありません');
   return db.query(
-    `SELECT h.field, h.before, h.after, h.edited_at, u.name AS edited_by
+    `SELECT h.field, h.before, h.after, h.edited_at::text AS edited_at, u.name AS edited_by
        FROM product_history h JOIN users u ON u.id = h.edited_by
       WHERE h.product_id = $1 AND (h.store_id IS NULL OR h.store_id = $2)
       ORDER BY h.id DESC`,
@@ -284,7 +331,20 @@ export async function productHistory(db: Db, actor: Actor, storeId: string, prod
 }
 
 /** 商品の削除（administrator のみ） */
+/**
+ * 商品の削除。商品マスタは全店舗で共有するので、削除できるのは本部の administrator だけ。
+ * 店長は、自店舗の売場情報（store_products）だけを外せる。
+ */
 export async function deleteProduct(db: Db, actor: Actor, storeId: string, productId: string) {
-  assert(canAdminister(actor, storeId), 'forbidden', '商品を削除できるのは administrator のみです');
-  await db.query(`DELETE FROM products WHERE id = $1`, [productId]);
+  if (actor.adminScope !== 'tenant') {
+    assert(canAdminister(actor, storeId), 'forbidden', '商品を削除できるのは administrator のみです');
+    await db.query(`DELETE FROM store_products WHERE store_id = $1 AND product_id = $2`, [storeId, productId]);
+    await history(db, actor, productId, storeId, 'store_removed', null, null);
+    return { removed: 'store' as const };
+  }
+  const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
+  const rows = await db.query(`DELETE FROM products WHERE id = $1 RETURNING id`, [productId]);
+  assert(rows.length === 1, 'not_found', '商品が見つかりません');
+  await refreshUseCounts(db, tags.map((t) => t.hashtag_id));
+  return { removed: 'tenant' as const };
 }

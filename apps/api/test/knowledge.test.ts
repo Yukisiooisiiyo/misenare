@@ -106,7 +106,34 @@ describe('編集と版', () => {
     const stale = await run((q) => editKnowledge(q, tokenizer, visitor, id, { title: '搬入', body: '古い修正案', tagNames: ['#搬入'] }));
     await run((q) => editKnowledge(q, tokenizer, trusted, id, { title: '搬入の確認事項', body: '最新の内容', tagNames: ['#搬入'] }));
     await rejects(run((q) => approveVersion(q, tokenizer, trusted, id, stale.version)), 'conflict');
-    await run((q) => rejectVersion(q, trusted, id, stale.version));
+    // 新しい版の公開と同時に、古い修正案は過去版になり、承認待ちの一覧から消える
+    const pending = await run((q) => listPending(q, trusted, STORE_A));
+    assert.ok(!pending.some((p) => p.id === id));
+  });
+
+  it('visitor の修正案は却下できる', async () => {
+    const r = await run((q) => editKnowledge(q, tokenizer, visitor, id, { title: '搬入', body: '却下される案', tagNames: ['#搬入'] }));
+    await run((q) => rejectVersion(q, trusted, id, r.version));
+    await rejects(run((q) => rejectVersion(q, trusted, id, r.version)), 'conflict');
+  });
+
+  it('visitor は期限を使って、承認なしに公開中のナレッジを隠せない', async () => {
+    await run((q) => editKnowledge(q, tokenizer, visitor, id, {
+      title: '搬入の確認事項', body: '最新の内容', tagNames: ['#搬入'], expiresAt: '2000-01-01T00:00:00Z',
+    }));
+    assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#搬入'))), [id]);
+  });
+
+  it('承認待ち・却下の案は、本人と承認者以外には版の一覧で見えない', async () => {
+    const forStranger = await run((q) => listVersions(q, { ...visitor, userId: '40000000-0000-0000-0000-000000000002', trustLevel: 'visitor' }, id));
+    assert.ok(forStranger.every((v) => v.state === 'published' || v.state === 'superseded'));
+    const forOwner = await run((q) => listVersions(q, visitor, id));
+    assert.ok(forOwner.some((v) => v.state === 'pending' || v.state === 'rejected'));
+  });
+
+  it('承認待ち・却下の案には「戻す」で公開できない', async () => {
+    const pend = (await run((q) => listVersions(q, trusted, id))).find((v) => v.state === 'pending')!;
+    await rejects(run((q) => revertToVersion(q, tokenizer, trusted, id, pend.version)), 'conflict');
   });
 
   it('過去版に戻すと、その内容で新しい版が作られる（履歴は消えない）', async () => {
