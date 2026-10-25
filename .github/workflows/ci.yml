@@ -7,7 +7,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -38,4 +38,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - run: npm install
       - run: npm run typecheck
-      - run: npm test
+      - name: Test
+        run: |
+          set -o pipefail
+          npx tsx --test --test-concurrency=1 --test-reporter=tap \
+            packages/search-core/test/*.test.ts apps/api/test/*.test.ts | tee test-output.tap
+      - name: Report failures as annotations
+        if: failure()
+        run: node .github/scripts/annotate-tap.mjs test-output.tap

@@ -30,11 +30,23 @@ import {
 } from '../domain/products.ts';
 import { recordSearchFeedback, search, zeroHitQueries } from '../domain/search.ts';
 import { exportDictionary } from '../domain/tags.ts';
-import { loadActor, type Authenticator } from './auth.ts';
+import {
+  acceptInvitation,
+  createInvitation,
+  listStoreUsers,
+  me,
+  parseToken,
+  revokeSession,
+  updateUser,
+  type InvitationInput,
+  type UserPatch,
+} from '../domain/users.ts';
+import { loadActor, type Authenticator, type Identity } from './auth.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
 
 interface Ctx {
   actor: Actor;
+  identity: Identity;
   db: Db;
   tokenizer: Tokenizer;
 }
@@ -43,6 +55,7 @@ const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found:
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NON_UUID_PARAMS = new Set(['jan', 'version', 'logId']);
+const MAX_DEVICE_NAME = 60;
 
 /** パスの ID がUUIDの形か確かめる（形が違うと DB 側で 500 になるため、先に 400 で返す） */
 function checkParams(params: Record<string, string>): void {
@@ -102,6 +115,40 @@ function productBody(v: unknown): ProductInput {
     throw new HttpError(400, 'janCode・name（文字列）と tagNames（文字列の配列）が必要です');
   }
   return { ...productPatchBody(b), janCode: b.janCode, name: b.name, tagNames: b.tagNames } as ProductInput;
+}
+
+function invitationBody(v: unknown): InvitationInput {
+  const b = (v ?? {}) as Record<string, unknown>;
+  if (b.storeId !== null && !(typeof b.storeId === 'string' && UUID.test(b.storeId))) throw new HttpError(400, 'storeId（UUID か null）が必要です');
+  if (b.userId !== undefined && !(typeof b.userId === 'string' && UUID.test(b.userId))) throw new HttpError(400, 'userId が正しくありません');
+  optionalString(b, 'name');
+  if (b.trustLevel !== undefined && b.trustLevel !== 'visitor' && b.trustLevel !== 'trusted') throw new HttpError(400, 'trustLevel は visitor か trusted です');
+  if (b.adminScope !== undefined && !['none', 'store', 'tenant'].includes(b.adminScope as string)) throw new HttpError(400, 'adminScope は none・store・tenant です');
+  return {
+    storeId: b.storeId as string | null,
+    ...(b.userId !== undefined ? { userId: b.userId as string } : {}),
+    ...(typeof b.name === 'string' ? { name: b.name } : {}),
+    ...(b.trustLevel !== undefined ? { trustLevel: b.trustLevel as InvitationInput['trustLevel'] } : {}),
+    ...(b.adminScope !== undefined ? { adminScope: b.adminScope as InvitationInput['adminScope'] } : {}),
+  };
+}
+
+function userPatchBody(v: unknown): UserPatch {
+  const b = (v ?? {}) as Record<string, unknown>;
+  const patch: UserPatch = {};
+  if (b.trustLevel !== undefined) {
+    if (b.trustLevel !== 'visitor' && b.trustLevel !== 'trusted') throw new HttpError(400, 'trustLevel は visitor か trusted です');
+    patch.trustLevel = b.trustLevel;
+  }
+  if (b.adminScope !== undefined) {
+    if (!['none', 'store', 'tenant'].includes(b.adminScope as string)) throw new HttpError(400, 'adminScope は none・store・tenant です');
+    patch.adminScope = b.adminScope as UserPatch['adminScope'];
+  }
+  if (b.status !== undefined) {
+    if (b.status !== 'active' && b.status !== 'disabled') throw new HttpError(400, 'status は active か disabled です');
+    patch.status = b.status;
+  }
+  return patch;
 }
 
 function intParam(v: string | undefined, name: string): number {
@@ -178,6 +225,20 @@ function routes(): Router<Ctx> {
   r.post('/knowledge/:id/versions/:version/revert', async (c, _req, p) =>
     json(await revertToVersion(c.db, c.tokenizer, c.actor, p.id!, intParam(p.version, 'version'))));
 
+  // --- 利用者・端末 ---------------------------------------------------------
+  r.get('/me', async (c) => json(await me(c.db, c.actor)));
+  r.post('/auth/logout', async (c) => {
+    if (c.identity.sessionId) await revokeSession(c.db, c.actor, c.identity.sessionId);
+    return json({ ok: true });
+  });
+  r.post('/invitations', async (c, req) => json(await createInvitation(c.db, c.actor, invitationBody(await readJson(req))), 201));
+  r.get('/stores/:storeId/users', async (c, _req, p) => json(await listStoreUsers(c.db, c.actor, p.storeId!)));
+  r.patch('/users/:userId', async (c, req, p) => json(await updateUser(c.db, c.actor, p.userId!, userPatchBody(await readJson(req)))));
+  r.delete('/sessions/:sessionId', async (c, _req, p) => {
+    await revokeSession(c.db, c.actor, p.sessionId!);
+    return json({ ok: true });
+  });
+
   // --- 育てる・管理 ---------------------------------------------------------
   r.get('/stores/:storeId/pending', async (c, _req, p) => json(await listPending(c.db, c.actor, p.storeId!)));
   r.get('/stores/:storeId/zero-hits', async (c, _req, p) => json(await zeroHitQueries(c.db, c.actor, p.storeId!)));
@@ -192,6 +253,17 @@ export function createApp(deps: { database: Database; auth: Authenticator; token
     const url = new URL(req.url);
     if (url.pathname === '/health') return json({ ok: true });
     try {
+      // ログイン前に呼ぶ唯一の API：招待トークンを端末のセッショントークンに交換する
+      if (url.pathname === '/auth/accept' && req.method === 'POST') {
+        const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+        const token = typeof b.token === 'string' ? b.token : '';
+        const parsed = parseToken(token);
+        if (!parsed) throw new HttpError(400, '招待のQRコードを読み取れませんでした');
+        const deviceName = typeof b.deviceName === 'string' ? b.deviceName.slice(0, MAX_DEVICE_NAME) : null;
+        const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
+        return json(result, 201);
+      }
+
       const matched = router.match(req.method, url.pathname);
       if (matched === undefined) throw new HttpError(404, 'Not Found');
       if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
@@ -203,7 +275,7 @@ export function createApp(deps: { database: Database; auth: Authenticator; token
       if (!actor) throw new HttpError(401, 'この利用者は無効です');
 
       return await deps.database.withTenant(actor.tenantId, (db) =>
-        matched.handler({ actor, db, tokenizer: deps.tokenizer }, req, matched.params),
+        matched.handler({ actor, identity, db, tokenizer: deps.tokenizer }, req, matched.params),
       );
     } catch (err) {
       if (err instanceof DomainError) return json({ error: err.code, message: err.message }, STATUS[err.code]);

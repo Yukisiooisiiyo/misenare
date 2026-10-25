@@ -14,7 +14,8 @@
   "scripts": {
     "test": "tsx --test --test-concurrency=1 packages/search-core/test/*.test.ts apps/api/test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "db:migrate": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f db/migrations/0001_init.sql",
+    "db:migrate": "tsx apps/api/src/cli/migrate.ts",
+    "bootstrap": "tsx apps/api/src/cli/bootstrap.ts",
     "dev:api": "tsx watch apps/api/src/server.ts"
   },
   "devDependencies": {

@@ -2,8 +2,8 @@
 // 接続先は TEST_DATABASE_URL（既定はローカルの misenare_test）。スキーマを毎回消すので、開発用DBを指定しないこと。
 
 import { execFileSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { SegmenterTokenizer } from '@misenare/search-core';
+import { migrate } from '../src/cli/migrate.ts';
 import type { Database } from '../src/db/db.ts';
 import { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import type { Actor } from '../src/domain/actor.ts';
@@ -23,7 +23,6 @@ export const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://misen
 if (!/_test\b/.test(new URL(DATABASE_URL).pathname)) {
   throw new Error(`TEST_DATABASE_URL のデータベース名は _test で終わるものにしてください（スキーマを消すため）: ${DATABASE_URL}`);
 }
-const MIGRATION = fileURLToPath(new URL('../../../db/migrations/0001_init.sql', import.meta.url));
 
 export const tokenizer = new SegmenterTokenizer();
 
@@ -43,7 +42,7 @@ export const otherTenant: Actor = { userId: '40000000-0000-0000-0000-00000000000
 
 export async function freshDatabase(): Promise<TestDatabase> {
   execFileSync('psql', [DATABASE_URL, '-X', '-q', '-c', 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'], { stdio: 'pipe' });
-  execFileSync('psql', [DATABASE_URL, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', MIGRATION], { stdio: 'pipe' });
+  migrate(DATABASE_URL);
   const db = await openTestDatabase(DATABASE_URL);
   await db.raw(`INSERT INTO tenants (id, name) VALUES ($1, 'テスト電機'), ($2, '別の会社')`, [T, OTHER_T]);
   await db.withTenant(T, async (q) => {

@@ -2,11 +2,12 @@
 //   DATABASE_URL  … PostgreSQL の接続文字列（必須）
 //   PORT          … 既定 8787
 //   DB_DRIVER     … pg（既定。npm install が必要）/ psql（pg を入れられない開発環境向け）
+//   MISENARE_DEV_AUTH=1 … 開発用のヘッダー認証を使う（既定は招待QRの端末セッション）
 
 import { SegmenterTokenizer } from '@misenare/search-core';
 import type { Database } from './db/db.ts';
 import { createApp } from './http/app.ts';
-import { DevHeaderAuthenticator } from './http/auth.ts';
+import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
 
 const url = process.env.DATABASE_URL;
@@ -25,8 +26,8 @@ async function openDatabase(): Promise<Database> {
 const database = await openDatabase();
 const app = createApp({
   database,
-  // TODO: 本番用の認証（招待QR＋パスキー／ワンタイムコード、チェーンは SSO）に差し替える
-  auth: new DevHeaderAuthenticator(),
+  // MISENARE_DEV_AUTH=1 のときだけ開発用のヘッダー認証（本番環境では作れない）
+  auth: process.env.MISENARE_DEV_AUTH === '1' ? new DevHeaderAuthenticator() : new SessionAuthenticator(database),
   tokenizer: new SegmenterTokenizer(),
 });
 serve(app, port);
