@@ -5,7 +5,7 @@
 
 import { api } from './api.ts';
 import { clear, h, relativeDate, toast } from './dom.ts';
-import { action, countedList } from './manage.ts';
+import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
   id: string;
@@ -33,6 +33,14 @@ export interface Handover {
   doneBy: string | null;
   doneAt: string | null;
   carriedOver: boolean;
+}
+
+export interface HandoverEvent { action: string; label: string; by: string | null; at: string }
+export interface HandoverHistoryItem {
+  id: string; body: string; state: 'open' | 'done'; forDate: string; deleted: boolean;
+  createdBy: string | null; createdAt: string;
+  events: HandoverEvent[];
+  lastAction: HandoverEvent;
 }
 
 export interface Badges {
@@ -153,14 +161,79 @@ function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HT
         redraw();
       }),
       ...(canDelete
-        ? [action('消す', 'secondary small', async () => {
-            if (!window.confirm('この引き継ぎを消します。')) return;
+        ? [confirmAction('消す', 'secondary small', '消しますか？（履歴から戻せます）', async () => {
             await api('DELETE', `/handovers/${item.id}`);
+            toast('消しました（履歴から戻せます）');
             redraw();
           })]
         : [])),
   );
   return row;
+}
+
+/**
+ * 引き継ぎの履歴。誰が何をしたかを時系列で見る。
+ * 「操作された分」と「すべて」を切り替えられる。押し間違いはここから戻せる。
+ */
+function historyPanel(storeId: string, onChange: () => void): HTMLElement {
+  let scope: 'actions' | 'all' = 'actions';
+  const list = h('div');
+  const tabs = h('div', { class: 'scope-tabs', role: 'tablist' });
+
+  const draw = async () => {
+    clear(tabs);
+    for (const [value, label] of [['actions', '操作された分'], ['all', 'すべて']] as const) {
+      const on = scope === value;
+      tabs.append(h('button', {
+        type: 'button', role: 'tab', 'aria-selected': on ? 'true' : 'false',
+        class: `scope-tab${on ? ' scope-tab-on' : ''}`,
+        onclick: () => { scope = value; void draw(); },
+      }, label));
+    }
+    clear(list);
+    list.append(h('p', { class: 'hint' }, '読み込んでいます…'));
+    try {
+      const items = await api<HandoverHistoryItem[]>('GET', `/stores/${storeId}/handovers/history?scope=${scope}`);
+      clear(list);
+      if (items.length === 0) {
+        list.append(h('p', { class: 'hint' }, scope === 'actions' ? 'まだ誰も操作していません。' : '引き継ぎはまだありません。'));
+        return;
+      }
+      list.append(h('ul', { class: 'rows' }, ...items.map((item) => historyRow(item, () => { void draw(); onChange(); }))));
+    } catch (e) {
+      clear(list);
+      list.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const panel = h('details', { class: 'panel' },
+    h('summary', {}, '引き継ぎの履歴（誰がいつ操作したか）'),
+    h('div', { class: 'panel-body' }, tabs, list));
+  let loaded = false;
+  panel.addEventListener('toggle', () => {
+    if (!panel.open || loaded) return;
+    loaded = true;
+    void draw();
+  });
+  return panel;
+}
+
+function historyRow(item: HandoverHistoryItem, redraw: () => void): HTMLElement {
+  const state = item.deleted ? '消した' : item.state === 'done' ? '片付いた' : '残っている';
+  return h('li', { class: `row history${item.deleted ? ' history-deleted' : ''}` },
+    h('span', { class: 'handover-body' },
+      h('span', { class: `notice-badge${item.deleted ? '' : item.state === 'done' ? ' history-done' : ' history-open'}` }, state),
+      h('span', { class: 'history-text' }, item.body)),
+    h('ul', { class: 'history-events' }, ...item.events.map((e) =>
+      h('li', {}, `${relativeDate(e.at)}　${e.by ?? ''}さんが${e.label}`))),
+    ...(item.deleted
+      ? [h('span', { class: 'row-actions' }, action('戻す', 'secondary small', async () => {
+          await api('POST', `/handovers/${item.id}/restore`);
+          toast('戻しました');
+          redraw();
+        }))]
+      : []),
+  );
 }
 
 /** 連絡タブの中身 */
@@ -242,6 +315,7 @@ export function renderNotices(
       input,
       h('button', { type: 'submit', class: 'primary' }, '書く')),
     handoverList,
+    historyPanel(options.storeId, () => { void loadHandovers(); options.onBadges?.(); }),
   );
   void loadNotices();
   void loadHandovers();

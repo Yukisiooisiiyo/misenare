@@ -15,6 +15,7 @@ import type { Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
+import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
 import type { Storage } from '../storage/storage.ts';
@@ -167,9 +168,14 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
              (SELECT count(*) FROM knowledge_tags kt WHERE kt.hashtag_id = h.id) +
              (SELECT count(*) FROM product_tags pt WHERE pt.hashtag_id = h.id)`,
         );
+        // 「古い」の日数は1か所（domain/knowledge.ts の STALE_DAYS）で決める
         const stale = await db.query<{ n: number }>(
-          `SELECT count(*)::int AS n FROM knowledge
-            WHERE status = 'published' AND verified_at < now() - interval '180 days'`,
+          `SELECT count(*)::int AS n
+             FROM knowledge k
+             JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
+            WHERE k.status = 'published'
+              AND greatest(k.verified_at, v.edited_at) < now() - make_interval(days => $1)`,
+          [STALE_DAYS],
         );
         return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers };
       });

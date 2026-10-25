@@ -87,8 +87,10 @@ describe('夜間バッチ', () => {
     assert.equal(suggestTags({ input: 'おおがた', dictionary: local }).candidates[0]?.name, '大型家電');
   });
 
-  it('半年以上確認されていないナレッジを見直しの一覧に出し、確認すると外れる', async () => {
+  it('一定期間、更新も確認もされていないナレッジを見直しの一覧に出し、確認すると外れる', async () => {
+    // 「更新も確認もされていない」状態にする（画面の注意書きと同じ見方）
     await run((q) => q.query(`UPDATE knowledge SET verified_at = now() - interval '200 days' WHERE id = $1`, [oldId]));
+    await run((q) => q.query(`UPDATE knowledge_versions SET edited_at = now() - interval '200 days' WHERE knowledge_id = $1`, [oldId]));
     const [report] = await runNightly(db, tokenizer);
     assert.equal(report!.staleKnowledge, 1);
     assert.deepEqual((await run((q) => listStale(q, trusted, STORE_A))).map((k) => k.id), [oldId]);

@@ -51,7 +51,7 @@ body { background: var(--paper); min-height: 100dvh; font-size: 16px; line-heigh
 .store-select { font: inherit; font-weight: 700; border: 0; background: transparent; color: var(--ink); padding: 6px 0; }
 .topbar-link { color: var(--sign); font-size: 15px; text-decoration: none; padding: 8px 0; }
 
-.content { flex: 1; padding: 20px 16px 96px; }
+.content { flex: 1; padding: 20px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
 .page { display: flex; flex-direction: column; gap: 12px; }
 .center { align-items: center; text-align: center; padding-top: 30vh; }
 
@@ -68,7 +68,7 @@ p { margin: 0; }
 /* 下のタブ：親指が届く位置 */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-  display: grid; grid-template-columns: repeat(3, 1fr);
+  display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
   max-width: 640px; margin: 0 auto;
   background: var(--surface); border-top: 1px solid var(--rule);
   padding-bottom: env(safe-area-inset-bottom);
@@ -215,7 +215,7 @@ button.tag { cursor: pointer; }
 .photo { width: 100%; aspect-ratio: 4 / 3; object-fit: cover; background: var(--rule); border: 1px solid var(--rule); display: block; }
 .photo-item figcaption { font-size: 13px; padding: 4px 2px; }
 .photo-remove {
-  position: absolute; top: 4px; right: 4px; width: 32px; height: 32px; line-height: 1;
+  width: 32px; height: 32px; line-height: 1;
   border: 0; border-radius: 50%; background: rgba(26, 36, 33, .75); color: #fff; font-size: 18px; cursor: pointer;
 }
 .photo-add { width: calc(50% - 4px); display: flex; align-items: center; }
@@ -256,3 +256,26 @@ button.tag { cursor: pointer; }
 .handover-body { flex: 1 1 100%; }
 .handover-body.done { color: #6b7570; text-decoration: line-through; }
 .handover-carried { background: #fffdf2; }
+.fresh-detail .primary, .fresh-detail .secondary { margin-top: 10px; }
+
+/* 引き継ぎの履歴 */
+.scope-tabs { display: flex; gap: 8px; margin: 4px 0 12px; }
+.scope-tab {
+  flex: 1; min-height: 40px; padding: 8px 12px; font: inherit; font-weight: 700;
+  background: var(--surface); color: var(--sign); border: 1px solid var(--sign); cursor: pointer;
+}
+.scope-tab-on { background: var(--sign); color: var(--sign-ink, #fff); }
+.history { align-items: flex-start; }
+.history-events { list-style: none; margin: 4px 0 0; padding: 0; flex: 1 1 100%; font-size: 13px; color: var(--ink-soft); }
+.history-events li { padding: 1px 0; }
+.history .notice-badge { margin-right: 6px; }
+/* 消したものは本文だけに線を引く（状態の札には引かない） */
+.history-deleted .history-text { color: var(--ink-soft); text-decoration: line-through; }
+.history-done { background: var(--sign); }
+.history-open { background: var(--pending); }
+
+/* その場で出す確認（window.confirm は埋め込みで出ないことがあるため使わない） */
+.confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.confirm-q { font-size: 13px; font-weight: 700; color: var(--pending); }
+.photo-item .confirm { position: absolute; top: 4px; right: 4px; }
+.photo-item .confirm-q { background: var(--surface); padding: 2px 6px; border-radius: 3px; }

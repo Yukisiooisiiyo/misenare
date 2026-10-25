@@ -7,6 +7,7 @@
 
 import { api, session } from './api.ts';
 import { h, relativeDate, toast } from './dom.ts';
+import { confirmAction } from './manage.ts';
 
 export interface Photo {
   id: string;
@@ -113,20 +114,12 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
         img,
         p.caption ? h('figcaption', {}, p.caption) : null,
         canEdit
-          ? h('button', {
-              type: 'button', class: 'photo-remove', 'aria-label': 'この写真を外す',
-              onclick: async () => {
-                if (!window.confirm('この写真を消します。元には戻せません。')) return;
-                try {
-                  await api('DELETE', `/photos/${p.id}`);
-                  photos = photos.filter((x) => x.id !== p.id);
-                  draw();
-                  toast('消しました');
-                } catch (e) {
-                  toast(e instanceof Error ? e.message : String(e));
-                }
-              },
-            }, '×')
+          ? confirmAction('×', 'photo-remove', '消しますか？', async () => {
+              await api('DELETE', `/photos/${p.id}`);
+              photos = photos.filter((x) => x.id !== p.id);
+              draw();
+              toast('消しました');
+            }, 'この写真を外す')
           : null,
       );
       grid.append(figure);

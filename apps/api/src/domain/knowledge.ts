@@ -296,8 +296,15 @@ export async function listPending(db: Db, actor: Actor, storeId: string) {
   );
 }
 
-/** 半年以上確認されていない公開ナレッジ（鮮度管理。承認できる人が見直す） */
-export async function listStale(db: Db, actor: Actor, storeId: string, days = 180) {
+/**
+ * 「古い」とみなすまでの日数。ここが1つの決まりごとで、
+ * 承認・管理の一覧（下の listStale）と、詳細画面の注意書きの両方がこの値を使う。
+ * 画面側には /me で配って、ずれないようにしている。
+ */
+export const STALE_DAYS = 180;
+
+/** 一定期間、更新も確認もされていない公開ナレッジ（鮮度管理。承認できる人が見直す） */
+export async function listStale(db: Db, actor: Actor, storeId: string, days = STALE_DAYS) {
   assert(canModerate(actor, storeId), 'forbidden', '見直しの一覧を見る権限がありません');
   return db.query<{ id: string; title: string; verified_at: string | null; verified_by: string | null }>(
     `SELECT k.id, v.title, k.verified_at::text AS verified_at, u.name AS verified_by
@@ -305,8 +312,8 @@ export async function listStale(db: Db, actor: Actor, storeId: string, days = 18
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
        LEFT JOIN users u ON u.id = k.verified_by
       WHERE k.status = 'published' AND k.store_id = $1
-        AND k.verified_at < now() - make_interval(days => $2)
-      ORDER BY k.verified_at`,
+        AND greatest(k.verified_at, v.edited_at) < now() - make_interval(days => $2)
+      ORDER BY greatest(k.verified_at, v.edited_at)`,
     [storeId, days],
   );
 }

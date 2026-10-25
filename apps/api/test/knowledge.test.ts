@@ -203,3 +203,39 @@ describe('検索の範囲と並び順', () => {
     assert.deepEqual(z.map((x) => [x.query, x.times]).slice(0, 1), [['食洗機 分岐水栓', 2]]);
   });
 });
+
+describe('「古い」の日数は1か所で決める', () => {
+  it('一覧・夜間バッチ・画面の注意書きが、同じ日数と同じ見方をする', async () => {
+    const { STALE_DAYS, listStale, verifyKnowledge } = await import('../src/domain/knowledge.ts');
+    assert.equal(STALE_DAYS, 180);
+    const k = await db.withTenant(T, (q) =>
+      createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '日数の確認', body: '本文', tagNames: ['#日数'] }));
+
+    await db.withTenant(T, async (q) => {
+      // 確認だけ古い（内容は今日直した）＝ まだ古くない
+      await q.query(`UPDATE knowledge SET verified_at = now() - interval '${STALE_DAYS + 20} days' WHERE id = $1`, [k.id]);
+      assert.ok(!(await listStale(q, manager, STORE_A)).some((x) => x.id === k.id), '更新が新しければ出さない');
+
+      // 更新も確認も古い ＝ 古い
+      await q.query(`UPDATE knowledge_versions SET edited_at = now() - interval '${STALE_DAYS + 20} days' WHERE knowledge_id = $1`, [k.id]);
+      assert.ok((await listStale(q, manager, STORE_A)).some((x) => x.id === k.id));
+
+      // 境目の手前では出さない
+      await q.query(`UPDATE knowledge SET verified_at = now() - interval '${STALE_DAYS - 2} days' WHERE id = $1`, [k.id]);
+      assert.ok(!(await listStale(q, manager, STORE_A)).some((x) => x.id === k.id));
+
+      // 「今も正しい」を押せば外れる
+      await q.query(`UPDATE knowledge SET verified_at = now() - interval '${STALE_DAYS + 20} days' WHERE id = $1`, [k.id]);
+      assert.ok((await listStale(q, manager, STORE_A)).some((x) => x.id === k.id));
+      await verifyKnowledge(q, manager, k.id);
+      assert.ok(!(await listStale(q, manager, STORE_A)).some((x) => x.id === k.id));
+    });
+  });
+
+  it('画面にも同じ日数を配る（/me の staleDays）', async () => {
+    const { me } = await import('../src/domain/users.ts');
+    const { STALE_DAYS } = await import('../src/domain/knowledge.ts');
+    const who = await db.withTenant(T, (q) => me(q, trusted));
+    assert.equal(who.staleDays, STALE_DAYS);
+  });
+});
