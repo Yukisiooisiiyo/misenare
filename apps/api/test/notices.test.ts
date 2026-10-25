@@ -7,7 +7,8 @@ import {
   listNotices, markRead, noticeBadge, noticeReaders, updateNotice,
 } from '../src/domain/notices.ts';
 import {
-  addHandover, closeStaleHandovers, deleteHandover, handoverBadge, listHandovers, setHandoverState,
+  addHandover, closeStaleHandovers, deleteHandover, handoverBadge, handoverHistory,
+  listHandovers, restoreHandover, setHandoverState,
 } from '../src/domain/handovers.ts';
 import { freshDatabase, hq, manager, STORE_A, STORE_B, storeBStaff, T, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -209,6 +210,99 @@ describe('引き継ぎ', () => {
       await assert.rejects(addHandover(q, visitor, STORE_A, 'x'.repeat(1001)), /1〜1000文字/);
       await assert.rejects(addHandover(q, visitor, STORE_A, 'x', '2026/01/01'), /YYYY-MM-DD/);
       await assert.rejects(listHandovers(q, visitor, STORE_A, 'きのう'), /YYYY-MM-DD/);
+    });
+  });
+});
+
+describe('引き継ぎの履歴と、押し間違いの取り消し', () => {
+  it('消しても行は残り、戻せる（一覧からは消える）', async () => {
+    const { id } = await run((q) => addHandover(q, visitor, STORE_A, '消して戻す練習'));
+    await run(async (q) => {
+      await deleteHandover(q, visitor, id);
+      assert.ok(!(await listHandovers(q, trusted, STORE_A)).some((h) => h.id === id), '一覧からは消える');
+      const rows = await q.query<{ n: number }>(`SELECT count(*)::int AS n FROM handovers WHERE id = $1`, [id]);
+      assert.equal(rows[0]!.n, 1, '行そのものは残っている');
+      await assert.rejects(deleteHandover(q, visitor, id), /すでに消されています/);
+      await assert.rejects(setHandoverState(q, trusted, id, 'done'), /先に戻してください/);
+
+      await restoreHandover(q, trusted, id);
+      assert.ok((await listHandovers(q, trusted, STORE_A)).some((h) => h.id === id), '戻すとまた出る');
+      await assert.rejects(restoreHandover(q, trusted, id), /消されていません/);
+    });
+  });
+
+  it('誰が何をしたかが、時系列で残る', async () => {
+    const { id } = await run((q) => addHandover(q, visitor, STORE_A, '履歴を見る練習'));
+    await run(async (q) => {
+      await setHandoverState(q, trusted, id, 'done');
+      await setHandoverState(q, manager, id, 'open');
+      await deleteHandover(q, manager, id);
+      await restoreHandover(q, trusted, id);
+
+      const history = await handoverHistory(q, visitor, STORE_A, 'actions');
+      const item = history.find((h) => h.id === id)!;
+      assert.deepEqual(item.events.map((e) => [e.label, e.by]), [
+        ['書いた', '新人バイト'],
+        ['片付けた', 'ベテランパート'],
+        ['やり直した', '店長'],
+        ['消した', '店長'],
+        ['戻した', 'ベテランパート'],
+      ]);
+      assert.equal(item.lastAction.label, '戻した');
+      assert.equal(item.createdBy, '新人バイト');
+      assert.equal(item.deleted, false);
+      // 時系列が逆転していない
+      const times = item.events.map((e) => Date.parse(e.at));
+      assert.deepEqual(times, [...times].sort((a, b) => a - b));
+    });
+  });
+
+  it('「操作された分」と「すべて」を切り替えられる', async () => {
+    const touched = await run((q) => addHandover(q, visitor, STORE_A, '誰かが片付けたもの'));
+    const untouched = await run((q) => addHandover(q, visitor, STORE_A, 'まだ誰も触っていないもの'));
+    await run(async (q) => {
+      await setHandoverState(q, trusted, touched.id, 'done');
+
+      const actions = await handoverHistory(q, visitor, STORE_A, 'actions');
+      assert.ok(actions.some((h) => h.id === touched.id));
+      assert.ok(!actions.some((h) => h.id === untouched.id), '書いただけのものは出さない');
+
+      const all = await handoverHistory(q, visitor, STORE_A, 'all');
+      assert.ok(all.some((h) => h.id === touched.id));
+      assert.ok(all.some((h) => h.id === untouched.id), 'すべてなら書いただけのものも出す');
+      const onlyCreated = all.find((h) => h.id === untouched.id)!;
+      assert.deepEqual(onlyCreated.events.map((e) => e.label), ['書いた']);
+    });
+  });
+
+  it('新しい操作の順に並ぶ', async () => {
+    const first = await run((q) => addHandover(q, visitor, STORE_A, '先に書いたもの'));
+    const second = await run((q) => addHandover(q, visitor, STORE_A, 'あとに書いたもの'));
+    await run(async (q) => {
+      // 先に書いたものを、あとから片付ける
+      await setHandoverState(q, trusted, first.id, 'done');
+      const all = await handoverHistory(q, visitor, STORE_A, 'all');
+      const order = all.map((h) => h.id);
+      assert.ok(order.indexOf(first.id) < order.indexOf(second.id), 'あとで触ったものが上に来る');
+    });
+  });
+
+  it('消したものも履歴には残る', async () => {
+    const { id } = await run((q) => addHandover(q, visitor, STORE_A, '消したあとも残る'));
+    await run(async (q) => {
+      await deleteHandover(q, manager, id);
+      const history = await handoverHistory(q, visitor, STORE_A, 'actions');
+      const item = history.find((h) => h.id === id)!;
+      assert.equal(item.deleted, true);
+      assert.equal(item.lastAction.label, '消した');
+      assert.equal(item.lastAction.by, '店長');
+    });
+  });
+
+  it('他店舗の履歴は見られない', async () => {
+    await run(async (q) => {
+      await assert.rejects(handoverHistory(q, storeBStaff, STORE_A, 'actions'), /見られません/);
+      await assert.rejects(handoverHistory(q, visitor, STORE_A, 'actions', 0), /1〜365/);
     });
   });
 });

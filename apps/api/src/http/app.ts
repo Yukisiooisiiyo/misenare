@@ -34,7 +34,9 @@ import {
   addHandover,
   deleteHandover,
   handoverBadge,
+  handoverHistory,
   listHandovers,
+  restoreHandover,
   setHandoverState,
 } from '../domain/handovers.ts';
 import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
@@ -353,7 +355,15 @@ function routes(): Router<Ctx> {
     if (b.forDate !== undefined && typeof b.forDate !== 'string') throw new HttpError(400, 'forDate は日付の文字列です');
     return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined), 201);
   });
+  r.get('/stores/:storeId/handovers/history', async (c, req, p) => {
+    const url = new URL(req.url);
+    const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'actions';
+    const days = url.searchParams.get('days');
+    if (days !== null && !/^\d{1,3}$/.test(days)) throw new HttpError(400, 'days は1〜365の数字です');
+    return json(await handoverHistory(c.db, c.actor, p.storeId!, scope, days === null ? undefined : Number(days)));
+  });
   r.post('/handovers/:handoverId/done', async (c, _req, p) => json(await setHandoverState(c.db, c.actor, p.handoverId!, 'done')));
+  r.post('/handovers/:handoverId/restore', async (c, _req, p) => json(await restoreHandover(c.db, c.actor, p.handoverId!)));
   r.post('/handovers/:handoverId/reopen', async (c, _req, p) => json(await setHandoverState(c.db, c.actor, p.handoverId!, 'open')));
   r.delete('/handovers/:handoverId', async (c, _req, p) => json(await deleteHandover(c.db, c.actor, p.handoverId!)));
 

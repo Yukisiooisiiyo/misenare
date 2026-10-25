@@ -257,3 +257,19 @@ button.tag { cursor: pointer; }
 .handover-body.done { color: #6b7570; text-decoration: line-through; }
 .handover-carried { background: #fffdf2; }
 .fresh-detail .primary, .fresh-detail .secondary { margin-top: 10px; }
+
+/* 引き継ぎの履歴 */
+.scope-tabs { display: flex; gap: 8px; margin: 4px 0 12px; }
+.scope-tab {
+  flex: 1; min-height: 40px; padding: 8px 12px; font: inherit; font-weight: 700;
+  background: var(--surface); color: var(--sign); border: 1px solid var(--sign); cursor: pointer;
+}
+.scope-tab-on { background: var(--sign); color: var(--sign-ink, #fff); }
+.history { align-items: flex-start; }
+.history-events { list-style: none; margin: 4px 0 0; padding: 0; flex: 1 1 100%; font-size: 13px; color: var(--ink-soft); }
+.history-events li { padding: 1px 0; }
+.history .notice-badge { margin-right: 6px; }
+/* 消したものは本文だけに線を引く（状態の札には引かない） */
+.history-deleted .history-text { color: var(--ink-soft); text-decoration: line-through; }
+.history-done { background: var(--sign); }
+.history-open { background: var(--pending); }

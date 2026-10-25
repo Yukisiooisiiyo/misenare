@@ -74,7 +74,12 @@ const ME: Me = {
 const tokenizer = new SegmenterTokenizer();
 const knowledge: DemoKnowledge[] = [...KNOWLEDGE];
 const notices: DemoNotice[] = NOTICES.map((n) => ({ ...n }));
-const handovers: DemoHandover[] = HANDOVERS.map((h) => ({ ...h }));
+const handovers: DemoHandover[] = HANDOVERS.map((h) => ({ ...h, events: [...(h.events ?? [])] }));
+
+/** 誰が何をしたかを残す（本物と同じ考え方） */
+function recordHandover(h: DemoHandover, action: string, label: string): void {
+  h.events = [...(h.events ?? []), { action, label, by: ME.name, at: new Date().toISOString() }];
+}
 const tags = [...TAGS];
 let logId = 1;
 /** 見つからなかった検索（本物と同じく、管理画面で見られるようにする） */
@@ -329,9 +334,24 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   }
 
   // --- 引き継ぎ ---
+  if (method === 'GET' && parts[0] === 'stores' && parts[2] === 'handovers' && parts[3] === 'history') {
+    const scope = params.get('scope') === 'all' ? 'all' : 'actions';
+    return handovers
+      .filter((h) => scope === 'all' || (h.events ?? []).some((e) => e.action !== 'created'))
+      .map((h) => {
+        const events = h.events ?? [];
+        return {
+          id: h.id, body: h.body, state: h.state, forDate: h.forDate, deleted: Boolean(h.deleted),
+          createdBy: h.createdBy, createdAt: h.createdAt,
+          events, lastAction: events[events.length - 1] ?? { action: 'created', label: '書いた', by: h.createdBy, at: h.createdAt },
+        };
+      })
+      .sort((a, c) => c.lastAction.at.localeCompare(a.lastAction.at) || c.createdAt.localeCompare(a.createdAt)) as T;
+  }
   if (method === 'GET' && parts[0] === 'stores' && parts[2] === 'handovers') {
     const today = dateOnly(0);
     return handovers
+      .filter((h) => !h.deleted)
       .filter((h) => h.forDate === today || h.state === 'open')
       .map((h) => ({ ...h, carriedOver: h.forDate < today }))
       .sort((a, c) => Number(a.state === 'done') - Number(c.state === 'done') || a.forDate.localeCompare(c.forDate)) as T;
@@ -339,22 +359,38 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   if (method === 'POST' && parts[0] === 'stores' && parts[2] === 'handovers') {
     const text = String(b.body ?? '').trim();
     if (!text) throw new ApiError(400, '引き継ぎを書いてください');
+    const now = new Date().toISOString();
     handovers.push({
       id: uuid(), body: text, state: 'open', forDate: dateOnly(0),
-      createdBy: ME.name, createdAt: new Date().toISOString(), doneBy: null, doneAt: null,
+      createdBy: ME.name, createdAt: now, doneBy: null, doneAt: null,
+      events: [{ action: 'created', label: '書いた', by: ME.name, at: now }],
     });
     return { id: handovers.at(-1)!.id, forDate: dateOnly(0) } as T;
   }
   if (method === 'POST' && parts[0] === 'handovers') {
     const h = handovers.find((x) => x.id === parts[1]);
     if (!h) throw new ApiError(404, '引き継ぎが見つかりません');
-    if (parts[2] === 'done') { h.state = 'done'; h.doneBy = ME.name; h.doneAt = new Date().toISOString(); }
-    if (parts[2] === 'reopen') { h.state = 'open'; h.doneBy = null; h.doneAt = null; }
+    if (parts[2] === 'done') {
+      h.state = 'done'; h.doneBy = ME.name; h.doneAt = new Date().toISOString();
+      recordHandover(h, 'done', '片付けた');
+    }
+    if (parts[2] === 'reopen') {
+      h.state = 'open'; h.doneBy = null; h.doneAt = null;
+      recordHandover(h, 'reopened', 'やり直した');
+    }
+    if (parts[2] === 'restore') {
+      h.deleted = false;
+      recordHandover(h, 'restored', '戻した');
+      return { id: h.id, restored: true } as T;
+    }
     return { id: h.id, state: h.state } as T;
   }
   if (method === 'DELETE' && parts[0] === 'handovers') {
-    const i = handovers.findIndex((x) => x.id === parts[1]);
-    if (i >= 0) handovers.splice(i, 1);
+    // 本物と同じく、消さずに印を付けるだけ（戻せる）
+    const h = handovers.find((x) => x.id === parts[1]);
+    if (!h) throw new ApiError(404, '引き継ぎが見つかりません');
+    h.deleted = true;
+    recordHandover(h, 'deleted', '消した');
     return { ok: true } as T;
   }
 

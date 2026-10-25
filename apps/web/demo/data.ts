@@ -15,9 +15,11 @@ export interface DemoNotice {
   priority: 'normal' | 'important'; requiresAck: boolean; endsAt: string | null;
   createdBy: string; createdAt: string; readAt: string | null; ackedAt: string | null; pendingAcks: number;
 }
+export interface DemoHandoverEvent { action: string; label: string; by: string; at: string }
 export interface DemoHandover {
   id: string; body: string; state: 'open' | 'done'; forDate: string;
   createdBy: string; createdAt: string; doneBy: string | null; doneAt: string | null;
+  deleted?: boolean; events?: DemoHandoverEvent[];
 }
 
 const day = 24 * 3600_000;
@@ -137,11 +139,23 @@ export const HANDOVERS: DemoHandover[] = [
     body: '冷蔵庫（GR-W600）の在庫が1台になりました。発注済みで入荷は明後日です。',
     state: 'open', forDate: dateOnly(0), createdBy: '田中（ベテラン）', createdAt: ago(0.2),
     doneBy: null, doneAt: null,
+    events: [{ action: 'created', label: '書いた', by: '田中（ベテラン）', at: ago(0.2) }],
   },
   {
     id: 'ab000000-0000-0000-0000-000000000002',
     body: 'レジ横の忘れ物（傘）を預かっています。落とし物の台帳に記入済み。',
     state: 'open', forDate: dateOnly(1), createdBy: '佐藤店長', createdAt: ago(1.1),
     doneBy: null, doneAt: null,
+    events: [{ action: 'created', label: '書いた', by: '佐藤店長', at: ago(1.1) }],
+  },
+  {
+    id: 'ab000000-0000-0000-0000-000000000003',
+    body: '展示品のテレビのリモコンを片付けました。',
+    state: 'done', forDate: dateOnly(1), createdBy: '鈴木（新人）', createdAt: ago(1.4),
+    doneBy: '田中（ベテラン）', doneAt: ago(1.2),
+    events: [
+      { action: 'created', label: '書いた', by: '鈴木（新人）', at: ago(1.4) },
+      { action: 'done', label: '片付けた', by: '田中（ベテラン）', at: ago(1.2) },
+    ],
   },
 ];

@@ -193,8 +193,9 @@ Web 版からは `/api` を付けて呼ぶ（例：`/api/me`）。付けずに�
 | POST | `/notices/:id/read` `ack` | 読んだ／「確認しました」 |
 | GET | `/notices/:id/readers` | 誰が確認して誰がまだか（trusted 以上） |
 | GET / POST | `/stores/:storeId/handovers` | その日の引き継ぎ（持ち越し込み）／書く（誰でも） |
-| POST | `/handovers/:id/done` `reopen` | 片付いた／やり直す |
-| DELETE | `/handovers/:id` | 消す（書いた人か trusted 以上） |
+| GET | `/stores/:storeId/handovers/history` | 操作の履歴（`?scope=actions`／`all`、`?days=`） |
+| POST | `/handovers/:id/done` `reopen` `restore` | 片付いた／やり直す／消したものを戻す |
+| DELETE | `/handovers/:id` | 消す（印を付けるだけ。書いた人か trusted 以上） |
 | GET | `/stores/:storeId/badges` | ホームとタブに出す数（未読・未確認・残っている引き継ぎ） |
 | POST | `/stores/:storeId/imports?name=` | 既存マニュアルから下書きをまとめて作る（trusted 以上） |
 | GET | `/stores/:storeId/imports` | 取り込んだ資料と、残っている下書きの数 |
@@ -217,6 +218,17 @@ Web 版からは `/api` を付けて呼ぶ（例：`/api/me`）。付けずに�
 - 「要確認」の連絡は、押すまでホームとタブに数が残る。trusted 以上は誰がまだかを見られる。
 - 全店共通の連絡事項は本部だけが出せる。
 - 引き継ぎは、片付かないまま14日を過ぎると夜間バッチが閉じる（出し続けても読まれないため）。
+
+### 引き継ぎは、誰がやったかを必ず残す
+
+押し間違いが起きる前提で作っている。
+
+- **削除は消さない**。印を付けるだけで、行は残る。誰でも「戻す」で元に戻せる。
+- 書いた・片付けた・やり直した・消した・戻した、を**1件ずつ記録**する（`handover_events`）。
+- 履歴は2通りで見られる。
+  - **操作された分**：誰かが手を加えたものだけ。「誰が片付けたのか」を追うとき
+  - **すべて**：まだ誰も触っていないものも含む。その日の全体を見るとき
+- どちらも新しい操作の順に並び、1件ごとに「いつ・誰が・何をしたか」が付く。履歴そのものは消せない。
 
 ## 写真
 
