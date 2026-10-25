@@ -231,11 +231,11 @@ export function staffPanel(storeId: string, meId: string): HTMLElement {
 // --- 既存マニュアルの取り込み -------------------------------------------------------
 
 interface ImportRow { id: string; file_name: string; drafts: number; pending: number; created_at: string; created_by: string }
-interface ImportResult { importId: string; fileName: string; drafts: number; preview: Array<{ id: string; title: string; source: string | null }> }
+interface ImportResult { importId: string; fileName: string; drafts: number; warnings: string[]; preview: Array<{ id: string; title: string; source: string | null }> }
 
 export function importPanel(storeId: string): HTMLElement {
   return panel('マニュアルの取り込み', async (body) => {
-    const file = h('input', { type: 'file', id: 'import-file', accept: '.txt,.md,.csv,.tsv,.docx,.xlsx', hidden: true });
+    const file = h('input', { type: 'file', id: 'import-file', accept: '.txt,.md,.csv,.tsv,.docx,.xlsx,.pdf', hidden: true });
     const button = h('button', { type: 'button', class: 'primary' }, 'ファイルを選ぶ');
     const status = h('p', { class: 'hint', hidden: true });
     const result = h('div', { 'aria-live': 'polite' });
@@ -270,6 +270,7 @@ export function importPanel(storeId: string): HTMLElement {
         const out = await api<ImportResult>('POST', `/stores/${storeId}/imports?name=${encodeURIComponent(chosen.name)}`, await chosen.arrayBuffer());
         result.append(
           h('p', {}, `${out.drafts}件の下書きを作りました。「承認待ち」から1件ずつ確かめて公開してください。`),
+          ...(out.warnings ?? []).map((w) => h('p', { class: 'pending' }, w)),
           h('ul', { class: 'rows' }, ...out.preview.map((p) =>
             h('li', { class: 'row' }, h('a', { href: `#/k/${p.id}` }, p.title), p.source ? h('span', { class: 'hint' }, p.source) : null))),
         );
@@ -283,8 +284,9 @@ export function importPanel(storeId: string): HTMLElement {
     });
 
     body.append(
-      h('p', { class: 'hint' }, '手順書や FAQ から下書きをまとめて作ります。読めるのは .txt .md .csv .tsv .docx .xlsx です。'),
-      h('p', { class: 'hint' }, 'Word は見出し、Excel と CSV は1行ごとに区切ります。タグは付かないので、承認するときに付けてください。'),
+      h('p', { class: 'hint' }, '手順書や FAQ から下書きをまとめて作ります。読めるのは .txt .md .csv .tsv .docx .xlsx .pdf です。'),
+      h('p', { class: 'hint' }, 'Word と PDF は見出し、Excel と CSV は1行ごとに区切ります。タグは付かないので、承認するときに付けてください。'),
+      h('p', { class: 'hint' }, 'PDF は文字が入っているものだけ読めます（写真を貼っただけのものは読めません）。'),
       button, file, status, result,
     );
     await drawList();

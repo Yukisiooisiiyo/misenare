@@ -15,6 +15,8 @@ export interface ImportResult {
   importId: string;
   fileName: string;
   drafts: number;
+  /** 読み取りで気づいたこと（読めなかったページなど）。取り込みは続ける */
+  warnings: string[];
   /** 作った下書き（確認用に最初の数件） */
   preview: Array<{ id: string; title: string; source: string | null }>;
 }
@@ -31,12 +33,20 @@ export async function importManual(
   assert(content.byteLength > 0 && content.byteLength <= MAX_IMPORT_BYTES, 'invalid', 'ファイルが大きすぎます');
 
   let drafts: Draft[];
+  let warnings: string[] = [];
   try {
-    drafts = parseImport(fileName, content);
+    const parsed = parseImport(fileName, content);
+    drafts = parsed.drafts;
+    warnings = parsed.warnings;
   } catch (err) {
     throw new DomainError('invalid', err instanceof Error ? err.message : String(err));
   }
-  assert(drafts.length > 0, 'invalid', 'この資料からは下書きを作れませんでした。見出しや列の名前を確かめてください。');
+  // 読めなかった理由が分かっていれば、それをそのまま伝える
+  assert(
+    drafts.length > 0,
+    'invalid',
+    warnings[0] ?? 'この資料からは下書きを作れませんでした。見出しや列の名前を確かめてください。',
+  );
 
   const imported = await one<{ id: string }>(
     db,
@@ -62,7 +72,7 @@ export async function importManual(
     if (preview.length < 5) preview.push({ id: k.id, title: d.title, source: d.source });
   }
 
-  return { importId: imported.id, fileName, drafts: drafts.length, preview };
+  return { importId: imported.id, fileName, drafts: drafts.length, warnings, preview };
 }
 
 /** 取り込んだ資料の一覧と、残っている下書きの数 */

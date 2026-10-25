@@ -5,11 +5,14 @@
 //   .csv / .tsv  … 1行1件。見出し行から「タイトル」「本文」「タグ」の列を探す
 //   .docx        … Word の見出しスタイルで区切る
 //   .xlsx        … 1行1件（CSV と同じ見方）
+//   .pdf         … 文字の大きさで見出しを見分ける（画像だけの PDF は読めない）
 //
 // 出てくるのは下書きなので、公開するかどうかは人が決める。
 // タグは付けない（本文から機械的に拾うと的外れなタグが増えるため）。書いた人が承認時に付ける。
 
 import { readZipEntry } from './zip.ts';
+import { readDocument } from './pdfObjects.ts';
+import { extractPdfText, isEncrypted, UNREADABLE } from './pdfText.ts';
 
 export interface Draft {
   title: string;
@@ -18,7 +21,13 @@ export interface Draft {
   source: string;
 }
 
-export type ImportFormat = 'text' | 'markdown' | 'csv' | 'tsv' | 'docx' | 'xlsx';
+export type ImportFormat = 'text' | 'markdown' | 'csv' | 'tsv' | 'docx' | 'xlsx' | 'pdf';
+
+export interface ParseResult {
+  drafts: Draft[];
+  /** 読み取りで気づいたこと（読めなかったページなど） */
+  warnings: string[];
+}
 
 /** 1件あたりの上限（長すぎる塊はそのまま入れず、切って知らせる） */
 export const MAX_BODY_CHARS = 4000;
@@ -34,6 +43,7 @@ export function formatOf(fileName: string): ImportFormat | undefined {
   if (ext === 'tsv') return 'tsv';
   if (ext === 'docx') return 'docx';
   if (ext === 'xlsx') return 'xlsx';
+  if (ext === 'pdf') return 'pdf';
   return undefined;
 }
 
@@ -250,19 +260,91 @@ export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
   return draftsFromRows(rows.filter((r) => r.some((c) => c.trim() !== '')), source);
 }
 
+// --- PDF ------------------------------------------------------------------------
+
+/** 読めない字がこの割合を超えたら、取り込みを断る */
+const MAX_UNREADABLE = 0.3;
+
+export function draftsFromPdf(buf: Buffer, source: string): ParseResult {
+  const doc = readDocument(buf);
+  if (isEncrypted(doc)) {
+    return { drafts: [], warnings: ['鍵のかかった PDF は読めません。鍵を外してから取り込んでください'] };
+  }
+  const text = extractPdfText(doc);
+  const warnings = [...text.warnings];
+  const all = text.pages.flatMap((page) => page.lines.map((line) => ({ ...line, page: page.number })));
+  if (all.length === 0) {
+    return { drafts: [], warnings: [...warnings, '文字が入っていません。写真だけの PDF は読めません（文字入りで書き出し直してください）'] };
+  }
+  if (text.unreadableRatio > MAX_UNREADABLE) {
+    return {
+      drafts: [],
+      warnings: [...warnings, `文字の${Math.round(text.unreadableRatio * 100)}%が読み取れませんでした。文字を埋め込んだ PDF か、Word・テキストで取り込んでください`],
+    };
+  }
+  if (text.unreadableRatio > 0) {
+    warnings.push(`読み取れなかった字は「${UNREADABLE}」にしています。取り込んだあとに直してください`);
+  }
+
+  // 本文の大きさ＝いちばん多く使われている大きさ（字数で数える）
+  const weight = new Map<number, number>();
+  for (const line of all) {
+    const key = Math.round(line.size * 2) / 2;
+    weight.set(key, (weight.get(key) ?? 0) + [...line.text].length);
+  }
+  const bodySize = [...weight.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? 0;
+  const isHeading = (line: { text: string; size: number }): boolean =>
+    line.size >= bodySize * 1.15 && [...line.text].length <= 60;
+
+  const drafts: Draft[] = [];
+  let title: string | null = null;
+  let titlePage = 1;
+  let buffer: string[] = [];
+  const flush = () => {
+    const body = tidy(buffer.join('\n'));
+    if (title !== null && body) {
+      drafts.push({ title: cut(title, MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source: `${source} ${titlePage}ページ目` });
+    }
+    buffer = [];
+  };
+  for (const line of all) {
+    if (isHeading(line)) {
+      flush();
+      title = line.text;
+      titlePage = line.page;
+    } else {
+      buffer.push(line.text);
+    }
+  }
+  flush();
+
+  if (drafts.length > 0) return { drafts, warnings };
+
+  // 見出しが見分けられないときは、ページごとに1件（1行目をタイトルにする）
+  for (const page of text.pages) {
+    const [first, ...rest] = page.lines.map((l) => l.text);
+    if (!first) continue;
+    const body = tidy(rest.join('\n')) || first;
+    drafts.push({ title: cut(first, MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source: `${source} ${page.number}ページ目` });
+  }
+  if (drafts.length > 0) warnings.push('見出しを見分けられなかったので、ページごとに1件にしました');
+  return { drafts, warnings };
+}
+
 // --- まとめ ----------------------------------------------------------------------
 
-export function parseImport(fileName: string, buf: Buffer): Draft[] {
+export function parseImport(fileName: string, buf: Buffer): ParseResult {
   const format = formatOf(fileName);
-  if (!format) throw new Error('取り込めるのは .txt .md .csv .tsv .docx .xlsx です');
-  const drafts = (() => {
+  if (!format) throw new Error('取り込めるのは .txt .md .csv .tsv .docx .xlsx .pdf です');
+  const result: ParseResult = (() => {
     switch (format) {
-      case 'docx': return draftsFromDocx(buf, fileName);
-      case 'xlsx': return draftsFromXlsx(buf, fileName);
-      case 'csv': return draftsFromRows(parseDelimited(normalizeText(buf), ','), fileName);
-      case 'tsv': return draftsFromRows(parseDelimited(normalizeText(buf), '\t'), fileName);
-      default: return splitByHeadings(normalizeText(buf), fileName);
+      case 'pdf': return draftsFromPdf(buf, fileName);
+      case 'docx': return { drafts: draftsFromDocx(buf, fileName), warnings: [] };
+      case 'xlsx': return { drafts: draftsFromXlsx(buf, fileName), warnings: [] };
+      case 'csv': return { drafts: draftsFromRows(parseDelimited(normalizeText(buf), ','), fileName), warnings: [] };
+      case 'tsv': return { drafts: draftsFromRows(parseDelimited(normalizeText(buf), '\t'), fileName), warnings: [] };
+      default: return { drafts: splitByHeadings(normalizeText(buf), fileName), warnings: [] };
     }
   })();
-  return drafts.filter((d) => d.title && d.body).slice(0, MAX_DRAFTS);
+  return { drafts: result.drafts.filter((d) => d.title && d.body).slice(0, MAX_DRAFTS), warnings: result.warnings };
 }
