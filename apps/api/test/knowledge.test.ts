@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import type { Db } from '../src/db/db.ts';
-import type { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import { DomainError } from '../src/domain/actor.ts';
 import {
   approveVersion,
@@ -16,8 +15,9 @@ import {
 import { search, zeroHitQueries } from '../src/domain/search.ts';
 import { exportDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, hq, manager, otherTenant, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
+import type { TestDatabase } from './helpers.ts';
 
-let db: PsqlDatabase;
+let db: TestDatabase;
 const run = <R>(fn: (q: Db) => Promise<R>): Promise<R> => db.withTenant(T, fn);
 const ids = (r: { hits: Array<{ id: string }> }) => r.hits.map((h) => h.id);
 const rejects = async (p: Promise<unknown>, code: DomainError['code']) => {

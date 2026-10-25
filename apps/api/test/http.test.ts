@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import type { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import type { Actor } from '../src/domain/actor.ts';
 import { createApp } from '../src/http/app.ts';
 import { DevHeaderAuthenticator } from '../src/http/auth.ts';
 import { freshDatabase, jan, STORE_A, STORE_B, tokenizer, trusted, visitor } from './helpers.ts';
+import type { TestDatabase } from './helpers.ts';
 
-let db: PsqlDatabase;
+let db: TestDatabase;
 let app: (req: Request) => Promise<Response>;
 
 before(async () => {

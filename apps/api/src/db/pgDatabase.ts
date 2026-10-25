@@ -33,6 +33,11 @@ export class PgDatabase implements Database {
     }
   }
 
+  /** テナントを設定せずに実行する（マイグレーションやテストの準備用）。 */
+  async raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
+    return (await this.pool.query(sql, params as unknown[] | undefined)).rows;
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }

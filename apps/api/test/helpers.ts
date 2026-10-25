@@ -4,8 +4,20 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { SegmenterTokenizer } from '@misenare/search-core';
+import type { Database } from '../src/db/db.ts';
 import { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import type { Actor } from '../src/domain/actor.ts';
+
+/** テストで使う DB。DB_DRIVER=pg なら本番と同じ pg ドライバー、それ以外は psql アダプタ。 */
+export type TestDatabase = Database & { raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> };
+
+async function openTestDatabase(url: string): Promise<TestDatabase> {
+  if (process.env.DB_DRIVER === 'pg') {
+    const { PgDatabase } = await import('../src/db/pgDatabase.ts');
+    return new PgDatabase(url);
+  }
+  return new PsqlDatabase(url);
+}
 
 export const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://misenare:misenare@localhost/misenare_test';
 if (!/_test\b/.test(new URL(DATABASE_URL).pathname)) {
@@ -29,10 +41,10 @@ export const hq: Actor = { userId: '40000000-0000-0000-0000-000000000004', tenan
 export const storeBStaff: Actor = { userId: '40000000-0000-0000-0000-000000000005', tenantId: T, storeIds: [STORE_B], trustLevel: 'trusted', adminScope: 'none' };
 export const otherTenant: Actor = { userId: '40000000-0000-0000-0000-000000000009', tenantId: OTHER_T, storeIds: [], trustLevel: 'trusted', adminScope: 'tenant' };
 
-export async function freshDatabase(): Promise<PsqlDatabase> {
+export async function freshDatabase(): Promise<TestDatabase> {
   execFileSync('psql', [DATABASE_URL, '-X', '-q', '-c', 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'], { stdio: 'pipe' });
   execFileSync('psql', [DATABASE_URL, '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-f', MIGRATION], { stdio: 'pipe' });
-  const db = new PsqlDatabase(DATABASE_URL);
+  const db = await openTestDatabase(DATABASE_URL);
   await db.raw(`INSERT INTO tenants (id, name) VALUES ($1, 'テスト電機'), ($2, '別の会社')`, [T, OTHER_T]);
   await db.withTenant(T, async (q) => {
     await q.query(`INSERT INTO stores (id, tenant_id, name) VALUES ($1, $3, '本店'), ($2, $3, '駅前店')`, [STORE_A, STORE_B, T]);

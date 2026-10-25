@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import type { Db } from '../src/db/db.ts';
-import type { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import { DomainError } from '../src/domain/actor.ts';
 import { createKnowledge } from '../src/domain/knowledge.ts';
 import {
@@ -17,8 +16,9 @@ import {
   updateProduct,
 } from '../src/domain/products.ts';
 import { AREA_BIG, AREA_KITCHEN, freshDatabase, hq, jan, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
+import type { TestDatabase } from './helpers.ts';
 
-let db: PsqlDatabase;
+let db: TestDatabase;
 const run = <R>(fn: (q: Db) => Promise<R>): Promise<R> => db.withTenant(T, fn);
 const rejects = async (p: Promise<unknown>, code: DomainError['code']) => {
   await assert.rejects(p, (e: unknown) => e instanceof DomainError && e.code === code);
