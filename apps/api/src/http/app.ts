@@ -30,6 +30,7 @@ import {
   type ProductInput,
   type ProductPatch,
 } from '../domain/products.ts';
+import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
 import {
   deletePhoto,
   finishPhotoUpload,
@@ -277,6 +278,19 @@ function routes(): Router<Ctx> {
     return new Response(out.body, { headers: { 'content-type': out.contentType, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' } });
   });
   r.delete('/photos/:photoId', async (c, _req, p) => json(await deletePhoto(c.db, c.storage, c.actor, p.photoId!)));
+
+  // --- 既存マニュアルの取り込み ---------------------------------------------
+  // ファイルの中身をそのまま本文として送る（境界つきの multipart は使わない）。
+  // 名前は ?name= で渡す。
+  r.post('/stores/:storeId/imports', async (c, req, p) => {
+    const name = new URL(req.url).searchParams.get('name') ?? '';
+    if (!name) throw new HttpError(400, 'name（ファイル名）が必要です');
+    const body = Buffer.from(await req.arrayBuffer());
+    if (body.byteLength > MAX_IMPORT_BYTES) throw new HttpError(413, 'ファイルが大きすぎます');
+    return json(await importManual(c.db, c.actor, p.storeId!, name, body), 201);
+  });
+  r.get('/stores/:storeId/imports', async (c, _req, p) => json(await listImports(c.db, c.actor, p.storeId!)));
+  r.post('/imports/:importId/discard', async (c, _req, p) => json(await discardImport(c.db, c.actor, p.importId!)));
 
   // --- タグ辞書の管理 -------------------------------------------------------
   r.get('/tag-relations', async (c, req) => {

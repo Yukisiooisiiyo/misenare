@@ -39,12 +39,15 @@ export class ApiError extends Error {
 }
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
+  // ファイルの中身（ArrayBuffer）はそのまま送る。それ以外は JSON にする
+  const raw = body instanceof ArrayBuffer || body instanceof Blob;
   const headers: Record<string, string> = {};
-  if (body !== undefined) headers['content-type'] = 'application/json';
+  if (body !== undefined) headers['content-type'] = raw ? 'application/octet-stream' : 'application/json';
   if (session.token) headers.authorization = `Bearer ${session.token}`;
   let res: Response;
   try {
-    res = await fetch(`/api${path}`, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    const payload = body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) };
+    res = await fetch(`/api${path}`, { method, headers, ...payload });
   } catch {
     throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
   }

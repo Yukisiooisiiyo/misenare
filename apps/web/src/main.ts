@@ -4,7 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { action, countedList, productPanel, staffPanel, tagPanel } from './manage.ts';
+import { action, countedList, importPanel, productPanel, staffPanel, tagPanel } from './manage.ts';
 import { photoSection } from './photos.ts';
 
 const root = document.getElementById('app')!;
@@ -511,7 +511,7 @@ async function renderManage(): Promise<void> {
           h('span', { class: 'row-actions' },
             action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
     );
-    section.append(productPanel(storeId()), tagPanel(isAdmin()));
+    section.append(productPanel(storeId()), tagPanel(isAdmin()), importPanel(storeId()));
     if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));

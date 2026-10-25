@@ -7,8 +7,14 @@ const MAX_BODY = 1024 * 1024; // 1MB（ふつうの API）
 // 写真の中身だけは大きい。S3 を使うときは端末から直接上がるので、これはローカル保存のときの上限。
 const MAX_PHOTO_BODY = 4 * 1024 * 1024;
 
+// 既存マニュアルの取り込み。資料そのものを送るので大きい
+const MAX_IMPORT_BODY = 8 * 1024 * 1024;
+
 function bodyLimit(req: IncomingMessage): number {
-  return req.method === 'PUT' && /\/photos\/[^/]+\/data\/?$/.test(req.url ?? '') ? MAX_PHOTO_BODY : MAX_BODY;
+  const url = req.url ?? '';
+  if (req.method === 'PUT' && /\/photos\/[^/]+\/data\/?$/.test(url)) return MAX_PHOTO_BODY;
+  if (req.method === 'POST' && /\/imports(\?|$)/.test(url)) return MAX_IMPORT_BODY;
+  return MAX_BODY;
 }
 
 async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {

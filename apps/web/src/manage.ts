@@ -227,3 +227,66 @@ export function staffPanel(storeId: string, meId: string): HTMLElement {
     body.append(users.length === 0 ? h('p', { class: 'hint' }, 'まだいません。') : list);
   });
 }
+
+// --- 既存マニュアルの取り込み -------------------------------------------------------
+
+interface ImportRow { id: string; file_name: string; drafts: number; pending: number; created_at: string; created_by: string }
+interface ImportResult { importId: string; fileName: string; drafts: number; preview: Array<{ id: string; title: string; source: string | null }> }
+
+export function importPanel(storeId: string): HTMLElement {
+  return panel('マニュアルの取り込み', async (body) => {
+    const file = h('input', { type: 'file', id: 'import-file', accept: '.txt,.md,.csv,.tsv,.docx,.xlsx', hidden: true });
+    const button = h('button', { type: 'button', class: 'primary' }, 'ファイルを選ぶ');
+    const status = h('p', { class: 'hint', hidden: true });
+    const result = h('div', { 'aria-live': 'polite' });
+    const list = h('div');
+
+    const drawList = async () => {
+      clear(list);
+      const rows = await api<ImportRow[]>('GET', `/stores/${storeId}/imports`);
+      list.append(...countedList('取り込んだ資料', rows, (r, remove) =>
+        h('li', { class: 'row' },
+          h('span', {}, h('strong', {}, r.file_name), `（${r.drafts}件）`),
+          h('span', { class: 'hint' }, `${r.created_by}さん・${relativeDate(r.created_at)}・残り${r.pending}件`),
+          r.pending === 0 ? h('span', {}) : h('span', { class: 'row-actions' },
+            action('残りを取り下げる', 'secondary small', async () => {
+              if (!window.confirm(`${r.file_name} から取り込んだ、まだ承認していない${r.pending}件を取り下げます。`)) return;
+              const out = await api<{ discarded: number }>('POST', `/imports/${r.id}/discard`);
+              toast(`${out.discarded}件を取り下げました`);
+              remove();
+            })))));
+    };
+
+    button.addEventListener('click', () => file.click());
+    file.addEventListener('change', async () => {
+      const chosen = file.files?.[0];
+      file.value = '';
+      if (!chosen) return;
+      button.disabled = true;
+      status.textContent = `${chosen.name} を読んでいます…`;
+      status.hidden = false;
+      clear(result);
+      try {
+        const out = await api<ImportResult>('POST', `/stores/${storeId}/imports?name=${encodeURIComponent(chosen.name)}`, await chosen.arrayBuffer());
+        result.append(
+          h('p', {}, `${out.drafts}件の下書きを作りました。「承認待ち」から1件ずつ確かめて公開してください。`),
+          h('ul', { class: 'rows' }, ...out.preview.map((p) =>
+            h('li', { class: 'row' }, h('a', { href: `#/k/${p.id}` }, p.title), p.source ? h('span', { class: 'hint' }, p.source) : null))),
+        );
+        await drawList();
+      } catch (e) {
+        result.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+      } finally {
+        button.disabled = false;
+        status.hidden = true;
+      }
+    });
+
+    body.append(
+      h('p', { class: 'hint' }, '手順書や FAQ から下書きをまとめて作ります。読めるのは .txt .md .csv .tsv .docx .xlsx です。'),
+      h('p', { class: 'hint' }, 'Word は見出し、Excel と CSV は1行ごとに区切ります。タグは付かないので、承認するときに付けてください。'),
+      button, file, status, result,
+    );
+    await drawList();
+  });
+}
