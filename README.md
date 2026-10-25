@@ -55,6 +55,16 @@ npm run dev:api                 # http://localhost:8787/app/
 
 テストは `TEST_DATABASE_URL`（既定 `misenare_test`）のスキーマを毎回作り直します。名前が `_test` で終わらないDBを指定すると、誤って消さないよう起動を止めます。
 
+### ブラウザだけで触れるお試し版
+
+```bash
+node apps/web/demo/build.mjs   # apps/web/demo/dist/index.html が1枚できる
+```
+
+サーバーの代わりに端末の中の仮データを使う版（`apps/web/demo/api.ts`）。
+検索・タグ候補・もしかして・共起は本物と同じ `@misenare/search-core` を使うので、
+検索の手ざわりはそのまま確かめられる。書いたものは閉じると消える。
+
 ### お試し（デモデータ）
 
 ```bash

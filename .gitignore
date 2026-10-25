@@ -7,3 +7,4 @@ dist/
 .DS_Store
 apps/web/dist/
 test-output.tap
+apps/web/demo/dist/
