@@ -40,6 +40,19 @@ describe('QR コード', () => {
     }
   });
 
+  it('型番ごとに入る文字数が規格の表と一致する', () => {
+    // バイトモード・レベル M の最大文字数（JIS X 0510 の容量表）。
+    // 誤り訂正の表と、盤から数えた符号数の両方が正しくないと、この並びにならない。
+    const expected = [14, 26, 42, 62, 84, 106, 122, 152, 180, 213, 251, 287, 331, 362, 412, 450, 504, 560, 624, 666];
+    for (const [i, max] of expected.entries()) {
+      const version = i + 1;
+      assert.equal(encodeQr('A'.repeat(max)).version, version, `${max} 文字は ${version} 型に入るはず`);
+      if (version < expected.length) {
+        assert.equal(encodeQr('A'.repeat(max + 1)).version, version + 1, `${max + 1} 文字は ${version + 1} 型になるはず`);
+      }
+    }
+  });
+
   it('短い文字列は小さい型番、長くなるほど大きい型番を選ぶ', () => {
     assert.equal(encodeQr('HELLO').version, 1);
     const long = encodeQr('x'.repeat(300));

@@ -159,8 +159,9 @@ function placeFunctionPatterns(grid: Grid, version: number): void {
 
 /** 型番情報：6ビットの型番 + BCH(18,6) の誤り訂正 */
 function versionBits(version: number): number {
+  // 6ビットの型番を12次で割る＝6回だけ引く
   let rest = version << 12;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 6; i++) {
     if (rest & (1 << (17 - i))) rest ^= 0x1f25 << (5 - i);
   }
   return (version << 12) | rest;
@@ -181,13 +182,13 @@ function placeFormat(grid: Grid, mask: number): void {
   const bits = formatBits(mask);
   for (let i = 0; i < 15; i++) {
     const bit = ((bits >> i) & 1) as 0 | 1;
-    // 左上
-    if (i < 6) grid[8]![i] = bit;
-    else if (i === 6) grid[8]![7] = bit;
+    // 1つ目：位置検出パターンの右と下に沿って、縦（列8）→横（行8）の順に置く
+    if (i < 6) grid[i]![8] = bit;
+    else if (i === 6) grid[7]![8] = bit;
     else if (i === 7) grid[8]![8] = bit;
-    else if (i === 8) grid[7]![8] = bit;
-    else grid[14 - i]![8] = bit;
-    // 右上・左下
+    else if (i === 8) grid[8]![7] = bit;
+    else grid[8]![14 - i] = bit;
+    // 2つ目：右上（行8）と左下（列8）に同じものを置く
     if (i < 8) grid[8]![n - 1 - i] = bit;
     else grid[n - 15 + i]![8] = bit;
   }
