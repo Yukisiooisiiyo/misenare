@@ -20,10 +20,16 @@ interface Morpheme {
   pos: string;
   basic_form: string;
   reading?: string;
+  /** もとの文字列での位置（1始まり）。隣り合っているかを見るのに使う */
+  word_position: number;
 }
 
 interface KuromojiTokenizer {
   tokenize(text: string): Morpheme[];
+}
+
+function isSingleKanji(s: string): boolean {
+  return [...s].length === 1 && /\p{Script=Han}/u.test(s);
 }
 
 /** 検索語として残す品詞。名詞・動詞・形容詞・副詞と、辞書にない語 */
@@ -36,13 +42,25 @@ export class MorphologicalTokenizer implements Tokenizer {
 
   segment(normalized: string): string[] {
     const out: string[] = [];
+    let prevEnd = -1;
+    let prevSingleKanji = false;
     for (const m of this.inner.tokenize(normalized)) {
       const [pos, detail] = m.pos.split(',') as [string, string | undefined];
-      if (!KEEP.has(pos)) continue;
-      if (pos === '名詞' && detail && DROP_DETAIL.has(detail)) continue;
+      if (!KEEP.has(pos)) { prevSingleKanji = false; continue; }
+      if (pos === '名詞' && detail && DROP_DETAIL.has(detail)) { prevSingleKanji = false; continue; }
       // 活用した語は終止形に直す（「*」は辞書に無い語）
       const word = m.basic_form && m.basic_form !== '*' ? m.basic_form : m.surface_form;
-      if (word) out.push(word);
+      if (!word) { prevSingleKanji = false; continue; }
+      // 辞書にない複合語は漢字1文字ずつに割れる（食洗機 → 食|洗|機）。
+      // もとの文字列で続いている漢字1文字どうしは、つなぎ直す。
+      const singleKanji = isSingleKanji(m.surface_form);
+      if (singleKanji && prevSingleKanji && m.word_position === prevEnd && out.length > 0) {
+        out[out.length - 1] += m.surface_form;
+      } else {
+        out.push(word);
+      }
+      prevSingleKanji = singleKanji;
+      prevEnd = m.word_position + m.surface_form.length;
     }
     return out;
   }
