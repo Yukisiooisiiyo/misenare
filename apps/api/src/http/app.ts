@@ -30,7 +30,27 @@ import {
   type ProductInput,
   type ProductPatch,
 } from '../domain/products.ts';
+import {
+  addHandover,
+  deleteHandover,
+  handoverBadge,
+  listHandovers,
+  setHandoverState,
+} from '../domain/handovers.ts';
 import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
+import {
+  ackNotice,
+  createNotice,
+  deleteNotice,
+  endNotice,
+  getNotice,
+  listNotices,
+  markRead,
+  noticeBadge,
+  noticeReaders,
+  updateNotice,
+  type NoticeInput,
+} from '../domain/notices.ts';
 import {
   deletePhoto,
   finishPhotoUpload,
@@ -167,6 +187,29 @@ function userPatchBody(v: unknown): UserPatch {
   return patch;
 }
 
+function noticeBody(v: unknown): NoticeInput {
+  const b = (v ?? {}) as Record<string, unknown>;
+  if (typeof b.title !== 'string' || typeof b.body !== 'string') throw new HttpError(400, 'title と body（文字列）が必要です');
+  if (b.priority !== undefined && b.priority !== 'normal' && b.priority !== 'important') {
+    throw new HttpError(400, 'priority は normal か important です');
+  }
+  if (b.requiresAck !== undefined && typeof b.requiresAck !== 'boolean') throw new HttpError(400, 'requiresAck は true か false です');
+  for (const key of ['startsAt', 'endsAt']) {
+    const v2 = b[key];
+    if (v2 !== undefined && v2 !== null && (typeof v2 !== 'string' || Number.isNaN(Date.parse(v2)))) {
+      throw new HttpError(400, `${key} は日時の文字列か null にしてください`);
+    }
+  }
+  return {
+    title: b.title,
+    body: b.body,
+    ...(b.priority !== undefined ? { priority: b.priority as NoticeInput['priority'] } : {}),
+    ...(b.requiresAck !== undefined ? { requiresAck: b.requiresAck as boolean } : {}),
+    ...(b.startsAt !== undefined ? { startsAt: b.startsAt as string | null } : {}),
+    ...(b.endsAt !== undefined ? { endsAt: b.endsAt as string | null } : {}),
+  };
+}
+
 function relationBody(v: unknown): RelationInput {
   const b = (v ?? {}) as Record<string, unknown>;
   if (b.kind !== 'synonym' && b.kind !== 'includes' && b.kind !== 'alias') throw new HttpError(400, 'kind は synonym・includes・alias です');
@@ -279,6 +322,46 @@ function routes(): Router<Ctx> {
     return new Response(out.body, { headers: { 'content-type': out.contentType, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' } });
   });
   r.delete('/photos/:photoId', async (c, _req, p) => json(await deletePhoto(c.db, c.storage, c.actor, p.photoId!)));
+
+  // --- 連絡事項 -------------------------------------------------------------
+  r.get('/stores/:storeId/notices', async (c, req, p) => {
+    const includeEnded = new URL(req.url).searchParams.get('all') === '1';
+    return json(await listNotices(c.db, c.actor, p.storeId!, includeEnded));
+  });
+  r.post('/stores/:storeId/notices', async (c, req, p) =>
+    json(await createNotice(c.db, c.actor, p.storeId!, noticeBody(await readJson(req))), 201));
+  r.post('/notices', async (c, req) =>
+    // 全店共通の連絡事項（本部のみ）
+    json(await createNotice(c.db, c.actor, null, noticeBody(await readJson(req))), 201));
+  r.get('/notices/:noticeId', async (c, _req, p) => json(await getNotice(c.db, c.actor, p.noticeId!)));
+  r.put('/notices/:noticeId', async (c, req, p) =>
+    json(await updateNotice(c.db, c.actor, p.noticeId!, noticeBody(await readJson(req)))));
+  r.post('/notices/:noticeId/end', async (c, _req, p) => json(await endNotice(c.db, c.actor, p.noticeId!)));
+  r.delete('/notices/:noticeId', async (c, _req, p) => json(await deleteNotice(c.db, c.actor, p.noticeId!)));
+  r.post('/notices/:noticeId/read', async (c, _req, p) => json(await markRead(c.db, c.actor, p.noticeId!)));
+  r.post('/notices/:noticeId/ack', async (c, _req, p) => json(await ackNotice(c.db, c.actor, p.noticeId!)));
+  r.get('/notices/:noticeId/readers', async (c, _req, p) => json(await noticeReaders(c.db, c.actor, p.noticeId!)));
+
+  // --- 引き継ぎ -------------------------------------------------------------
+  r.get('/stores/:storeId/handovers', async (c, req, p) => {
+    const date = new URL(req.url).searchParams.get('date') ?? undefined;
+    return json(await listHandovers(c.db, c.actor, p.storeId!, date));
+  });
+  r.post('/stores/:storeId/handovers', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.body !== 'string') throw new HttpError(400, 'body（文字列）が必要です');
+    if (b.forDate !== undefined && typeof b.forDate !== 'string') throw new HttpError(400, 'forDate は日付の文字列です');
+    return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined), 201);
+  });
+  r.post('/handovers/:handoverId/done', async (c, _req, p) => json(await setHandoverState(c.db, c.actor, p.handoverId!, 'done')));
+  r.post('/handovers/:handoverId/reopen', async (c, _req, p) => json(await setHandoverState(c.db, c.actor, p.handoverId!, 'open')));
+  r.delete('/handovers/:handoverId', async (c, _req, p) => json(await deleteHandover(c.db, c.actor, p.handoverId!)));
+
+  // ホームに出す数（未読・未確認・片付いていない引き継ぎ）
+  r.get('/stores/:storeId/badges', async (c, _req, p) => json({
+    notices: await noticeBadge(c.db, c.actor, p.storeId!),
+    handovers: await handoverBadge(c.db, c.actor, p.storeId!),
+  }));
 
   // --- 既存マニュアルの取り込み ---------------------------------------------
   // ファイルの中身をそのまま本文として送る（境界つきの multipart は使わない）。

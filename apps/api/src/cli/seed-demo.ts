@@ -5,7 +5,9 @@
 import { SegmenterTokenizer } from '@misenare/search-core';
 import { one } from '../db/db.ts';
 import type { Actor } from '../domain/actor.ts';
+import { addHandover } from '../domain/handovers.ts';
 import { createKnowledge } from '../domain/knowledge.ts';
+import { createNotice } from '../domain/notices.ts';
 import { linkKnowledgeToProduct, registerProduct } from '../domain/products.ts';
 import { proposeRelation } from '../domain/tagAdmin.ts';
 import { createInvitation } from '../domain/users.ts';
@@ -68,6 +70,21 @@ const links = await database.withTenant(T, async (db) => {
     janCode: jan('490452000060'), name: '東芝 冷凍冷蔵庫 GR-W600', maker: '東芝', areaId: kitchen.id, tagNames: ['冷蔵庫', '大型家電'],
   });
   await linkKnowledgeToProduct(db, veteran, ids[5]!, fridge.id);
+
+  // 連絡事項と引き継ぎ
+  await createNotice(db, veteran, main.id, {
+    title: '年末年始の営業時間',
+    body: '12/31 は 18 時まで。1/1 は休み。1/2 から通常どおりです。\nチラシの差し替えは 12/28 までにお願いします。',
+    priority: 'important',
+  });
+  await createNotice(db, veteran, main.id, {
+    title: '新しいレジの使い方',
+    body: 'バックヤードに手順書を置きました。読んだら確認を押してください。',
+    requiresAck: true,
+  });
+  await addHandover(db, veteran, main.id, '冷蔵庫（GR-W600）の在庫が1台になりました。発注済みで入荷は明後日です。');
+  const yesterday = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+  await addHandover(db, veteran, main.id, 'レジ横の忘れ物（傘）を預かっています。', yesterday);
 
   // 招待
   const manager = await createInvitation(db, hq, { storeId: main.id, name: '佐藤店長', trustLevel: 'trusted', adminScope: 'store' });

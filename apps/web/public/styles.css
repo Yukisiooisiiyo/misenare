@@ -225,3 +225,34 @@ button.tag { cursor: pointer; }
 /* 招待のQRコード */
 .qr { max-width: 260px; margin: 12px auto; }
 .qr svg { width: 100%; height: auto; display: block; }
+
+/* 連絡・引き継ぎ */
+.tab-count {
+  display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 5px;
+  border-radius: 9px; background: var(--error, #c0392b); color: #fff;
+  font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; vertical-align: text-top;
+}
+.home-alert { margin: 8px 0 16px; padding: 12px; background: var(--pop); border: 1px solid var(--ink); }
+.home-alert a { color: var(--ink); font-weight: 700; }
+.notices { display: flex; flex-direction: column; gap: 12px; }
+.notice { padding: 12px 14px; background: var(--surface); border: 1px solid var(--rule); }
+.notice h3 { margin: 0; font-size: 16px; }
+.notice p { margin: 8px 0 0; }
+.notice-important { border-left: 6px solid var(--error, #c0392b); }
+.notice-unread { background: #fffdf2; }
+.notice-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.notice-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 3px;
+  background: var(--ink); color: var(--paper); font-size: 11px; font-weight: 700;
+}
+.notice-important .notice-head .notice-badge:first-child { background: var(--error, #c0392b); }
+.notice-all { background: var(--sign); }
+.notice-new { background: var(--pending); }
+.notice-acked { color: var(--sign); font-weight: 700; }
+.notice .primary { margin-top: 10px; }
+.handover-form { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 16px; }
+.handover-form textarea { flex: 1; margin: 0; }
+.handover-form .primary { width: auto; min-width: 72px; }
+.handover-body { flex: 1 1 100%; }
+.handover-body.done { color: #6b7570; text-decoration: line-through; }
+.handover-carried { background: #fffdf2; }

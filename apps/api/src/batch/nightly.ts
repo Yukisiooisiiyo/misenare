@@ -7,12 +7,14 @@
 //   6. トークナイザーが読みを返せるなら、読みの無いタグに読みを付ける（かな入力で漢字のタグを引くため）
 //   7. 送りかけのまま残った写真を片付ける
 //   8. 古い試行回数の記録を捨てる（会社に属さないので、会社ごとの処理の前に1回）
+//   9. 持ち越しの期間を過ぎた引き継ぎを閉じる
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
 import type { Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
+import { closeStaleHandovers } from '../domain/handovers.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
 import type { Storage } from '../storage/storage.ts';
@@ -49,6 +51,8 @@ export interface TenantReport {
   readingsFilled: number;
   /** 送りかけのまま残って片付けた写真 */
   sweptPhotos: number;
+  /** 持ち越しの期間を過ぎた引き継ぎ */
+  closedHandovers: number;
 }
 
 /** トークナイザーが読みを返せるなら（kuromoji など）、読みの無いタグに読みを付ける */
@@ -157,6 +161,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
         const reindexed = await reindex(db, tokenizer, options.maxReindex ?? 5000);
         const readingsFilled = await fillReadings(db, tokenizer);
         const sweptPhotos = options.storage ? await sweepAbandonedPhotos(db, options.storage) : 0;
+        const closedHandovers = await closeStaleHandovers(db);
         await db.query(
           `UPDATE hashtags h SET use_count =
              (SELECT count(*) FROM knowledge_tags kt WHERE kt.hashtag_id = h.id) +
@@ -166,7 +171,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
           `SELECT count(*)::int AS n FROM knowledge
             WHERE status = 'published' AND verified_at < now() - interval '180 days'`,
         );
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos };
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers };
       });
       reports.push(report);
     } catch (err) {

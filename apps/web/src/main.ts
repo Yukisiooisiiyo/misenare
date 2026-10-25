@@ -6,6 +6,7 @@ import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } fro
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { action, countedList, importPanel, productPanel, staffPanel, tagPanel } from './manage.ts';
 import { photoSection } from './photos.ts';
+import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
 
 const root = document.getElementById('app')!;
@@ -86,7 +87,7 @@ function renderFatal(e: unknown): void {
 
 // --- 画面の枠 -------------------------------------------------------------------
 
-type Tab = 'home' | 'search' | 'write';
+type Tab = 'home' | 'notices' | 'search' | 'write';
 
 /** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
 let disposeView: (() => void) | null = null;
@@ -108,14 +109,40 @@ function shell(tab: Tab | null, ...content: Node[]): void {
   ) : null;
   const nav = me ? h('nav', { class: 'tabbar', 'aria-label': '画面の切り替え' },
     navLink('#/home', 'ホーム', tab === 'home'),
+    navLink('#/notices', '連絡', tab === 'notices', badgeCount()),
     navLink('#/search', '探す', tab === 'search'),
     navLink('#/write', '書く', tab === 'write'),
   ) : null;
   root.append(...[header, h('main', { class: 'content' }, ...content), nav].filter((x): x is HTMLElement => x !== null));
 }
 
-function navLink(href: string, label: string, active: boolean): HTMLElement {
-  return h('a', { href, class: `tab${active ? ' tab-active' : ''}`, ...(active ? { 'aria-current': 'page' } : {}) }, label);
+function navLink(href: string, label: string, active: boolean, count = 0): HTMLElement {
+  return h('a', { href, class: `tab${active ? ' tab-active' : ''}`, ...(active ? { 'aria-current': 'page' } : {}) },
+    label,
+    count > 0 ? h('span', { class: 'tab-count', 'aria-label': `${count}件` }, String(count)) : null);
+}
+
+/** 連絡タブに出す数（未読＋未確認＋残っている引き継ぎ） */
+let badges: Badges | null = null;
+function badgeCount(): number {
+  if (!badges) return 0;
+  return badges.notices.unread + badges.notices.needsAck + badges.handovers.open;
+}
+
+/** 数を取り直して、タブの表示を更新する */
+async function refreshBadges(): Promise<void> {
+  if (!me || !session.storeId) return;
+  try {
+    badges = await api<Badges>('GET', `/stores/${storeId()}/badges`);
+  } catch {
+    badges = null;
+  }
+  const tab = document.querySelector('.tabbar a[href="#/notices"]');
+  if (!tab) return;
+  const existing = tab.querySelector('.tab-count');
+  existing?.remove();
+  const count = badgeCount();
+  if (count > 0) tab.append(h('span', { class: 'tab-count', 'aria-label': `${count}件` }, String(count)));
 }
 
 // --- ルーティング ---------------------------------------------------------------
@@ -131,6 +158,7 @@ function route(): void {
   if (edit) return void loadAndEdit(edit[1]!);
   if (k) return void renderKnowledge(k[1]!);
   if (path === '/scan') return renderScan(params.get('jan') ?? '');
+  if (path === '/notices') return void renderNoticesTab();
   if (path === '/manage') return void renderManage();
   return void renderHome();
 }
@@ -139,8 +167,10 @@ function route(): void {
 
 async function renderHome(): Promise<void> {
   const tags = dict ? [...dict.dictionary.tags.values()].sort((a, b) => b.useCount - a.useCount).slice(0, 12) : [];
+  const alert = h('div', { class: 'home-alert', hidden: true });
   shell('home', h('section', { class: 'page' },
     h('h1', {}, `${me!.name}さん`),
+    alert,
     h('a', { href: '#/search', class: 'search-launch' }, 'タグや言葉で探す'),
     h('a', { href: '#/scan', class: 'secondary block' }, 'バーコードで商品を調べる'),
     tags.length > 0 ? h('h2', {}, 'よく使われるタグ') : null,
@@ -149,6 +179,36 @@ async function renderHome(): Promise<void> {
       ? h('p', { class: 'note' }, 'あなたの投稿や修正は、trusted のメンバーが承認すると公開されます。')
       : null,
   ));
+  // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）
+  await refreshBadges();
+  const parts: string[] = [];
+  if (badges) {
+    if (badges.notices.needsAck > 0) parts.push(`確認がまだの連絡が${badges.notices.needsAck}件`);
+    else if (badges.notices.unread > 0) parts.push(`未読の連絡が${badges.notices.unread}件`);
+    if (badges.handovers.open > 0) {
+      parts.push(badges.handovers.carriedOver > 0
+        ? `引き継ぎが${badges.handovers.open}件（うち持ち越し${badges.handovers.carriedOver}件）`
+        : `引き継ぎが${badges.handovers.open}件`);
+    }
+  }
+  if (parts.length > 0) {
+    clear(alert);
+    alert.append(h('a', { href: '#/notices' }, `${parts.join('、')}あります`));
+    alert.hidden = false;
+  }
+}
+
+// --- 連絡 -------------------------------------------------------------------------
+
+function renderNoticesTab(): void {
+  const section = h('section', { class: 'page' });
+  shell('notices', section);
+  renderNotices(section, {
+    storeId: storeId(),
+    userName: me!.name,
+    isTrusted: isTrusted(),
+    onBadges: () => void refreshBadges(),
+  });
 }
 
 // --- 探す -------------------------------------------------------------------------
