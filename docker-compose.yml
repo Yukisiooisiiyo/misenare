@@ -1,0 +1,37 @@
+# 手元で一式を動かす（PostgreSQL + API + Web 版）。
+#   docker compose up --build
+#   docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
+#   docker compose run --rm api npx tsx apps/api/src/cli/bootstrap.ts "会社名" "店舗名" "あなたの名前"
+# 写真はローカル保存（photos ボリューム）。S3 を使うときは S3_BUCKET などを足す。
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: misenare
+      POSTGRES_PASSWORD: misenare
+      POSTGRES_DB: misenare
+    ports: ['5432:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U misenare']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://misenare:misenare@db:5432/misenare
+      PORT: '8787'
+      PHOTO_DIR: /var/misenare/photos
+      # TRUST_PROXY: '1'        # ロードバランサーの後ろに置くとき
+      # TOKENIZER: kuromoji     # 形態素解析を使うとき（npm install kuromoji が必要）
+    ports: ['8787:8787']
+    volumes: ['photos:/var/misenare/photos']
+
+volumes:
+  pgdata:
+  photos:

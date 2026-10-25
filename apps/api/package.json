@@ -8,12 +8,11 @@
     "start": "tsx src/server.ts"
   },
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
     "@misenare/search-core": "*",
-    "hono": "^4.6.0",
     "pg": "^8.13.0"
   },
   "devDependencies": {
     "@types/pg": "^8.11.0"
-  }
+  },
+  "description": "API サーバー。ルーターは依存なしの自前実装（Web 標準の Request/Response）"
 }
