@@ -20,6 +20,9 @@ async function openTestDatabase(url: string): Promise<TestDatabase> {
   return new PsqlDatabase(url);
 }
 
+// テスト中はサーバーのログを出さない（TAP の出力に混ざるため）
+process.env.MISENARE_LOG ??= 'off';
+
 export const DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://misenare:misenare@localhost/misenare_test';
 if (!/_test\b/.test(new URL(DATABASE_URL).pathname)) {
   throw new Error(`TEST_DATABASE_URL のデータベース名は _test で終わるものにしてください（スキーマを消すため）: ${DATABASE_URL}`);

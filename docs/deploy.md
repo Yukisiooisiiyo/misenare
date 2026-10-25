@@ -33,6 +33,10 @@
 | `S3_BUCKET` ほか | なし | 台を2つ以上にするなら設定する |
 | `PHOTO_ORIGIN` | なし | S3 を使うときに、そのバケットの URL |
 | `TOKENIZER` | `Intl.Segmenter` | `kuromoji`（`npm install kuromoji` が要る。読みが取れて検索が良くなる） |
+| `RATE_LIMIT` | `memory` | 台を2つ以上にするなら `db`（PostgreSQL で数える） |
+| `MISENARE_RATE_SALT` | 空 | 接続元の IP をハッシュにする鍵。全台で同じ値にする |
+| `METRICS_TOKEN` | なし | `/metrics` の合言葉。**本番では必ず設定する** |
+| `ALERT_WEBHOOK_URL` | なし | エラーを知らせる先（Slack 互換） |
 | `MISENARE_DEV_AUTH` | なし | **本番では絶対に設定しない**（認証をヘッダーだけにする開発用の仕組み） |
 
 ### データベースのロール
@@ -152,7 +156,9 @@ docker run --rm -e DATABASE_URL=… misenare:latest npx tsx apps/api/src/batch/n
 2. **写真の置き場所**。サーバーのディスクに置くなら、そのディスクもバックアップの対象に入れます。
 3. **招待の運用**。招待リンクは1回限り・72時間ですが、作った人が誰かに見せれば誰でも入れます。
    辞めた人の端末は「承認・管理 → スタッフ」から無効にしてください。すぐに使えなくなります。
-4. **ログ**。今は標準出力に出すだけです。CloudWatch などに流しておくと、後で追えます。
+4. **ログと監視**。ログは標準出力に1行1件の JSON で出ます。CloudWatch などに流しておくと後で追えます。
+   `/metrics`（Prometheus 形式）を取り込み、`ALERT_WEBHOOK_URL` に Slack の Incoming Webhook を入れておくと、
+   サーバー側のエラーが出たときに気づけます。`METRICS_TOKEN` は本番では必ず設定してください（未設定だと `/metrics` は 404 になります）。
 
 ---
 
@@ -162,7 +168,5 @@ docker run --rm -e DATABASE_URL=… misenare:latest npx tsx apps/api/src/batch/n
 
 - **多言語**。日本語のみです。
 - **PDF の取り込み**。Word・Excel・CSV・テキストはできます。
-- **複数台で動かすときの試行回数の制限**。今はサーバーの記憶の中で数えているので、台ごとの上限になります。
-  本気で守るなら Redis などに移すか、ALB の前で止めます。
 - **写真の自動削除**。ナレッジを消せば写真も消えますが、古い写真の整理は手作業です。
-- **監視**。`/health` はありますが、何かあったときに知らせる仕組みは入れていません。
+- **画面からの監視**。`/metrics` と Webhook はありますが、ダッシュボードは用意していません（Grafana などを別に立ててください）。

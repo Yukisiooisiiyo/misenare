@@ -197,6 +197,19 @@ docker run -d -p 8787:8787 -e DATABASE_URL=… -e TRUST_PROXY=1 misenare
 手元で一式動かすなら `docker compose up --build`。
 環境変数・AWS での置き方・バックアップは [docs/deploy.md](docs/deploy.md) に書いてある。
 
+## 監視と通知
+
+| 場所 | 内容 |
+| --- | --- |
+| `/health` | 生きているか（DB は見ない） |
+| `/ready` | DB につながるか。つながらなければ 503 |
+| `/metrics` | Prometheus 形式。リクエスト数・応答時間・エラー数。`METRICS_TOKEN` を設定すると合言葉が要る（本番で未設定なら 404） |
+
+- ログは1行1件の JSON。リクエストIDを付け、応答の `x-request-id` と突き合わせられる。名前や本文は書かない。
+- 数え取りのラベルは経路の型（`/knowledge/:id`）。IDそのものは入れないので、種類が増え続けない。
+- `ALERT_WEBHOOK_URL` を設定すると、サーバー側のエラーを Slack 互換の Webhook に知らせる。
+  同じ種類は5分に1回までで、間引いた分は次に送るときにまとめて伝える。送れなくてもリクエストは止めない。
+
 ## テストと CI
 
 - `npm test`：検索コアの単体テストと、本物の PostgreSQL に対する API テスト（約145件）
@@ -211,5 +224,4 @@ docker run -d -p 8787:8787 -e DATABASE_URL=… -e TRUST_PROXY=1 misenare
 
 - PDF の取り込み（Word・Excel・CSV・テキストはできる）
 - パスキー、チェーン向けの SSO
-- 監視・通知（`/health` はある）
 - 連絡事項・引き継ぎ（ナレッジ機能に絞っている）

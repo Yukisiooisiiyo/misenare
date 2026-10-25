@@ -56,6 +56,7 @@ import {
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter } from './rateLimit.ts';
+import { Alerts, Logger, Metrics, requestId } from './observe.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
 
 interface Ctx {
@@ -334,54 +335,119 @@ function routes(): Router<Ctx> {
   return r;
 }
 
-export function createApp(deps: { database: Database; auth: Authenticator; tokenizer: Tokenizer; limiter?: Limiter; storage?: Storage }) {
+export interface AppDeps {
+  database: Database;
+  auth: Authenticator;
+  tokenizer: Tokenizer;
+  limiter?: Limiter;
+  storage?: Storage;
+  metrics?: Metrics;
+  logger?: Logger;
+  alerts?: Alerts;
+}
+
+export function createApp(deps: AppDeps) {
   const router = routes();
   // RATE_LIMIT=db なら台をまたいで共有する。既定はサーバーの記憶の中（1台向け）
   const limiter = deps.limiter
     ?? (process.env.RATE_LIMIT === 'db' ? new DatabaseRateLimiter((sql, params) => deps.database.raw(sql, params)) : new MemoryRateLimiter());
   const storage = deps.storage ?? storageFromEnv();
+  const metrics = deps.metrics ?? new Metrics();
+  const logger = deps.logger ?? new Logger();
+  const alerts = deps.alerts ?? new Alerts();
   const tooMany = () => json({ error: 'rate_limited', message: '試行回数が多すぎます。しばらく待ってからもう一度お試しください。' }, 429);
+
+  /** 数え取りは、設定した合言葉を知っている人だけに見せる（本番で合言葉が無ければ出さない） */
+  function metricsAllowed(req: Request, url: URL): boolean {
+    const token = process.env.METRICS_TOKEN;
+    if (!token) return process.env.NODE_ENV !== 'production';
+    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? url.searchParams.get('token');
+    return given === token;
+  }
+
+  async function handleRequest(req: Request, url: URL, id: string): Promise<Response> {
+    if (url.pathname === '/health') return json({ ok: true });
+    if (url.pathname === '/ready') {
+      try {
+        await deps.database.raw('SELECT 1');
+        return json({ ok: true });
+      } catch (err) {
+        logger.error('database not ready', { requestId: id, error: err instanceof Error ? err.message : String(err) });
+        return json({ ok: false, error: 'database' }, 503);
+      }
+    }
+    if (url.pathname === '/metrics') {
+      if (!metricsAllowed(req, url)) return json({ error: 'not_found' }, 404);
+      return new Response(metrics.render(), { headers: { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' } });
+    }
+
+    // ログイン前に呼ぶ唯一の API：招待トークンを端末のセッショントークンに交換する
+    if (url.pathname === '/auth/accept' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'accept'), RULES.acceptInvitation))) return tooMany();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      const token = typeof b.token === 'string' ? b.token : '';
+      const parsed = parseToken(token);
+      if (!parsed) throw new HttpError(400, '招待のQRコードを読み取れませんでした');
+      const deviceName = typeof b.deviceName === 'string' ? b.deviceName.slice(0, MAX_DEVICE_NAME) : null;
+      const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
+      return json(result, 201);
+    }
+
+    const matched = router.match(req.method, url.pathname);
+    if (matched === undefined) throw new HttpError(404, 'Not Found');
+    if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
+    checkParams(matched.params);
+
+    // 無効なトークンでのアクセスが続く接続元からは、認証そのものを止める（トークンの総当たり対策）
+    const failKey = clientKey(req, 'authfail');
+    if (await limiter.blocked(failKey, RULES.failedAuth)) return tooMany();
+    const identity = await deps.auth.identify(req);
+    if (!identity) {
+      if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
+      throw new HttpError(401, 'ログインしてください');
+    }
+    const actor = await loadActor(deps.database, identity);
+    if (!actor) throw new HttpError(401, 'この利用者は無効です');
+
+    return await deps.database.withTenant(actor.tenantId, (db) =>
+      matched.handler({ actor, identity, db, tokenizer: deps.tokenizer, storage }, req, matched.params),
+    );
+  }
 
   return async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === '/health') return json({ ok: true });
+    const id = requestId(req);
+    const startedAt = Date.now();
+    // 数え取りのラベルは経路の型だけにする（ID を入れると種類が増え続けるため）
+    const route = router.match(req.method, url.pathname);
+    const label = typeof route === 'object' ? route.path : url.pathname === '/health' || url.pathname === '/ready' || url.pathname === '/metrics' ? url.pathname : 'その他';
+
+    let response: Response;
     try {
-      // ログイン前に呼ぶ唯一の API：招待トークンを端末のセッショントークンに交換する
-      if (url.pathname === '/auth/accept' && req.method === 'POST') {
-        if (!(await limiter.take(clientKey(req, 'accept'), RULES.acceptInvitation))) return tooMany();
-        const b = (await readJson<Record<string, unknown>>(req)) ?? {};
-        const token = typeof b.token === 'string' ? b.token : '';
-        const parsed = parseToken(token);
-        if (!parsed) throw new HttpError(400, '招待のQRコードを読み取れませんでした');
-        const deviceName = typeof b.deviceName === 'string' ? b.deviceName.slice(0, MAX_DEVICE_NAME) : null;
-        const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
-        return json(result, 201);
-      }
-
-      const matched = router.match(req.method, url.pathname);
-      if (matched === undefined) throw new HttpError(404, 'Not Found');
-      if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
-      checkParams(matched.params);
-
-      // 無効なトークンでのアクセスが続く接続元からは、認証そのものを止める（トークンの総当たり対策）
-      const failKey = clientKey(req, 'authfail');
-      if (await limiter.blocked(failKey, RULES.failedAuth)) return tooMany();
-      const identity = await deps.auth.identify(req);
-      if (!identity) {
-        if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
-        throw new HttpError(401, 'ログインしてください');
-      }
-      const actor = await loadActor(deps.database, identity);
-      if (!actor) throw new HttpError(401, 'この利用者は無効です');
-
-      return await deps.database.withTenant(actor.tenantId, (db) =>
-        matched.handler({ actor, identity, db, tokenizer: deps.tokenizer, storage }, req, matched.params),
-      );
+      response = await handleRequest(req, url, id);
     } catch (err) {
-      if (err instanceof DomainError) return json({ error: err.code, message: err.message }, STATUS[err.code]);
-      if (err instanceof HttpError) return json({ error: 'http', message: err.message }, err.status);
-      console.error(err);
-      return json({ error: 'internal', message: 'サーバーでエラーが発生しました' }, 500);
+      if (err instanceof DomainError) {
+        response = json({ error: err.code, message: err.message }, STATUS[err.code]);
+      } else if (err instanceof HttpError) {
+        response = json({ error: 'http', message: err.message }, err.status);
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error('unhandled error', { requestId: id, route: label, method: req.method, error: message });
+        metrics.count('misenare_errors_total', { route: label, kind: 'internal' });
+        void alerts.notify(`internal:${label}`, `misenare: ${req.method} ${label} でサーバーエラー\n${message}`);
+        response = json({ error: 'internal', message: 'サーバーでエラーが発生しました' }, 500);
+      }
     }
+
+    const seconds = (Date.now() - startedAt) / 1000;
+    metrics.request(label, req.method, response.status, seconds);
+    if (url.pathname !== '/metrics') {
+      logger.log(response.status >= 500 ? 'error' : 'info', 'request', {
+        requestId: id, method: req.method, route: label, status: response.status, ms: Math.round(seconds * 1000),
+      });
+    }
+    const headers = new Headers(response.headers);
+    headers.set('x-request-id', id);
+    return new Response(response.body, { status: response.status, headers });
   };
 }

@@ -6,6 +6,8 @@ export type Handler<C> = (ctx: C, req: Request, params: Params) => Promise<Respo
 
 interface Route<C> {
   method: string;
+  /** 経路の型（/knowledge/:id）。数え取りのラベルに使う（IDそのものは入れない） */
+  path: string;
   pattern: RegExp;
   keys: string[];
   handler: Handler<C>;
@@ -25,7 +27,7 @@ export class Router<C> {
     const pattern = new RegExp(
       '^' + path.replace(/\/:([a-zA-Z]+)/g, (_, k: string) => { keys.push(k); return '/([^/]+)'; }) + '/?$',
     );
-    this.routes.push({ method, pattern, keys, handler });
+    this.routes.push({ method, path, pattern, keys, handler });
     return this;
   }
 
@@ -35,7 +37,7 @@ export class Router<C> {
   patch(path: string, h: Handler<C>) { return this.on('PATCH', path, h); }
   delete(path: string, h: Handler<C>) { return this.on('DELETE', path, h); }
 
-  match(method: string, pathname: string): { handler: Handler<C>; params: Params } | 'method_not_allowed' | undefined {
+  match(method: string, pathname: string): { handler: Handler<C>; params: Params; path: string } | 'method_not_allowed' | undefined {
     let pathMatched = false;
     for (const r of this.routes) {
       const m = r.pattern.exec(pathname);
@@ -44,7 +46,7 @@ export class Router<C> {
       if (r.method !== method) continue;
       const params: Params = {};
       r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]!); });
-      return { handler: r.handler, params };
+      return { handler: r.handler, params, path: r.path };
     }
     return pathMatched ? 'method_not_allowed' : undefined;
   }

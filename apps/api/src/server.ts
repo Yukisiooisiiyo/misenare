@@ -4,6 +4,9 @@
 //   DB_DRIVER     … pg（既定。npm install が必要）/ psql（pg を入れられない開発環境向け）
 //   MISENARE_DEV_AUTH=1 … 開発用のヘッダー認証を使う（既定は招待QRの端末セッション）
 //   TOKENIZER=kuromoji … 形態素解析で分割する（npm install kuromoji が必要。既定は Intl.Segmenter）
+//   RATE_LIMIT=db … 試行回数を PostgreSQL で数える（台を増やすとき）
+//   METRICS_TOKEN … /metrics を見るための合言葉（本番では必ず設定する）
+//   ALERT_WEBHOOK_URL … サーバー側のエラーを知らせる先（Slack 互換）
 
 import { chooseTokenizer } from './search/kuromojiTokenizer.ts';
 import type { Database } from './db/db.ts';
@@ -12,6 +15,7 @@ import { createApp } from './http/app.ts';
 import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
 import { createSite } from './http/site.ts';
+import { Logger } from './http/observe.ts';
 import { fileURLToPath } from 'node:url';
 
 const url = process.env.DATABASE_URL;
@@ -30,7 +34,9 @@ async function openDatabase(): Promise<Database> {
 const database = await openDatabase();
 // 行レベルセキュリティを素通りするロール（スーパーユーザーなど）では起動しない
 await assertRlsEnforced((sql) => database.raw(sql));
+const logger = new Logger();
 const app = createApp({
+  logger,
   database,
   // MISENARE_DEV_AUTH=1 のときだけ開発用のヘッダー認証（本番環境では作れない）
   auth: process.env.MISENARE_DEV_AUTH === '1' ? new DevHeaderAuthenticator() : new SessionAuthenticator(database),
@@ -39,4 +45,10 @@ const app = createApp({
 // Web 版（apps/web をビルドした dist）を /app/ で、API を /api/ で配信する
 const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 serve(createSite(app, webDir), port);
-console.log(`misenare api listening on http://localhost:${port}`);
+logger.info('listening', {
+  port,
+  rateLimit: process.env.RATE_LIMIT === 'db' ? 'db' : 'memory',
+  tokenizer: process.env.TOKENIZER === 'kuromoji' ? 'kuromoji' : 'segmenter',
+  photos: process.env.S3_BUCKET ? 's3' : 'local',
+  alerts: process.env.ALERT_WEBHOOK_URL ? 'on' : 'off',
+});
