@@ -3,14 +3,20 @@
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { CLIENT_IP_HEADER } from './rateLimit.ts';
 
-const MAX_BODY = 1024 * 1024; // 1MB（写真は端末から直接ストレージに上げるので、API には来ない）
+const MAX_BODY = 1024 * 1024; // 1MB（ふつうの API）
+// 写真の中身だけは大きい。S3 を使うときは端末から直接上がるので、これはローカル保存のときの上限。
+const MAX_PHOTO_BODY = 4 * 1024 * 1024;
 
-async function readBody(req: IncomingMessage): Promise<Buffer> {
+function bodyLimit(req: IncomingMessage): number {
+  return req.method === 'PUT' && /\/photos\/[^/]+\/data\/?$/.test(req.url ?? '') ? MAX_PHOTO_BODY : MAX_BODY;
+}
+
+async function readBody(req: IncomingMessage, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > MAX_BODY) throw new Error('payload_too_large');
+    if (size > limit) throw new Error('payload_too_large');
     chunks.push(chunk as Buffer);
   }
   return Buffer.concat(chunks);
@@ -33,7 +39,7 @@ export function serve(handler: (req: Request) => Promise<Response>, port: number
         : undefined;
       headers.set(CLIENT_IP_HEADER, fromProxy ?? req.socket.remoteAddress ?? 'unknown');
       const hasBody = req.method !== 'GET' && req.method !== 'HEAD';
-      const body = hasBody ? await readBody(req) : undefined;
+      const body = hasBody ? await readBody(req, bodyLimit(req)) : undefined;
       const response = await handler(new Request(url, { method: req.method ?? 'GET', headers, ...(body ? { body } : {}) }));
       res.statusCode = response.status;
       response.headers.forEach((value, key) => res.setHeader(key, value));

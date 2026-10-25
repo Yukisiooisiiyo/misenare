@@ -30,6 +30,14 @@ import {
   type ProductInput,
   type ProductPatch,
 } from '../domain/products.ts';
+import {
+  deletePhoto,
+  finishPhotoUpload,
+  listPhotos,
+  openPhoto,
+  receivePhoto,
+  startPhotoUpload,
+} from '../domain/photos.ts';
 import { recordSearchFeedback, search, zeroHitQueries } from '../domain/search.ts';
 import { decideRelation, deleteRelation, listRelations, mergeTags, proposeRelation, type RelationInput } from '../domain/tagAdmin.ts';
 import { exportDictionary } from '../domain/tags.ts';
@@ -44,6 +52,7 @@ import {
   type InvitationInput,
   type UserPatch,
 } from '../domain/users.ts';
+import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
 import { clientIp, RateLimiter, RULES } from './rateLimit.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
@@ -53,6 +62,7 @@ interface Ctx {
   identity: Identity;
   db: Db;
   tokenizer: Tokenizer;
+  storage: Storage;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -243,6 +253,31 @@ function routes(): Router<Ctx> {
   r.post('/knowledge/:id/versions/:version/revert', async (c, _req, p) =>
     json(await revertToVersion(c.db, c.tokenizer, c.actor, p.id!, intParam(p.version, 'version'))));
 
+  // --- 写真 ---------------------------------------------------------------
+  r.get('/knowledge/:id/photos', async (c, _req, p) => json(await listPhotos(c.db, c.storage, c.actor, p.id!)));
+  r.post('/knowledge/:id/photos', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.contentType !== 'string' || typeof b.bytes !== 'number') throw new HttpError(400, 'contentType と bytes が必要です');
+    return json(await startPhotoUpload(c.db, c.storage, c.actor, p.id!, { contentType: b.contentType, bytes: b.bytes }), 201);
+  });
+  // 中身そのものを受け取る（ローカル保存のとき。S3 のときは端末から直接 S3 に上がる）
+  r.put('/photos/:photoId/data', async (c, req, p) => {
+    const type = (req.headers.get('content-type') ?? '').split(';')[0]!.trim();
+    await receivePhoto(c.db, c.storage, c.actor, p.photoId!, new Uint8Array(await req.arrayBuffer()), type);
+    return json({ ok: true });
+  });
+  r.post('/photos/:photoId/complete', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    optionalString(b, 'caption');
+    return json(await finishPhotoUpload(c.db, c.storage, c.actor, p.photoId!, b.caption as string | null | undefined), 201);
+  });
+  r.get('/photos/:photoId/data', async (c, _req, p) => {
+    const out = await openPhoto(c.db, c.storage, c.actor, p.photoId!);
+    if (out.kind === 'redirect') return new Response(null, { status: 302, headers: { location: out.url, 'cache-control': 'private, max-age=60' } });
+    return new Response(out.body, { headers: { 'content-type': out.contentType, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' } });
+  });
+  r.delete('/photos/:photoId', async (c, _req, p) => json(await deletePhoto(c.db, c.storage, c.actor, p.photoId!)));
+
   // --- タグ辞書の管理 -------------------------------------------------------
   r.get('/tag-relations', async (c, req) => {
     const state = new URL(req.url).searchParams.get('state') ?? 'candidate';
@@ -285,9 +320,10 @@ function routes(): Router<Ctx> {
   return r;
 }
 
-export function createApp(deps: { database: Database; auth: Authenticator; tokenizer: Tokenizer; limiter?: RateLimiter }) {
+export function createApp(deps: { database: Database; auth: Authenticator; tokenizer: Tokenizer; limiter?: RateLimiter; storage?: Storage }) {
   const router = routes();
   const limiter = deps.limiter ?? new RateLimiter();
+  const storage = deps.storage ?? storageFromEnv();
   const tooMany = () => json({ error: 'rate_limited', message: '試行回数が多すぎます。しばらく待ってからもう一度お試しください。' }, 429);
 
   return async function handle(req: Request): Promise<Response> {
@@ -323,7 +359,7 @@ export function createApp(deps: { database: Database; auth: Authenticator; token
       if (!actor) throw new HttpError(401, 'この利用者は無効です');
 
       return await deps.database.withTenant(actor.tenantId, (db) =>
-        matched.handler({ actor, identity, db, tokenizer: deps.tokenizer }, req, matched.params),
+        matched.handler({ actor, identity, db, tokenizer: deps.tokenizer, storage }, req, matched.params),
       );
     } catch (err) {
       if (err instanceof DomainError) return json({ error: err.code, message: err.message }, STATUS[err.code]);

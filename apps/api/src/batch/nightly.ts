@@ -5,12 +5,15 @@
 //   4. タグ辞書が変わっても索引が古いままにならないよう、公開ナレッジを索引し直す
 //   5. タグの使用回数を数え直す
 //   6. トークナイザーが読みを返せるなら、読みの無いタグに読みを付ける（かな入力で漢字のタグを引くため）
+//   7. 送りかけのまま残った写真を片付ける
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
 import type { Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
+import { sweepAbandonedPhotos } from '../domain/photos.ts';
+import type { Storage } from '../storage/storage.ts';
 
 export interface BatchOptions {
   /** 「もしかして」で同じ組み合わせが何回選ばれたら候補にするか */
@@ -21,6 +24,8 @@ export interface BatchOptions {
   maxReindex?: number;
   /** 外部の候補提供元 */
   candidateProviders?: CandidateProvider[];
+  /** 写真の保存先（送りかけのまま残った中身を片付けるのに使う） */
+  storage?: Storage;
 }
 
 /**
@@ -40,6 +45,8 @@ export interface TenantReport {
   reindexed: number;
   staleKnowledge: number;
   readingsFilled: number;
+  /** 送りかけのまま残って片付けた写真 */
+  sweptPhotos: number;
 }
 
 /** トークナイザーが読みを返せるなら（kuromoji など）、読みの無いタグに読みを付ける */
@@ -145,6 +152,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
         const fromProviders = await candidatesFromProviders(db, tenantId, options.candidateProviders ?? []);
         const reindexed = await reindex(db, tokenizer, options.maxReindex ?? 5000);
         const readingsFilled = await fillReadings(db, tokenizer);
+        const sweptPhotos = options.storage ? await sweepAbandonedPhotos(db, options.storage) : 0;
         await db.query(
           `UPDATE hashtags h SET use_count =
              (SELECT count(*) FROM knowledge_tags kt WHERE kt.hashtag_id = h.id) +
@@ -154,7 +162,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
           `SELECT count(*)::int AS n FROM knowledge
             WHERE status = 'published' AND verified_at < now() - interval '180 days'`,
         );
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled };
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos };
       });
       reports.push(report);
     } catch (err) {
@@ -173,7 +181,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     : new (await import('../db/pgDatabase.ts')).PgDatabase(url);
   const { assertRlsEnforced } = await import('../db/safety.ts');
   await assertRlsEnforced((sql) => database.raw(sql));
-  const reports = await runNightly(database, new SegmenterTokenizer());
+  const { storageFromEnv } = await import('../storage/storage.ts');
+  const reports = await runNightly(database, new SegmenterTokenizer(), { storage: storageFromEnv() });
   console.log(JSON.stringify(reports, null, 2));
   await database.close();
 }

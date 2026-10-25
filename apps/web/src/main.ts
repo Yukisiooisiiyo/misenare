@@ -5,6 +5,7 @@ import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type
 import { clear, freshness, freshnessBadge, h, relativeDate, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { action, countedList, productPanel, staffPanel, tagPanel } from './manage.ts';
+import { photoSection } from './photos.ts';
 
 const root = document.getElementById('app')!;
 let me: Me | null = null;
@@ -86,7 +87,12 @@ function renderFatal(e: unknown): void {
 
 type Tab = 'home' | 'search' | 'write';
 
+/** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
+let disposeView: (() => void) | null = null;
+
 function shell(tab: Tab | null, ...content: Node[]): void {
+  disposeView?.();
+  disposeView = null;
   clear(root);
   const store = me?.stores.find((s) => s.id === session.storeId);
   const header = me ? h('header', { class: 'topbar' },
@@ -248,6 +254,7 @@ async function renderKnowledge(id: string): Promise<void> {
   } catch (e) {
     return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
+  const photos = photoSection(k.id, true);
   shell('search', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
@@ -255,10 +262,12 @@ async function renderKnowledge(id: string): Promise<void> {
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
+    photos.el,
     freshnessDetail(k),
     h('div', { class: 'actions' },
       h('a', { href: `#/edit/${k.id}`, class: 'secondary' }, isTrusted() ? '編集する' : '修正を提案する')),
   ));
+  disposeView = photos.dispose;
 }
 
 /** 詳細画面の新しさの表示：誰がいつ更新し、誰がいつ確認したか */

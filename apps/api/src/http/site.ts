@@ -17,14 +17,24 @@ const TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
 };
 
-const SECURITY_HEADERS: Record<string, string> = {
-  'x-content-type-options': 'nosniff',
-  'referrer-policy': 'no-referrer',
-  'x-frame-options': 'DENY',
-  // 外部から読み込むのは Google Fonts だけ
-  'content-security-policy':
-    "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
-};
+/**
+ * 写真を S3 に置くときは、画像の読み込み先と送信先にその場所を足す必要がある。
+ * PHOTO_ORIGIN に `https://<バケット>.s3.<リージョン>.amazonaws.com` を入れる。
+ */
+function securityHeaders(photoOrigin?: string): Record<string, string> {
+  const extra = photoOrigin ? ` ${photoOrigin}` : '';
+  return {
+    'x-content-type-options': 'nosniff',
+    'referrer-policy': 'no-referrer',
+    'x-frame-options': 'DENY',
+    // 外部から読み込むのは Google Fonts と（設定したときだけ）写真の保存先
+    'content-security-policy':
+      "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+      + `img-src 'self' data: blob:${extra}; media-src 'self' blob:; connect-src 'self'${extra}; base-uri 'none'; frame-ancestors 'none'`,
+  };
+}
+
+const SECURITY_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
 
 export function staticFiles(dir: string) {
   const rootDir = normalize(dir).replace(/[\\/]+$/, '');
