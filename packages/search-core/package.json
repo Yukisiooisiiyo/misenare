@@ -1,0 +1,10 @@
+{
+  "name": "@misenare/search-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "形態素解析・BM25F・タグ展開・タグ候補。外部依存なし（端末とサーバーの両方で使う）",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

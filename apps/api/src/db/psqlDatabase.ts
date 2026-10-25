@@ -1,0 +1,119 @@
+// 開発・テスト用：psql コマンドを1本起動したままにして SQL を流す実装。
+// npm パッケージ（pg）を入れられない環境でも、本物の PostgreSQL に対して同じ SQL を検証できる。
+// パラメータは文字列リテラルに展開するため、本番では使わないこと（PgDatabase を使う）。
+
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { Database, Db } from './db.ts';
+
+function literal(v: unknown): string {
+  if (v === null || v === undefined) return 'NULL';
+  if (typeof v === 'number') {
+    if (!Number.isFinite(v)) throw new Error(`non-finite number: ${v}`);
+    return String(v);
+  }
+  if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  if (v instanceof Date) return quote(v.toISOString());
+  if (Array.isArray(v)) {
+    const items = v.map((x) => (x === null ? 'NULL' : `"${String(x).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`));
+    return quote(`{${items.join(',')}}`);
+  }
+  if (typeof v === 'object') return quote(JSON.stringify(v));
+  return quote(String(v));
+}
+
+function quote(s: string): string {
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+export function interpolate(sql: string, params: readonly unknown[] = []): string {
+  return sql.replace(/\$(\d+)/g, (_, n: string) => {
+    const i = Number(n) - 1;
+    if (i < 0 || i >= params.length) throw new Error(`missing parameter $${n}`);
+    return literal(params[i]);
+  });
+}
+
+const END = '__MISENARE_END__';
+const ERR = '__MISENARE_ERR__';
+
+export class PsqlDatabase implements Database {
+  private readonly proc: ChildProcessWithoutNullStreams;
+  private buffer = '';
+  private waiter: ((chunk: string) => void) | undefined;
+  private queue: Promise<unknown> = Promise.resolve();
+
+  constructor(connectionString: string) {
+    this.proc = spawn('psql', [connectionString, '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=0'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    this.proc.stdout.setEncoding('utf8');
+    this.proc.stdout.on('data', (chunk: string) => {
+      this.buffer += chunk;
+      const idx = this.buffer.indexOf(`${END} `);
+      const nl = idx >= 0 ? this.buffer.indexOf('\n', idx) : -1;
+      if (idx >= 0 && nl >= 0 && this.waiter) {
+        const done = this.buffer.slice(0, nl + 1);
+        this.buffer = this.buffer.slice(nl + 1);
+        const w = this.waiter;
+        this.waiter = undefined;
+        w(done);
+      }
+    });
+    this.proc.stderr.resume(); // エラー内容は LAST_ERROR_MESSAGE から取る
+  }
+
+  /** 1文を実行して行を返す。SELECT と RETURNING 付きの文は JSON で受け取る。 */
+  private run(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
+    const text = interpolate(sql, params).trim().replace(/;\s*$/, '');
+    const returnsRows = /^(select|with)\b/i.test(text) || /\breturning\b/i.test(text);
+    const statement = returnsRows
+      ? `WITH __q AS (${text}) SELECT coalesce(json_agg(__q), '[]'::json) FROM __q;`
+      : `${text};`;
+    const script = `${statement}\n\\if :ERROR\n\\echo ${ERR} :LAST_ERROR_MESSAGE\n\\endif\n\\echo ${END} :ERROR\n`;
+
+    const task = this.queue.then(
+      () =>
+        new Promise<unknown[]>((resolve, reject) => {
+          this.waiter = (out) => {
+            const lines = out.split('\n').filter((l) => l.length > 0);
+            const endLine = lines.pop()!;
+            const errLine = lines.find((l) => l.startsWith(ERR));
+            if (endLine.endsWith('true')) {
+              reject(new Error(`SQL error: ${errLine?.slice(ERR.length + 1) ?? 'unknown'}\n${text.slice(0, 300)}`));
+              return;
+            }
+            if (!returnsRows) return resolve([]);
+            const json = lines.filter((l) => !l.startsWith(ERR)).join('\n');
+            resolve(JSON.parse(json || '[]') as unknown[]);
+          };
+          this.proc.stdin.write(script);
+        }),
+    );
+    this.queue = task.catch(() => undefined);
+    return task;
+  }
+
+  async withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
+    const db: Db = { query: async <R>(sql: string, params?: readonly unknown[]) => (await this.run(sql, params)) as R[] };
+    await this.run('BEGIN');
+    try {
+      await this.run("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      const result = await fn(db);
+      await this.run('COMMIT');
+      return result;
+    } catch (err) {
+      await this.run('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /** テナントを設定せずに実行する（マイグレーションやテストの準備用）。 */
+  async raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
+    return this.run(sql, params);
+  }
+
+  async close(): Promise<void> {
+    this.proc.stdin.end();
+    await new Promise((r) => this.proc.once('close', r));
+  }
+}
