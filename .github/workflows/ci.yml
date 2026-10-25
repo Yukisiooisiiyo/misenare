@@ -65,7 +65,7 @@ jobs:
           node-version: 22
       - run: npm install
       - name: Install an independent QR decoder
-        run: npm install --no-save jsqr@1.4.0
+        run: npm install --no-save jsqr@1.4.0 @zxing/library@0.21.3
       - name: Verify QR codes can be read back
         run: |
           set -o pipefail

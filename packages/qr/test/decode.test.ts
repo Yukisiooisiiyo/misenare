@@ -7,6 +7,7 @@ import { describe, it } from 'node:test';
 import { encodeQr, type QrCode } from '../src/qr.ts';
 
 type Decoder = (data: Uint8ClampedArray, width: number, height: number) => { data: string } | null;
+type Decoder2 = (data: Uint8ClampedArray, width: number, height: number) => string | null;
 
 // 入っていないこともあるので、名前を変数にして読み込む（型チェックで「無い」と言われないように）
 const decoderModule = 'jsqr';
@@ -25,6 +26,22 @@ function findDecoder(m: unknown, depth = 0): Decoder | null {
 }
 
 const jsQR = loaded ? findDecoder(loaded) : null;
+
+/** もう1つの読み取り器（ZXing）。1つ目が怪しいときの突き合わせに使う */
+const zxingModule = '@zxing/library';
+const zxing: Decoder2 | null = await import(zxingModule).then((z: Record<string, any>) => {
+  return (data: Uint8ClampedArray, width: number, height: number) => {
+    const grey = new Uint8ClampedArray(width * height);
+    for (let i = 0; i < width * height; i++) grey[i] = data[i * 4]!;
+    const source = new z.RGBLuminanceSource(grey, width, height);
+    const bitmap = new z.BinaryBitmap(new z.HybridBinarizer(source));
+    try {
+      return new z.QRCodeReader().decode(bitmap).getText() as string;
+    } catch {
+      return null;
+    }
+  };
+}).catch(() => null);
 const shape = loaded ? `keys=${Object.keys(loaded).join(',')} default=${typeof (loaded as { default?: unknown }).default}` : 'なし';
 
 /** QR をそのまま画素にする（1モジュール = scale 画素、周りに余白4モジュール） */
@@ -47,15 +64,18 @@ function toPixels(qr: QrCode, scale = 4, quiet = 4): { data: Uint8ClampedArray; 
   return { data, width };
 }
 
+/** 読み取り器のどちらかが読めれば、その文字列を返す */
 function roundTrip(text: string): string | null {
   const qr = encodeQr(text);
   const { data, width } = toPixels(qr);
-  return jsQR!(data, width, width)?.data ?? null;
+  const byJsQr = jsQR ? jsQR(data, width, width)?.data ?? null : null;
+  if (byJsQr !== null) return byJsQr;
+  return zxing ? zxing(data, width, width) : null;
 }
 
-describe('QR コードの読み取り確認（別実装）', { skip: loaded ? false : 'jsqr が入っていません' }, () => {
+describe('QR コードの読み取り確認（別実装）', { skip: jsQR || zxing ? false : '読み取り器が入っていません' }, () => {
   it('読み取り器を関数として読み込めている', () => {
-    assert.equal(typeof jsQR, 'function', `読み取り器が見つからない: ${shape}`);
+    assert.ok(jsQR || zxing, `読み取り器が見つからない: ${shape}`);
   });
 
   it('いろいろな大きさの画像で読める（読めない時は大きさの一覧を出す）', () => {
@@ -72,26 +92,13 @@ describe('QR コードの読み取り確認（別実装）', { skip: loaded ? fa
     assert.ok(tried.some((t) => t.endsWith('OK')), `どの大きさでも読めなかった: ${tried.join(' ')}`);
   });
 
-  it('【手がかり】どの段階で失敗しているか', () => {
+  it('【手がかり】2つの読み取り器の結果を並べる', () => {
     const qr = encodeQr('A');
-    const { data, width } = toPixels(qr, 6, 4);
-    const m = loaded as Record<string, unknown>;
-    const notes: string[] = [`jsQR=${typeof jsQR} arity=${(jsQR as unknown as { length: number })?.length}`];
-    const binarize = m.binarize as (d: Uint8ClampedArray, w: number, h: number, inv: boolean) => { binarized: unknown };
-    const locate = m.locate as (bm: unknown) => Array<{ dimension: number }> | null;
-    const extract = m.extract as (bm: unknown, loc: unknown) => { matrix: unknown };
-    const decode = m.decode as (bm: unknown) => { text: string; version: number } | null;
-    notes.push(`binarize=${typeof binarize} locate=${typeof locate} extract=${typeof extract} decode=${typeof decode}`);
-    if (typeof binarize === 'function' && typeof locate === 'function') {
-      const { binarized } = binarize(data, width, width, true);
-      const found = locate(binarized);
-      notes.push(found ? `位置OK dimension=${found.map((f) => f.dimension).join('/')}（期待 ${qr.size}）` : '位置が見つからない');
-      if (found && typeof extract === 'function' && typeof decode === 'function') {
-        for (const [i, location] of found.entries()) {
-          const got = decode(extract(binarized, location).matrix);
-          notes.push(`候補${i}: ${got ? JSON.stringify(got.text) : 'decode=null'}`);
-        }
-      }
+    const notes = [`jsQR=${typeof jsQR}`, `zxing=${typeof zxing}`];
+    for (const scale of [2, 4, 8]) {
+      const { data, width } = toPixels(qr, scale, 4);
+      notes.push(`${scale}x → jsQR:${jsQR ? JSON.stringify(jsQR(data, width, width)?.data ?? null) : '-'}`
+        + ` zxing:${zxing ? JSON.stringify(zxing(data, width, width)) : '-'}`);
     }
     assert.fail(notes.join(' | '));
   });
