@@ -43,8 +43,8 @@ describe('タグの関係', () => {
     assert.ok(!ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#延長保証'))).includes(warrantyId));
     const cands = await run((q) => listRelations(q, trusted, 'candidate'));
     assert.equal(cands.length, 1);
-    await rejects(run((q) => decideRelation(q, visitor, r.id as string, 'approved')), 'forbidden');
-    await run((q) => decideRelation(q, trusted, r.id as string, 'approved'));
+    await rejects(run((q) => decideRelation(q, visitor, r.id, 'approved')), 'forbidden');
+    await run((q) => decideRelation(q, trusted, r.id, 'approved'));
     assert.ok(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#延長保証'))).includes(warrantyId));
   });
 

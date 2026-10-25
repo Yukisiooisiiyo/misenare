@@ -11,6 +11,7 @@ import { indexKnowledge } from './indexer.ts';
 import { canonicalTagIds, refreshUseCounts } from './tags.ts';
 
 export type RelationKind = 'synonym' | 'includes' | 'alias';
+export interface RelationState { id: string; state: 'candidate' | 'approved' | 'rejected' }
 
 export interface RelationInput {
   kind: RelationKind;
@@ -44,7 +45,7 @@ async function wouldCycle(db: Db, fromId: string, toId: string): Promise<boolean
 }
 
 /** 関係を提案する。trusted 以上なら即承認、visitor なら候補。既にあれば根拠の件数だけ増やす。 */
-export async function proposeRelation(db: Db, actor: Actor, input: RelationInput) {
+export async function proposeRelation(db: Db, actor: Actor, input: RelationInput): Promise<RelationState> {
   const toId = await activeTagId(db, input.toTag);
   const approved = isTrusted(actor);
   if (input.kind === 'alias') {
@@ -54,7 +55,7 @@ export async function proposeRelation(db: Db, actor: Actor, input: RelationInput
       db, `SELECT id, state FROM tag_relations WHERE kind = 'alias' AND from_text = $1 AND to_tag_id = $2`, [text, toId],
     );
     if (existing) return decideIfTrusted(db, actor, existing.id, existing.state);
-    return one(db,
+    return one<RelationState>(db,
       `INSERT INTO tag_relations (tenant_id, kind, from_text, to_tag_id, state, source, evidence, approved_by)
        VALUES ($1, 'alias', $2, $3, $4, 'manual', 1, $5) RETURNING id, state`,
       [actor.tenantId, text, toId, approved ? 'approved' : 'candidate', approved ? actor.userId : null]);
@@ -76,19 +77,19 @@ export async function proposeRelation(db: Db, actor: Actor, input: RelationInput
     [fromId, toId],
   );
   if (existing) return decideIfTrusted(db, actor, existing.id, existing.state);
-  return one(db,
+  return one<RelationState>(db,
     `INSERT INTO tag_relations (tenant_id, kind, from_tag_id, to_tag_id, state, source, evidence, approved_by)
      VALUES ($1, $2, $3, $4, $5, 'manual', 1, $6) RETURNING id, state`,
     [actor.tenantId, input.kind, fromId, toId, approved ? 'approved' : 'candidate', approved ? actor.userId : null]);
 }
 
-async function decideIfTrusted(db: Db, actor: Actor, id: string, state: string) {
+async function decideIfTrusted(db: Db, actor: Actor, id: string, state: string): Promise<RelationState> {
   await db.query(`UPDATE tag_relations SET evidence = evidence + 1 WHERE id = $1`, [id]);
   if (state === 'candidate' && isTrusted(actor)) return decideRelation(db, actor, id, 'approved');
-  return one(db, `SELECT id, state FROM tag_relations WHERE id = $1`, [id]);
+  return one<RelationState>(db, `SELECT id, state FROM tag_relations WHERE id = $1`, [id]);
 }
 
-export async function decideRelation(db: Db, actor: Actor, id: string, decision: 'approved' | 'rejected') {
+export async function decideRelation(db: Db, actor: Actor, id: string, decision: 'approved' | 'rejected'): Promise<RelationState> {
   assert(isTrusted(actor), 'forbidden', 'タグの関係を承認できるのは trusted 以上です');
   const r = await maybeOne<{ kind: RelationKind; from_tag_id: string | null; to_tag_id: string }>(
     db, `SELECT kind, from_tag_id, to_tag_id FROM tag_relations WHERE id = $1`, [id],
@@ -97,7 +98,7 @@ export async function decideRelation(db: Db, actor: Actor, id: string, decision:
   if (decision === 'approved' && r.kind === 'includes') {
     assert(!(await wouldCycle(db, r.from_tag_id!, r.to_tag_id)), 'conflict', '包含関係が循環してしまいます');
   }
-  return one(db,
+  return one<RelationState>(db,
     `UPDATE tag_relations SET state = $2, approved_by = $3 WHERE id = $1 RETURNING id, state`,
     [id, decision, actor.userId]);
 }
@@ -110,7 +111,7 @@ export async function deleteRelation(db: Db, actor: Actor, id: string) {
 
 export async function listRelations(db: Db, actor: Actor, state: 'candidate' | 'approved' | 'rejected') {
   assert(isTrusted(actor), 'forbidden', 'タグの関係を見られるのは trusted 以上です');
-  return db.query(
+  return db.query<{ id: string; kind: RelationKind; from_tag: string | null; from_text: string | null; to_tag: string; state: string; source: string; evidence: number }>(
     `SELECT r.id, r.kind, f.name AS from_tag, r.from_text, t.name AS to_tag, r.state, r.source, r.evidence
        FROM tag_relations r
        LEFT JOIN hashtags f ON f.id = r.from_tag_id
