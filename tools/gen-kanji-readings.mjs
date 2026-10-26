@@ -24,15 +24,17 @@ const SOURCE = 'https://www.edrdg.org/kanjidic/kanjidic2.xml.gz';
 const OUT = process.argv[2] ?? 'packages/search-core/src/kanjiReadings.generated.ts';
 
 /**
- * 載せる漢字を絞る。
- *   grade … 常用漢字（1〜8）と人名用漢字（9〜10）
- *   freq  … 新聞での出現頻度の順位。常用外でもよく使う字が拾える
+ * 載せる漢字を絞る。基準は **JIS X 0208 に入っているか**（第1・第2水準、約6300字）。
  *
- * grade だけだと「梱」（開梱）が落ちた。売場では使う字なので、
- * 頻度の付いている字も入れる。どちらも無い字は、まず出てこない。
+ * 常用漢字＋人名用漢字（grade 1〜10）だけだと「梱」（開梱）が落ちた。
+ * 新聞頻度（freq）を足しても落ちたままだった。梱包は売場で毎日使う言葉なのに、
+ * 新聞には出てこないからである。
+ * 「日本語の文章に書ける字」という線なら、こういう抜けが起きない。
+ *
+ * この表はサーバー側で読みの候補を作るのに使う（端末には配らない）。
+ * 字数が増えても配信量には響かないので、広い方を採る。
  */
-const KEEP_GRADES = new Set(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']);
-const hasFreq = (block) => /<freq>\d+<\/freq>/.test(block);
+const inJis208 = (block) => /cp_type="jis208"/.test(block);
 
 console.error(`取得: ${SOURCE}`);
 const res = await fetch(SOURCE);
@@ -47,24 +49,31 @@ const KATA = (s) => [...s].map((c) => {
 
 /**
  * 訓読みは「かわ.く」のように、送り仮名を「.」で区切って書いてある。
- * 欲しいのは漢字そのものの読み（かわ）なので、「.」から後ろを落とす。
- * 接頭辞・接尾辞の印である「-」も落とす。
+ * **この「.」は落とさずにそのまま残す。**
+ *
+ * 落とすと「す.える」が「ス」になり、据付＝スエツケ が作れなくなる。
+ * 複合語に出てくるのは連用形（すえ、つけ、おろし）で、それは送り仮名から
+ * 規則で起こせる。規則は読む側（kanjiReadings.ts）に置く。
+ * ここでは出典の形をできるだけそのまま写す。
+ *
+ * 接頭辞・接尾辞の印である「-」だけは落とす（読みではないため）。
  */
-const stem = (reading) => KATA(reading.split('.')[0].replace(/-/g, '').trim());
+const clean = (reading) => KATA(reading.replace(/-/g, '').trim());
 
 const entries = [];
 let kept = 0; let skipped = 0;
 for (const block of xml.split('<character>').slice(1)) {
   const literal = /<literal>(.)<\/literal>/u.exec(block)?.[1];
   if (!literal) continue;
-  const grade = /<grade>(\d+)<\/grade>/.exec(block)?.[1];
-  if (!(grade !== undefined && KEEP_GRADES.has(grade)) && !hasFreq(block)) { skipped++; continue; }
+  if (!inJis208(block)) { skipped++; continue; }
 
   const on = [];
   const kun = [];
   for (const m of block.matchAll(/<reading r_type="ja_(on|kun)">([^<]+)<\/reading>/g)) {
-    const value = stem(m[2]);
-    if (value === '' || !/^[ァ-ヶー]+$/.test(value)) continue;
+    const value = clean(m[2]);
+    // 「.」は送り仮名の区切りとして1つだけ許す。それ以外の記号が混じる読みは捨てる。
+    if (value === '' || !/^[ァ-ヶー]+(\.[ァ-ヶー]+)?$/.test(value)) continue;
+    if (m[1] === 'on' && value.includes('.')) continue;
     const list = m[1] === 'on' ? on : kun;
     if (!list.includes(value)) list.push(value);
   }
@@ -91,10 +100,11 @@ const body = `// === 自動生成。手で書き換えないこと ===
 //   https://www.edrdg.org/edrdg/license.html
 // 著作権は EDRDG および James William Breen 氏が保持しています。
 //
-// 収録: 常用漢字・人名用漢字と、新聞での出現頻度が付いている字、あわせて ${kept} 字。
+// 収録: JIS X 0208（第1・第2水準）の漢字のうち、読みが載っている ${kept} 字。
 // 形: 「漢字:音読み,音読み|訓読み,訓読み」を「;」でつないだ1本の文字列。
-//     オブジェクトのリテラルで持つより小さく、端末に送る量が減る。
-//     訓読みは送り仮名（「かわ.く」の「く」）を落とした、漢字そのものの読み。
+//     オブジェクトのリテラルで持つより小さい。
+//     訓読みは送り仮名を「.」で区切ったまま（カワ.ク、ス.エル）。
+//     連用形（スエ、オロシ）は読む側が送り仮名から規則で起こす。
 
 /** 生成日: ${new Date().toISOString().slice(0, 10)} */
 export const KANJI_READINGS_RAW = '${entries.join(';')}';

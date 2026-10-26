@@ -4,20 +4,26 @@
 // 人が選ぶなら1位が当たっている必要はなく、候補に入っていればよい。
 // だから並べ替えを外しても害がなく、総当たりの弱点（決め手が無い）が消える。
 //
-// 並べ替えの根拠は、日本語の複合語の性質ひとつだけ：
-//   **音読みどうし・訓読みどうしで揃うのが普通で、混ざる（重箱読み・湯桶読み）のは稀。**
-//   食洗機 → ショク+セン+キ（音音音）… 普通
-//          → ショク+アライ+キ（音訓音）… 重箱読み＝稀
-// あわせて、送り仮名が付いている漢字は訓読みというしるしとして使う。
-//   前出し → マエ+ダシ（訓）… 「し」が訓のしるし
+// 絞り方は辞書引きではなく、日本語の複合語の規則。根拠は4つだけ：
 //
-// 連濁（トリ→ドリ、フダ→ダ）は、表に濁った形も並べて持たせてある。
-// どちらが正しいかを決めようとはしない。両方を候補に出して、人に選んでもらう。
+//   1. 音読みどうし・訓読みどうしで揃うのが普通。混ざる（重箱・湯桶読み）のは稀。
+//        食洗機 → ショク+セン+キ（音音音）… 普通
+//               → ショク+アライ+キ（音訓音）… 重箱読み＝稀
+//   2. 漢字だけが並ぶ語は、音読みで揃うほうが多数派（漢語）。
+//        室外機 → シツガイキ（○）／ ムロソトハタ（×）
+//   3. 送り仮名が付いている漢字は訓読み。しかも送り仮名は読みの末尾と重なる。
+//        前出し → マエ+ダシ（「し」が「ダシ」の末尾と重なる）
+//   4. 送り仮名が要る形（動詞の語幹）は、複合語の途中に裸では出てこない。
+//        据付 → スエ+ツケ（連用形）… 普通
+//             → ス+ツ（語幹のまま）… 語にならない
+//
+// 連濁・促音便は「起きた形」も「起きない形」も両方出す。どちらが正しいかは
+// 決めない（下取＝シタドリ／シタトリ）。並べ替えでは起きない形をわずかに上に置く。
 
-import { KANJI_READINGS } from './kanjiReadings.ts';
+import { handakuAfterSokuon, KANJI_READINGS, rendakuForms, sokuonForm } from './kanjiReadings.ts';
 import { hiraToKata } from './kana.ts';
 
-/** 組合せが増えすぎたときの打ち切り。これを超える語は候補を出さない。 */
+/** 総当たりの打ち切り。これを超えないよう、使う読みを順位の低い方から削る。 */
 const MAX_COMBINATIONS = 20000;
 
 const isKanji = (ch: string): boolean => /\p{Script=Han}/u.test(ch);
@@ -25,12 +31,14 @@ const isKanji = (ch: string): boolean => /\p{Script=Han}/u.test(ch);
 interface Option {
   reading: string;
   type: 'on' | 'kun' | 'kana';
-  /** 表に並べた順。前のものほどよく使う読み */
+  /** 同じ種類（音／訓）の中での並び順。前のものほどよく使う読み */
   rank: number;
-  /** 濁音で始まる訓読み（連濁した形） */
-  voiced: boolean;
+  /** 送り仮名が要る形（動詞・形容詞の語幹）か */
+  stem: boolean;
   /** 送り仮名が読みの末尾と重なっていた（引き → ヒキ の「キ」） */
   absorbed: boolean;
+  /** 規則で濁らせた形（連濁）か */
+  voiced: boolean;
 }
 
 interface Part {
@@ -38,9 +46,6 @@ interface Part {
   /** 直後にかな（送り仮名）が続く漢字か */
   beforeKana: boolean;
 }
-
-// 濁音・半濁音で始まるか。範囲（ガ-ド）で書くと、あいだの清音まで入ってしまうので並べる。
-const VOICED = /^[ガギグゲゴザジズゼゾダヂヅデドバビブベボパピプペポヴ]/;
 
 /** 語を、漢字1文字ずつと、かなのまとまりに分ける */
 function split(word: string): Part[] | null {
@@ -53,18 +58,14 @@ function split(word: string): Part[] | null {
       let run = '';
       while (i < chars.length && !isKanji(chars[i]!)) { run += chars[i]!; i++; }
       i--;
-      parts.push({ options: [{ reading: hiraToKata(run), type: 'kana', rank: 0, voiced: false, absorbed: false }], beforeKana: false });
+      parts.push({
+        options: [{ reading: hiraToKata(run), type: 'kana', rank: 0, stem: false, absorbed: false, voiced: false }],
+        beforeKana: false,
+      });
       continue;
     }
-    const entry = KANJI_READINGS[ch];
+    const entry = KANJI_READINGS.get(ch);
     if (!entry) return null; // 表に無い漢字がある語は、候補を作らない
-    // 順位は音訓をまたいで通しで付ける。表の並び＝よく使う順なので、
-    // 「説」なら セツ が トキ より上に来る。
-    const merged: Array<{ reading: string; type: 'on' | 'kun' }> = [
-      ...entry.on.map((reading) => ({ reading, type: 'on' as const })),
-      ...entry.kun.map((reading) => ({ reading, type: 'kun' as const })),
-    ];
-    if (merged.length === 0) return null;
 
     // 送り仮名が続くなら、読みにその仮名が含まれている形（ヒキ＋き）は
     // 重ねずに読みだけを採る。重ねると「ヒキキ」になる。
@@ -76,19 +77,37 @@ function split(word: string): Part[] | null {
       while (j < chars.length && !isKanji(chars[j]!)) { okurigana += chars[j]!; j++; }
       okurigana = hiraToKata(okurigana);
     }
-    const options: Option[] = merged.map(({ reading, type }, rank) => {
+
+    // 順位は音・訓それぞれの中で付ける。まとめて通し番号にすると、
+    // 表が音読みを先に並べているせいで、訓読みが常に不利になる。
+    const options: Option[] = [];
+    const add = (reading: string, type: 'on' | 'kun', rank: number, stem: boolean): void => {
       const absorbed = okurigana !== '' && reading.endsWith(okurigana) && reading.length > okurigana.length;
-      return {
+      options.push({
         reading: absorbed ? reading.slice(0, -okurigana.length) : reading,
-        type,
-        rank,
-        voiced: type === 'kun' && VOICED.test(reading),
-        absorbed,
-      };
-    });
+        type, rank, stem, absorbed, voiced: false,
+      });
+    };
+    for (const [rank, reading] of entry.on.entries()) add(reading, 'on', rank, false);
+    for (const [rank, k] of entry.kun.entries()) add(k.reading, 'kun', rank, k.stem);
+    if (options.length === 0) return null;
     parts.push({ options, beforeKana });
   }
   return parts;
+}
+
+/**
+ * 総当たりが大きくなりすぎないよう、順位の低い（＝あまり使わない）読みから削る。
+ * 削るのは常に「いま一番読みの多い漢字」の最後の1つ。よく使う読みは最後まで残る。
+ */
+function trim(parts: Part[]): void {
+  const size = (): number => parts.reduce((n, p) => n * p.options.length, 1);
+  while (size() > MAX_COMBINATIONS) {
+    let widest = parts[0]!;
+    for (const p of parts) if (p.options.length > widest.options.length) widest = p;
+    if (widest.options.length <= 1) return;
+    widest.options.pop();
+  }
 }
 
 /**
@@ -96,70 +115,84 @@ function split(word: string): Part[] | null {
  * 当てにいく点数ではなく、**人が目で探しやすい順**にするための点数。
  */
 function score(chosen: Option[], parts: Part[]): number {
-  const kinds = chosen.filter((c) => c.type !== 'kana');
   let s = 0;
-
-  // 音どうし・訓どうしで揃っているか。
-  // 送り仮名が付く漢字は訓と決まっているので、揃いの判定からは外す。
-  // 「真空引き」は 真空（音）＋引き（訓）で、混ざっているのが普通の形。
+  const kanji = chosen.filter((c) => c.type !== 'kana');
+  // 送り仮名が付く漢字は訓読みと決まっているので、「揃っているか」の判定からは外す。
+  // 真空引き は 真空（音）＋引き（訓）で、混ざっているのが普通の形。
   const free = chosen.filter((c, i) => c.type !== 'kana' && !parts[i]!.beforeKana);
+
+  // 1. 音どうし・訓どうしで揃っているか
   if (free.length > 1) {
     const allSame = free.every((k) => k.type === free[0]!.type);
     s += allSame ? 6 : 0;
     for (let i = 1; i < free.length; i++) if (free[i]!.type !== free[i - 1]!.type) s -= 3;
+    // 2. 漢字だけが並ぶ語は、音読みで揃うほうが多数派
+    if (allSame && free[0]!.type === 'on') s += 1;
   }
+  // 送り仮名の付く漢字まで含めて揃っているなら、和語としての揃いを少し足す
+  if (kanji.length > 1 && kanji.every((k) => k.type === kanji[0]!.type)) s += 2;
 
-  // 送り仮名が付く漢字は訓読み。しかも送り仮名は読みの末尾と重なるのが普通
-  // （引き → ヒキ の「キ」）。重なっている読みを上に出す。
   for (const [i, part] of parts.entries()) {
-    if (!part.beforeKana) continue;
     const c = chosen[i]!;
-    if (c.type === 'kun') s += 3;
-    else if (c.type === 'on') s -= 3;
-    if (c.absorbed) s += 2;
+    if (c.type === 'kana') continue;
+    if (part.beforeKana) {
+      // 3. 送り仮名が付く漢字は訓読み。送り仮名と読みの末尾が重なるのが普通
+      s += c.type === 'kun' ? 3 : -3;
+      if (c.absorbed) s += 2;
+    } else if (kanji.length > 1 && c.stem) {
+      // 4. 送り仮名が要る形が、複合語の途中に裸で出てくるのは珍しい
+      s -= 2.5;
+    }
+    // よく使う読みを上に（表の並び順）
+    s -= c.rank * 0.6;
+    // 濁る形は、濁らない形のすぐ下に置く。どちらも候補には残す。
+    if (c.voiced) s -= 0.3;
   }
-
-  // 連濁。訓どうしで揃った語の、2つ目以降が濁るのはよくある（した＋とり → したどり）
-  if (kinds.length > 1 && kinds.every((k) => k.type === 'kun')) {
-    for (const [i, c] of chosen.entries()) if (i > 0 && c.voiced) s += 1.5;
-  }
-
-  // よく使う読みを上に（表の並び順）
-  for (const c of chosen) s -= c.rank * 0.6;
   return s;
 }
 
 /**
  * 読みの候補を、確からしい順に返す。
- * 表に無い漢字が混ざる語や、組合せが多すぎる語では空を返す
- * （そのときは候補を出さず、入力欄だけ見せる）。
+ * 表に無い漢字が混ざる語では空を返す（そのときは候補を出さず、入力欄だけ見せる）。
  */
 export function readingCandidates(word: string, limit = 5): string[] {
   const parts = split(word.trim());
   if (parts === null || parts.length === 0) return [];
-  const total = parts.reduce((n, p) => n * p.options.length, 1);
-  if (total > MAX_COMBINATIONS) return [];
+  trim(parts);
 
-  const out: Array<{ reading: string; score: number }> = [];
+  const best = new Map<string, number>();
   const chosen: Option[] = [];
-  const walk = (i: number): void => {
+  // 前の語の末尾が決まらないと促音便（ハツ＋チュウ → ハッチュウ）を決められないので、
+  // 組み立てながら音を変えていく。変えた形も変えない形も残す。
+  const walk = (i: number, text: string): void => {
     if (i === parts.length) {
-      out.push({ reading: chosen.map((c) => c.reading).join(''), score: score(chosen, parts) });
+      const s = score(chosen, parts);
+      if (!best.has(text) || best.get(text)! < s) best.set(text, s);
       return;
     }
-    for (const o of parts[i]!.options) {
-      chosen.push(o);
-      walk(i + 1);
-      chosen.pop();
+    const part = parts[i]!;
+    for (const o of part.options) {
+      const forms: Option[] = i === 0
+        ? [o]
+        : [o, ...rendakuForms(o.reading).map((reading) => ({ ...o, reading, voiced: true }))];
+      for (const form of forms) {
+        // 促音・撥音のあとのハ行は半濁る（イッ＋ホン → イッポン）
+        const handaku = handakuAfterSokuon(text, form.reading);
+        const heads = handaku === null ? [form.reading] : [handaku, form.reading];
+        for (const head of heads) {
+          // 前の語の末尾が詰まる形（促音便）も試す
+          const squeezed = sokuonForm(text, head);
+          for (const base of squeezed === null ? [text] : [squeezed, text]) {
+            chosen.push(form);
+            walk(i + 1, base + head);
+            chosen.pop();
+          }
+        }
+      }
     }
   };
-  walk(0);
+  walk(0, '');
 
-  // 同じ読みは1つに（別の組合せが同じ音になることがある）
-  const best = new Map<string, number>();
-  for (const { reading, score: s } of out) {
-    if (!best.has(reading) || best.get(reading)! < s) best.set(reading, s);
-  }
   return [...best.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].length - b[0].length || a[0].localeCompare(b[0]))
     .slice(0, limit)
