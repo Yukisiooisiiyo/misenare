@@ -63,7 +63,12 @@ function renyou(stem: string, okurigana: string): string | null {
   return stem + head + changed;
 }
 
-function parse(raw: string): Map<string, KanjiReading> {
+/**
+ * 表の文字列を読む。形は「漢字:音,音|訓.送り,訓」を「;」でつないだもの。
+ * 送り仮名つきの訓読みからは、語幹と連用形の2つを起こす。
+ * 試験のために外に出してある（出典を取り直さずに規則だけを確かめられる）。
+ */
+export function parseKanjiReadings(raw: string): Map<string, KanjiReading> {
   const out = new Map<string, KanjiReading>();
   for (const entry of raw.split(';')) {
     const colon = entry.indexOf(':');
@@ -86,9 +91,11 @@ function parse(raw: string): Map<string, KanjiReading> {
       const dot = raw.indexOf('.');
       if (dot < 0) { push(raw, false); continue; }
       const stem = raw.slice(0, dot);
-      push(stem, true);
-      // 連用形は語幹のすぐ後ろに置く。順番＝よく使う順なので、離すと埋もれる。
       const form = renyou(stem, raw.slice(dot + 1));
+      // 一段動詞は連用形が語幹と同じ形（ミ.ル → ミ、デ.ル → デ）。
+      // この形は裸で語になる（見積、見本）ので、送り仮名が要る形としては扱わない。
+      push(stem, form !== stem);
+      // 連用形は語幹のすぐ後ろに置く。順番＝よく使う順なので、離すと埋もれる。
       if (form !== null && form !== stem) push(form, false);
     }
     out.set(entry.slice(0, colon), {
@@ -99,8 +106,19 @@ function parse(raw: string): Map<string, KanjiReading> {
   return out;
 }
 
-/** 漢字 → 読み。生成した表に、送り仮名から起こした連用形を足したもの。 */
-export const KANJI_READINGS: ReadonlyMap<string, KanjiReading> = parse(KANJI_READINGS_RAW);
+/**
+ * 漢字 → 読み。生成した表に、送り仮名から起こした連用形を足したもの。
+ *
+ * 初めて呼ばれたときに作る。読み込むだけで作らないのは、**使わない側から
+ * 外せるようにする**ため。読みの候補を作るのはサーバーの仕事で、画面側は
+ * API から受け取るだけなので、画面の配信物に 83KB の表を混ぜる理由がない。
+ * （上から呼び出しを書くと、束ね役が「使っている」と見なして外せなくなる）
+ */
+let cache: ReadonlyMap<string, KanjiReading> | null = null;
+export function kanjiReadings(): ReadonlyMap<string, KanjiReading> {
+  cache ??= parseKanjiReadings(KANJI_READINGS_RAW);
+  return cache;
+}
 
 /** 清音 → 濁音・半濁音。語の2つ目以降で起きる（連濁） */
 const RENDAKU: Readonly<Record<string, string[]>> = {

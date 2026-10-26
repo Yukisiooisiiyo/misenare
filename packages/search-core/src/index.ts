@@ -1,7 +1,6 @@
 export * from './analyzer.ts';
 export * from './bm25f.ts';
 export * from './kana.ts';
-export * from './kanjiReadings.ts';
 export * from './normalize.ts';
 export * from './readingCandidates.ts';
 export * from './suggest.ts';
