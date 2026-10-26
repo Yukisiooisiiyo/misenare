@@ -9,9 +9,11 @@ import {
   CHALLENGE_TTL_MS, deletePasskey, finishRegistration, listPasskeys, loginWithPasskey,
   parseUserHandle, siteConfigFromEnv, startLogin, startRegistration, sweepChallenges, userHandle,
 } from '../src/domain/passkeys.ts';
+import { createApp, resetPasskeySite } from '../src/http/app.ts';
+import { SessionAuthenticator } from '../src/http/auth.ts';
 import { verifySession } from '../src/domain/users.ts';
 import { fakeAuthenticator } from './passkeyHelper.ts';
-import { freshDatabase, manager, T, trusted } from './helpers.ts';
+import { freshDatabase, manager, T, tokenizer, trusted } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -241,5 +243,77 @@ describe('パスキーの登録と、パスキーで入る', () => {
     assert.ok(CHALLENGE_TTL_MS > 0);
     const swept = await sweepChallenges(raw);
     assert.ok(swept >= 0);
+  });
+});
+
+// --- ログイン前の経路（HTTP） -------------------------------------------------
+//
+// 登録はログイン後の経路にあるが、**入る**ほうはログイン前に呼べないと意味がない。
+// 招待リンクと違い、端末を変えても自分で入り直せるのがパスキーの値打ちなので、
+// ここが通らないと「登録はできるが使えない」状態になる。
+describe('パスキーで入る（ログイン前の経路）', () => {
+  let app: (req: Request) => Promise<Response>;
+
+  before(async () => {
+    process.env.WEBAUTHN_RP_ID = SITE.rpId;
+    process.env.WEBAUTHN_ORIGINS = SITE.origins.join(',');
+    resetPasskeySite();
+    app = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer });
+  });
+  after(() => {
+    delete process.env.WEBAUTHN_RP_ID;
+    delete process.env.WEBAUTHN_ORIGINS;
+    resetPasskeySite();
+  });
+
+  const call = async (path: string, body?: unknown) => {
+    const res = await app(new Request(`http://localhost${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }));
+    const text = await res.text();
+    return { status: res.status, body: text ? JSON.parse(text) : null };
+  };
+
+  const handle = () => base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8'));
+
+  it('ログインしていなくても、合言葉を受け取って入れる', async () => {
+    const { device } = await register(trusted, 'ログインの試し');
+
+    const start = await call('/auth/passkey/start');
+    assert.equal(start.status, 200);
+    assert.equal(start.body.rpId, SITE.rpId);
+    assert.ok(typeof start.body.challenge === 'string' && start.body.challenge.length > 0);
+
+    const assertion = device.get({ challenge: start.body.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
+    const finish = await call('/auth/passkey/finish', {
+      ...assertion, userHandle: handle(), deviceName: '売場のスマホ',
+    });
+    assert.equal(finish.status, 201);
+    assert.equal(finish.body.userId, trusted.userId);
+
+    // 受け取ったトークンで、本当に入れていることを確かめる
+    const session = await db.withTenant(T, (q) => verifySession(q, finish.body.sessionToken));
+    assert.equal(session?.userId, trusted.userId);
+
+    // 端末の名前が残る（店長が「どの端末から入ったか」を見られるようにするため）
+    const named = await db.withTenant(T, (q) => q.query<{ device_name: string | null }>(
+      `SELECT device_name FROM sessions WHERE device_name = $1`, ['売場のスマホ']));
+    assert.equal(named.length, 1);
+  });
+
+  it('発行していない合言葉で署名を送っても通らない（409）', async () => {
+    const { device } = await register(trusted, '合言葉なしの試し');
+    const assertion = device.get({
+      challenge: 'this-challenge-was-never-issued', origin: SITE.origins[0]!, rpId: SITE.rpId,
+    });
+    const finish = await call('/auth/passkey/finish', { ...assertion, userHandle: handle() });
+    assert.equal(finish.status, 409, JSON.stringify(finish.body));
+  });
+
+  it('足りない項目があれば 400 で返す', async () => {
+    const finish = await call('/auth/passkey/finish', { credentialId: 'x' });
+    assert.equal(finish.status, 400);
   });
 });

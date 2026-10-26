@@ -54,6 +54,77 @@ jobs:
         if: failure()
         run: node .github/scripts/annotate-tap.mjs test-output.tap
 
+  # パスキーは、サーバーの試験が全部通っていても実機で入れないことがある。
+  # ブラウザに渡す選択肢の形（バイト列の渡し方）と、端末が名前を聞かずに鍵を出せるか
+  # （residentKey）は、にせ認証器では確かめられない。Chrome の仮想認証器で通す。
+  passkey:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://misenare:misenare@localhost:5432/misenare_e2e
+      # localhost は安全な出どころとして扱われるので、証明書なしでパスキーが使える
+      WEBAUTHN_RP_ID: localhost
+      WEBAUTHN_ORIGINS: http://localhost:8787
+      PORT: '8787'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Create application role and database
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -c "CREATE ROLE misenare LOGIN PASSWORD 'misenare' NOSUPERUSER NOBYPASSRLS"
+          psql -h localhost -U postgres -c "CREATE DATABASE misenare_e2e OWNER misenare"
+      - run: npm install
+      - run: npm run build:web
+      - run: npm run db:migrate
+      - name: Seed demo data
+        run: |
+          mkdir -p e2e-out
+          npm run seed:demo --silent > e2e-out/seed.txt
+          cat e2e-out/seed.txt
+      - name: Start the server
+        run: |
+          npx tsx apps/api/src/server.ts > e2e-out/server.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:8787/health > /dev/null; then echo "起動した"; exit 0; fi
+            sleep 1
+          done
+          echo "::error title=パスキーの通し確認::サーバーが起動しなかった"
+          cat e2e-out/server.log
+          exit 1
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Walk through registration and sign-in
+        run: node apps/web/e2e/passkey.mjs e2e-out
+      - name: Show the server log when it fails
+        if: failure()
+        run: |
+          echo '--- server.log ---'
+          tail -100 e2e-out/server.log || true
+      - name: Keep the screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: passkey-shots
+          path: e2e-out/shots
+          if-no-files-found: warn
+
   # QR コードは作るだけでは「読めるか」が分からない。別実装の読み取り器で往復させて確かめる。
   # ここでしか使わないので、依存には入れず、この場で入れて動かす。
   qr:

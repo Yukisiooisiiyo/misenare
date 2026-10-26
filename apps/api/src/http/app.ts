@@ -545,6 +545,32 @@ export function createApp(deps: AppDeps) {
       return json(result, 201);
     }
 
+    // ログイン前に呼ぶ、パスキーの2本。
+    // 招待リンクと違い、**端末を変えても自分で入り直せる**のがパスキーの値打ちなので、
+    // ここが無いと登録だけできて使えない（登録はログイン後の経路にある）。
+    if (url.pathname === '/auth/passkey/start' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'passkey'), RULES.passkeyLogin))) return tooMany();
+      const site = requireSite();
+      return json(await startLogin((sql, params) => deps.database.raw(sql, params), site));
+    }
+    if (url.pathname === '/auth/passkey/finish' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'passkey'), RULES.passkeyLogin))) return tooMany();
+      const site = requireSite();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      for (const key of ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature', 'userHandle']) {
+        if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+      }
+      const result = await loginWithPasskey(deps.database, site, {
+        credentialId: b.credentialId as string,
+        clientDataJSON: b.clientDataJSON as string,
+        authenticatorData: b.authenticatorData as string,
+        signature: b.signature as string,
+        userHandle: b.userHandle as string,
+        ...(typeof b.deviceName === 'string' ? { deviceName: b.deviceName.slice(0, MAX_DEVICE_NAME) } : {}),
+      });
+      return json(result, 201);
+    }
+
     const matched = router.match(req.method, url.pathname);
     if (matched === undefined) throw new HttpError(404, 'Not Found');
     if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
