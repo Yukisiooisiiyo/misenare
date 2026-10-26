@@ -21,6 +21,43 @@ export const MAX_PHOTOS = 8;
 
 const EXTENSION: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 
+/**
+ * 中身の先頭が、申告した形式と合っているか。
+ *
+ * **申告された形式を信じない。** いまは「JPEG です」と言って別のものを送れる。
+ * 返すときに content-type を申告どおりに付け、nosniff も付けているので、
+ * HTML を送られても動かはしない。それでも先頭を見るのは2つの理由から：
+ *   * 守りを1枚に頼らない（返す側のヘッダーを1つ外した日に、そこが穴になる）
+ *   * 間違いがその場で分かる（HEIC を image/jpeg として送ると、
+ *     全員の画面で写真が壊れて見える。受け取る前に断るほうが親切）
+ *
+ * SVG は最初から受けていない（中に script を書けるので、同じ出どころで開くと動く）。
+ */
+const MAGIC: Record<string, { need: number; test: (b: Uint8Array) => boolean }> = {
+  // JPEG は FF D8 FF で始まる
+  'image/jpeg': { need: 3, test: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  // PNG は 89 'P' 'N' 'G' 0D 0A 1A 0A
+  'image/png': {
+    need: 8,
+    test: (b) => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47
+      && b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a,
+  },
+  // WebP は 'RIFF' …4バイト… 'WEBP'
+  'image/webp': {
+    need: 12,
+    test: (b) => b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+      && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50,
+  },
+};
+
+/** 申告した形式と、中身の先頭が合っているか */
+export function looksLikeDeclared(body: Uint8Array, contentType: string): boolean {
+  const magic = MAGIC[contentType];
+  if (!magic) return false;
+  if (body.byteLength < magic.need) return false;
+  return magic.test(body);
+}
+
 export interface PhotoView {
   id: string;
   /** 閲覧用の場所。API が中身を返す相対パスか、保存先の署名付きURL */
@@ -120,6 +157,9 @@ export async function receivePhoto(db: Db, storage: Storage, actor: Actor, photo
   assert(p.state === 'uploading', 'conflict', 'この写真はもう送られています');
   assert(contentType === p.content_type, 'invalid', '申告した形式と違います');
   assert(body.byteLength > 0 && body.byteLength <= MAX_PHOTO_BYTES, 'invalid', '写真が大きすぎます');
+  // 中身の先頭も見る（申告だけを信じない）
+  assert(looksLikeDeclared(body, p.content_type), 'invalid',
+    '写真として読めませんでした。JPEG・PNG・WebP のまま送ってください');
   await storage.put(p.storage_key, body, p.content_type);
   await db.query(`UPDATE knowledge_photos SET bytes = $2 WHERE id = $1`, [photoId, body.byteLength]);
 }

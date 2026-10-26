@@ -338,7 +338,16 @@ export function productPanel(storeId: string): HTMLElement {
 
 // --- スタッフ -------------------------------------------------------------------------
 
-interface StaffRow { id: string; name: string; trust_level: 'visitor' | 'trusted'; admin_scope: 'none' | 'store' | 'tenant'; status: 'active' | 'disabled'; last_used_at: string | null; devices: number }
+interface StaffRow {
+  id: string; name: string; trust_level: 'visitor' | 'trusted'; admin_scope: 'none' | 'store' | 'tenant';
+  status: 'active' | 'disabled'; last_used_at: string | null; devices: number;
+  /** 会社のアカウント（SSO）のメールアドレス。招待で入った人は無い */
+  email: string | null;
+  /** 会社のアカウントで入っているか。名前は相手の IdP が名乗ったもの */
+  via_sso: boolean;
+  /** この店に同じ名前の人が他にもいるか */
+  same_name: boolean;
+}
 
 export function staffPanel(storeId: string, meId: string): HTMLElement {
   return panel('スタッフ', async (body) => {
@@ -347,8 +356,18 @@ export function staffPanel(storeId: string, meId: string): HTMLElement {
     const draw = (u: StaffRow, row: HTMLElement) => {
       clear(row);
       const role = u.admin_scope === 'tenant' ? '本部' : u.admin_scope === 'store' ? '店長' : u.trust_level === 'trusted' ? 'trusted' : 'visitor';
+      // 同名の人がいるときは、名前だけでは見分けられないことを先に伝える。
+      // 会社のアカウントで入った人の名前は相手の IdP が名乗ったものなので、
+      // 既存の人に似せた名前で入ってくる余地がある。
+      const marks: Node[] = [];
+      if (u.same_name) marks.push(h('span', { class: 'warn-badge', title: 'この店に同じ名前の人がいます' }, '同名あり'));
+      if (u.via_sso) marks.push(h('span', { class: 'pending' }, '会社アカウント'));
       row.append(
-        h('span', {}, h('strong', {}, u.name), u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null),
+        h('span', {},
+          h('strong', {}, u.name),
+          u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null,
+          ...marks,
+          u.email ? h('span', { class: 'staff-email' }, u.email) : null),
         h('span', { class: 'hint' }, `${role}・端末${u.devices}台・${u.last_used_at ? `${relativeDate(u.last_used_at)}に利用` : '未利用'}`),
         u.id === meId || u.admin_scope !== 'none' ? h('span', {}) : h('span', { class: 'row-actions' },
           u.status === 'active'
@@ -446,5 +465,262 @@ export function importPanel(storeId: string): HTMLElement {
       button, file, status, result,
     );
     await drawList();
+  });
+}
+
+interface AccessRequestRow {
+  id: string;
+  email: string;
+  claimedName: string | null;
+  attempts: number;
+  requestedAt: string;
+  lastSeenAt: string;
+  nameTaken: boolean;
+}
+
+/**
+ * 会社のアカウントで入れたが、まだ登録されていない人の申請。
+ *
+ * ここに並ぶのは「その会社の人であることは確かだが、こちらに登録がない」人。
+ * 名前は相手の IdP が名乗ったものなので、**そのまま使わずに直せる形**で出す。
+ * 既存の人と同じ名前なら、その場で知らせる（似せた名前での紛れを防ぐため）。
+ */
+export function accessRequestPanel(
+  stores: Array<{ id: string; name: string }>,
+  currentStoreId: string,
+  /** 決めたあとに数を取り直す（上の帯に出ている件数を合わせるため） */
+  onDecided: () => void = () => {},
+): HTMLElement {
+  return panel('利用の申請', async (body) => {
+    const rows = await api<AccessRequestRow[]>('GET', '/access-requests');
+    body.append(...countedList('承認を待っている人', rows, (r, remove) => {
+      const name = h('input', { type: 'text', value: r.claimedName ?? '', placeholder: '名前',
+        'aria-label': `${r.email} の名前` });
+      const store = h('select', { 'aria-label': `${r.email} の配属先` },
+        ...stores.map((s) => h('option', { value: s.id, ...(s.id === currentStoreId ? { selected: true } : {}) }, s.name)));
+      return h('li', { class: 'row request-row' },
+        h('span', { class: 'request-who' },
+          h('strong', {}, r.email),
+          r.nameTaken
+            ? h('span', { class: 'warn-badge' }, `「${r.claimedName}」は既にいます`)
+            : null,
+          h('span', { class: 'hint' },
+            `${relativeDate(r.requestedAt)}に申請`
+            + (r.attempts > 1 ? `・${r.attempts}回入ろうとしています` : ''))),
+        h('span', { class: 'request-fields' },
+          h('span', { class: 'field' }, h('span', { class: 'hint' }, '名前'), name),
+          h('span', { class: 'field' }, h('span', { class: 'hint' }, '配属先'), store)),
+        h('span', { class: 'row-actions' },
+          action('承認する', 'primary small', async () => {
+            const value = name.value.trim();
+            if (value === '') { toast('名前を入れてください'); return; }
+            await api('POST', `/access-requests/${r.id}/approve`, { storeId: store.value, name: value });
+            toast(`${value}さんを登録しました`);
+            remove();
+            onDecided();
+          }),
+          confirmAction('断る', 'secondary small', `${r.email} の申請を断ります。`,
+            async () => {
+              await api('POST', `/access-requests/${r.id}/reject`);
+              toast('断りました');
+              remove();
+              onDecided();
+            })));
+    }, 'h3'));
+  });
+}
+
+interface DomainRow { domain: string; verified: boolean; token: string }
+
+interface ProviderRow {
+  id: string;
+  issuer: string;
+  clientId: string;
+  hasSecret: boolean;
+  domains: DomainRow[];
+  jitEnabled: boolean;
+  defaultStoreId: string | null;
+  defaultTrust: 'visitor' | 'trusted';
+  disabled: boolean;
+}
+
+/**
+ * ドメインの持ち主であることを確かめる案内。
+ *
+ * 確かめるまで、そのドメインは入口で使われない。確かめないと、
+ * 先に登録した会社が他社の社員の行き先を決められてしまうため。
+ * 情報システム部に頼むものなので、置き場所と値をそのまま写せる形で出す。
+ */
+function domainVerifyBlock(d: DomainRow): HTMLElement {
+  const box = h('div', { class: 'verify-box' });
+  const draw = (detail?: string): void => {
+    clear(box);
+    box.append(
+      h('p', { class: 'warn-badge' }, `${d.domain} は未確認です（このドメインの人はまだ入れません）`),
+      h('p', { class: 'hint' }, 'このドメインの DNS に、次の TXT レコードを1つ置いてください。'),
+      h('pre', { class: 'verify-record' }, `${'_misenare-verify'}.${d.domain}  TXT  misenare-verify=${d.token}`),
+      h('p', { class: 'hint' }, '置いたら下を押してください。反映に数分から数時間かかることがあります。'),
+      ...(detail === undefined ? [] : [h('p', { class: 'error' }, detail)]),
+      action('置けたか確かめる', 'secondary small', async () => {
+        const r = await api<{ verified: boolean; detail?: string }>('POST', '/sso/domains/verify', { domain: d.domain });
+        if (r.verified) {
+          clear(box);
+          box.append(h('p', { class: 'check-ok' }, `${d.domain} を確認しました。このドメインの人が入れるようになりました。`));
+          return;
+        }
+        draw(r.detail ?? '見つかりませんでした');
+      }),
+    );
+  };
+  draw();
+  return box;
+}
+
+/**
+ * 会社のアカウント（SSO）の設定。本部の管理者だけ。
+ *
+ * 相手の情報システム部から渡されるのは、発行元（issuer）・client_id・
+ * 内緒の鍵の3つだけ。残りは相手が公開している設定から取るので、入力欄もこれだけにする。
+ * 項目が増えるほど往復が増えて、導入が止まる。
+ */
+export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLElement {
+  return panel('会社のアカウント（SSO）', async (body) => {
+    const list = h('div');
+    const problem = h('p', { class: 'error', role: 'alert', hidden: true });
+
+    const refresh = async (): Promise<void> => {
+      clear(list);
+      const rows = await api<ProviderRow[]>('GET', '/sso/providers');
+      list.append(...countedList('登録済み', rows.filter((r) => !r.disabled), (r, remove) =>
+        h('li', { class: 'row' },
+          h('span', {},
+            h('strong', {}, r.domains.map((d) => d.domain).join('、') || '（ドメインなし）'),
+            h('span', { class: 'staff-email' }, r.issuer),
+            h('span', { class: 'hint' },
+              `${r.hasSecret ? '内緒の鍵あり' : 'PKCE のみ'}・`
+              + (r.jitEnabled ? '初回に自動で作る' : '初回は申請にする')),
+            // 確かめていないドメインは、入口で使われない。何をすればよいかをその場に出す
+            ...r.domains.filter((d) => !d.verified).map((d) => domainVerifyBlock(d)),
+          ),
+          h('span', { class: 'row-actions' },
+            confirmAction('止める', 'secondary small',
+              `${r.domains.map((x) => x.domain).join('、')} の人は、会社のアカウントで入れなくなります（登録済みの人は招待やパスキーで入れます）。`,
+              async () => { await api('DELETE', `/sso/providers/${r.id}`); toast('止めました'); remove(); }))), 'h3'));
+    };
+
+    const issuer = h('input', { type: 'url', placeholder: 'https://login.microsoftonline.com/.../v2.0',
+      'aria-label': '発行元（issuer）' });
+    const clientId = h('input', { type: 'text', placeholder: 'client_id', 'aria-label': 'client_id' });
+    const secret = h('input', { type: 'password', placeholder: '（PKCE だけで足りるなら空のまま）',
+      autocomplete: 'off', 'aria-label': '内緒の鍵（client_secret）' });
+    const domains = h('input', { type: 'text', placeholder: 'kdenki.example.co.jp',
+      'aria-label': '会社のメールアドレスのドメイン' });
+    const jit = h('input', { type: 'checkbox', id: 'sso-jit' });
+    const store = h('select', { 'aria-label': '自動で作るときの配属先' },
+      ...stores.map((s) => h('option', { value: s.id }, s.name)));
+
+    // つなぎを確かめる。発行元までしか分からないので、何が確かめられていないかも出す。
+    // 「つながりました」だけ出すと、入れる気になって当日に詰まる。
+    const checkResult = h('div', { class: 'check-result', hidden: true });
+    const check = action('つなぎを確かめる', 'secondary', async () => {
+      problem.hidden = true;
+      clear(checkResult);
+      checkResult.hidden = false;
+      checkResult.append(h('p', { class: 'hint' }, '確かめています…'));
+      try {
+        const r = await api<{
+          ok: boolean;
+          steps: Array<{ ok: boolean; label: string; detail?: string }>;
+          remaining: string[];
+        }>('POST', '/sso/check', { issuer: issuer.value.trim() });
+        clear(checkResult);
+        checkResult.append(
+          h('p', { class: r.ok ? 'check-ok' : 'error' },
+            r.ok ? 'ここまでは問題ありません' : 'つながりませんでした'),
+          h('ul', { class: 'check-steps' }, ...r.steps.map((s) =>
+            h('li', { class: s.ok ? 'step-ok' : 'step-ng' },
+              `${s.ok ? '○' : '×'} ${s.label}`,
+              s.detail ? h('span', { class: 'hint' }, s.detail) : null))),
+          ...(r.remaining.length > 0
+            ? [
+                h('p', { class: 'hint' }, 'ここでは確かめられないこと：'),
+                h('ul', { class: 'check-steps' }, ...r.remaining.map((t) => h('li', { class: 'hint' }, `・${t}`))),
+                h('p', {}, '最後は、ご自身で一度「会社のアカウントで入る」をお試しください。'),
+              ]
+            : []),
+        );
+      } catch (e) {
+        clear(checkResult);
+        checkResult.append(h('p', { class: 'error' }, e instanceof Error ? e.message : String(e)));
+      }
+    });
+
+    const add = action('この設定で登録する', 'primary', async () => {
+      problem.hidden = true;
+      try {
+        await api('POST', '/sso/providers', {
+          issuer: issuer.value.trim(),
+          clientId: clientId.value.trim(),
+          clientSecret: secret.value.trim() || null,
+          // 複数のドメインは、読点・カンマ・空白のどれで区切っても受ける
+          domains: domains.value.split(/[、,\s]+/).map((d) => d.trim()).filter((d) => d !== ''),
+          jitEnabled: jit.checked,
+          ...(jit.checked ? { defaultStoreId: store.value } : {}),
+        });
+        toast('登録しました');
+        issuer.value = ''; clientId.value = ''; secret.value = ''; domains.value = '';
+        await refresh();
+      } catch (e) {
+        problem.textContent = e instanceof Error ? e.message : String(e);
+        problem.hidden = false;
+      }
+    });
+
+    // 知らせの送り先。申請が来ても、アプリを開かない日は気づけないので、
+    // 会社の窓口アドレスに送る。Slack を使っていない店舗が多いためメールにしている。
+    const notify = await api<{ notifyEmail: string | null; mailConfigured: boolean }>('GET', '/notify-email');
+    const notifyInput = h('input', { type: 'email', value: notify.notifyEmail ?? '',
+      placeholder: 'joho-system@kdenki.example.co.jp', 'aria-label': '知らせの送り先' });
+    const saveNotify = action('この宛先に知らせる', 'secondary', async () => {
+      const saved = await api<{ notifyEmail: string | null }>('PUT', '/notify-email', { email: notifyInput.value });
+      toast(saved.notifyEmail === null ? '知らせを止めました' : '送り先を決めました');
+    });
+
+    body.append(
+      h('p', { class: 'hint' },
+        '相手の情報システム部から受け取るのは、発行元（issuer）と client_id、必要なら内緒の鍵だけです。'
+        + '残りは相手が公開している設定から自動で読みます。'),
+      h('h3', {}, '申請が来たときの知らせ'),
+      h('p', {}, '利用の申請が来たら、この宛先にメールを送ります。空にすると送りません。'),
+      h('p', { class: 'hint' },
+        '店長が招待QRで入っている場合、こちらにメールアドレスがありません。'
+        + '情報システム部や人事の窓口アドレスを1つ決めて、そこから店舗に回してください。'),
+      ...(notify.mailConfigured
+        ? []
+        : [h('p', { class: 'warn-badge' }, 'いまはメールを送れる設定になっていません（サーバー側の SMTP_HOST と MAIL_FROM が必要です）')]),
+      h('div', { class: 'sso-form' }, h('label', {}, '知らせの送り先', notifyInput)),
+      saveNotify,
+      h('h3', {}, '会社アカウントの設定'),
+      list,
+      h('h3', {}, '設定を足す'),
+      h('div', { class: 'sso-form' },
+        h('label', {}, '発行元（issuer）', issuer),
+        h('label', {}, 'client_id', clientId),
+        h('label', {}, '内緒の鍵（client_secret）', secret),
+        h('label', {}, '会社のメールアドレスのドメイン', domains),
+        h('p', { class: 'hint' }, 'このドメインのアドレスを打った人を、この設定に通します。複数なら読点で区切ってください。'),
+        h('label', { class: 'sso-jit', for: 'sso-jit' }, jit,
+          h('span', {}, '初めて入ってきた人を、申請を挟まず自動で登録する'),
+        ),
+        h('p', { class: 'hint' },
+          '入れないままが既定です。既定では申請になり、「利用の申請」で名前と配属先を決めて承認します。'
+          + '自動で作る場合は、下の店舗に配属され、権限は visitor（投稿は承認を通る）になります。'),
+        h('label', {}, '自動で作るときの配属先', store),
+      ),
+      h('div', { class: 'row-actions' }, check, add),
+      checkResult,
+      problem,
+    );
+    await refresh();
   });
 }

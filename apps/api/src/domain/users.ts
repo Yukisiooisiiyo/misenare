@@ -169,12 +169,23 @@ async function assertCanManageUser(db: Db, actor: Actor, userId: string) {
   assert(m !== undefined, 'forbidden', '自店舗の利用者ではありません');
 }
 
+/**
+ * 店舗のスタッフ一覧。
+ *
+ * **同じ名前の人がいるかどうかを一緒に返す。** 会社のアカウント（SSO）で入った人の
+ * 名前は相手の IdP が名乗ったものをそのまま使うので、既存の人に似せた名前で
+ * 入ってくる余地がある。名前だけを見せていると、店長が見分けられない。
+ * メールアドレスと「会社アカウントで入っているか」も出して、照らし合わせられるようにする。
+ */
 export async function listStoreUsers(db: Db, actor: Actor, storeId: string) {
   assert(canAdminister(actor, storeId), 'forbidden', '利用者の一覧を見られるのは administrator のみです');
   return db.query(
-    `SELECT u.id, u.name, u.trust_level, u.admin_scope, u.status,
+    `SELECT u.id, u.name, u.trust_level, u.admin_scope, u.status, u.email,
             (SELECT max(s.last_used_at)::text FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS last_used_at,
-            (SELECT count(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS devices
+            (SELECT count(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS devices,
+            EXISTS (SELECT 1 FROM sso_identities si WHERE si.user_id = u.id) AS via_sso,
+            -- この店に、生きている同名の人が2人以上いるか
+            count(*) FILTER (WHERE u.status = 'active') OVER (PARTITION BY u.name) > 1 AS same_name
        FROM users u JOIN memberships m ON m.user_id = u.id
       WHERE m.store_id = $1
       ORDER BY u.trust_level DESC, u.name`,

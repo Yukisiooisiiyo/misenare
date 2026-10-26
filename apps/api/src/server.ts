@@ -7,7 +7,14 @@
 //   RATE_LIMIT=db … 試行回数を PostgreSQL で数える（台を増やすとき）
 //   METRICS_TOKEN … /metrics を見るための合言葉（本番では必ず設定する）
 //   ALERT_WEBHOOK_URL … サーバー側のエラーを知らせる先（Slack 互換）
+//   WEBAUTHN_RP_ID / WEBAUTHN_ORIGINS … パスキーを使うなら（ドメインが決まってから）
+//   SSO_REDIRECT_URI … 会社のアカウントで入れるようにするなら
+//
+// 設定の点検は config.ts にある。足りないものは起動のときに声に出し、
+// 黙って壊れるもの（本番で開発用の認証、など）では起動しない。
+// CONFIG_CHECK=off で点検を飛ばせる（手元で試すときだけ）。
 
+import { checkConfig, formatReport } from './config.ts';
 import { chooseTokenizer } from './search/kuromojiTokenizer.ts';
 import type { Database } from './db/db.ts';
 import { assertRlsEnforced } from './db/safety.ts';
@@ -17,6 +24,16 @@ import { serve } from './http/nodeServer.ts';
 import { createSite } from './http/site.ts';
 import { Logger } from './http/observe.ts';
 import { fileURLToPath } from 'node:url';
+
+// 設定の点検を先に行う。足りないものは、動き出す前に言う
+const report = checkConfig();
+if (report.findings.length > 0) {
+  for (const line of formatReport(report)) console.error(`[設定] ${line}`);
+}
+if (report.fatal && process.env.CONFIG_CHECK !== 'off') {
+  console.error('[設定] 上の × を直してから起動してください（CONFIG_CHECK=off で無視できます）');
+  process.exit(78); // EX_CONFIG
+}
 
 const url = process.env.DATABASE_URL;
 if (!url) throw new Error('DATABASE_URL を設定してください');
@@ -51,4 +68,8 @@ logger.info('listening', {
   tokenizer: process.env.TOKENIZER === 'kuromoji' ? 'kuromoji' : 'segmenter',
   photos: process.env.S3_BUCKET ? 's3' : 'local',
   alerts: process.env.ALERT_WEBHOOK_URL ? 'on' : 'off',
+  // どの入口が開いているか。出したあとに「パスキーが出てこない」と言われたとき、
+  // まずここを見れば分かる
+  passkeys: process.env.WEBAUTHN_RP_ID ? 'on' : 'off',
+  sso: process.env.SSO_REDIRECT_URI ? 'on' : 'off',
 });

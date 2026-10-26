@@ -7,8 +7,10 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import {
-  addProvider, emailDomain, finishSso, listProviders, startSso, sweepSsoStates,
+  addProvider, checkConnection, emailDomain, finishSso, listProviders, resetSecretBox, startSso,
+  sweepSsoStates, verifyDomain, VERIFY_PREFIX,
 } from '../src/domain/sso.ts';
+import { generateKey, isSealed } from '../src/crypto/secretBox.ts';
 import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
 import { freshDatabase, hq, manager, STORE_A, T, trusted } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -27,13 +29,17 @@ let directory: OidcDirectory;
 async function setup(over: Partial<Parameters<typeof addProvider>[2]> = {}) {
   idp = fakeIdp();
   directory = new OidcDirectory(idp.fetch);
-  return db.withTenant(T, (q) => addProvider(q, hq, {
+  const added = await db.withTenant(T, (q) => addProvider(q, hq, {
     issuer: idp.issuer,
     clientId: idp.clientId,
     clientSecret: idp.clientSecret,
     domains: ['kdenki.example.co.jp'],
     ...over,
   }));
+  // ドメインは DNS に印を置くまで入口で使われない（なりすまし対策）。
+  // ここでは置けたことにする。印そのものの試験は「ドメインの持ち主…」の節。
+  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
+  return added;
 }
 
 /** 入口から戻りまでを一通り。claims を差し替えて、異常も試せる */
@@ -140,6 +146,7 @@ describe('入口', () => {
 describe('誰として入れるか', () => {
   async function clean() {
     await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM access_requests`);
       await q.query(`DELETE FROM sso_identities`);
       await q.query(`DELETE FROM sso_domains`);
       await q.query(`DELETE FROM sso_providers`);
@@ -150,10 +157,11 @@ describe('誰として入れるか', () => {
     });
   }
 
-  it('登録済みでなければ、既定では断る（自動で作らない）', async () => {
+  it('登録済みでなければ、既定では作らない（申請として受ける）', async () => {
     await setup();
     const { finish } = await roundTrip();
-    await assert.rejects(finish(), /まだ登録されていません/);
+    // 行き止まりにせず、店長が見て決められる形にする（apps/api/test/accessRequests.test.ts）
+    await assert.rejects(finish(), /利用の申請を出しました/);
     await clean();
   });
 
@@ -221,6 +229,7 @@ describe('誰として入れるか', () => {
 describe('相手が名乗ったことを、そのまま信じない', () => {
   async function clean() {
     await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM access_requests`);
       await q.query(`DELETE FROM sso_identities`);
       await q.query(`DELETE FROM sso_domains`);
       await q.query(`DELETE FROM sso_providers`);
@@ -255,9 +264,7 @@ describe('相手が名乗ったことを、そのまま信じない', () => {
     const body = Buffer.from(JSON.stringify(claimsFor(idp, { nonce })), 'utf8').toString('base64url');
     const bare = `${head}.${body}.`;
     const faking = new OidcDirectory(async (url, init) => {
-      if (url.endsWith('/token')) {
-        return new Response(JSON.stringify({ id_token: bare }), { headers: { 'content-type': 'application/json' } });
-      }
+      if (url.endsWith('/token')) return { status: 200, text: JSON.stringify({ id_token: bare }) };
       return idp.fetch(url, init);
     });
     await assert.rejects(finishSso(db, faking, SITE, { code: 'c', state }), /この署名方式は受け付けません/);
@@ -350,19 +357,292 @@ describe('相手の設定と鍵の覚え', () => {
     assert.equal(fetches, 2, '知らない鍵を名乗るトークンで、相手に連打してしまう');
   });
 
+  it('**相手の文書が指す行き先を、そのまま信用しない**', async () => {
+    // ここが本命の穴だった。相手は自分の設定文書に好きな URL を書けるので、
+    // 社内のアドレスやクラウドの鍵置き場を書くだけで、こちらのサーバーが
+    // そこへ取りに行ってしまう（SSRF）。
+    const pointing = (endpoints: Record<string, string>) => new OidcDirectory(async (url) => {
+      if (url.includes('.well-known')) {
+        return { status: 200, text: JSON.stringify({
+          issuer: 'https://idp5.example.com',
+          authorization_endpoint: 'https://idp5.example.com/authorize',
+          token_endpoint: 'https://idp5.example.com/token',
+          jwks_uri: 'https://idp5.example.com/jwks',
+          ...endpoints,
+        }) };
+      }
+      return { status: 200, text: '{"keys":[]}' };
+    });
+
+    // クラウドの鍵置き場
+    await assert.rejects(
+      pointing({ jwks_uri: 'http://169.254.169.254/latest/meta-data/' }).describe('https://idp5.example.com'),
+      /https である必要があります/,
+    );
+    // 社内の画面
+    await assert.rejects(
+      pointing({ token_endpoint: 'http://10.0.0.5:9000/admin' }).describe('https://idp5.example.com'),
+      /https である必要があります/,
+    );
+    // 別の仕組みに手を伸ばす形
+    await assert.rejects(
+      pointing({ jwks_uri: 'file:///etc/passwd' }).describe('https://idp5.example.com'),
+      /https である必要があります/,
+    );
+    // 利用者名を埋め込んで、見間違いを誘う形
+    await assert.rejects(
+      pointing({ authorization_endpoint: 'https://idp5.example.com@10.0.0.5/' }).describe('https://idp5.example.com'),
+      /利用者名や合言葉/,
+    );
+    // まともな設定は通る
+    const okay = await pointing({}).describe('https://idp5.example.com');
+    assert.equal(okay.jwks_uri, 'https://idp5.example.com/jwks');
+  });
+
   it('設定が名乗る発行元が違えば、信用しない', async () => {
     // 発行元の乗っ取り（別の issuer を名乗る設定を返す）を止める
     const lying = new OidcDirectory(async (url) => {
       if (url.includes('.well-known')) {
-        return new Response(JSON.stringify({
+        return { status: 200, text: JSON.stringify({
           issuer: 'https://evil.example.com',
           authorization_endpoint: 'https://evil.example.com/authorize',
           token_endpoint: 'https://evil.example.com/token',
           jwks_uri: 'https://evil.example.com/jwks',
-        }), { headers: { 'content-type': 'application/json' } });
+        }) };
       }
-      return new Response('not found', { status: 404 });
+      return { status: 404, text: 'not found' };
     });
     await assert.rejects(lying.describe('https://idp4.example.com'), /設定の発行元が違います/);
+  });
+});
+
+describe('つなぎを確かめる', () => {
+  async function clean() {
+    await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
+    });
+  }
+
+  it('発行元まで確かめ、確かめられないことは正直に返す', async () => {
+    await setup();
+    const result = await checkConnection(directory, hq, idp.issuer);
+    assert.equal(result.ok, true, JSON.stringify(result.steps));
+    assert.deepEqual(result.steps.map((s) => s.ok), [true, true, true, true, true]);
+    // 「つながりました」で終わらせない。入れる気になって当日に詰まるのを防ぐ
+    assert.ok(result.remaining.some((r) => r.includes('client_id')), result.remaining.join(' / '));
+    await clean();
+  });
+
+  it('打ち間違いは、その場で分かる', async () => {
+    await setup();
+    const typo = await checkConnection(directory, hq, 'https://idp.example.com.typo');
+    assert.equal(typo.ok, false);
+    assert.equal(typo.steps.at(-1)!.label, '相手の設定を読めた');
+    assert.ok(typo.steps.at(-1)!.detail);
+    await clean();
+  });
+
+  it('形が違えば、相手に行く前に止める', async () => {
+    await setup();
+    for (const bad of ['http://idp.example.com', 'https://idp.example.com/?a=1', 'ただの文字']) {
+      const r = await checkConnection(directory, hq, bad);
+      assert.equal(r.ok, false, bad);
+      assert.equal(r.steps.length, 1, `${bad} で相手に行ってしまった`);
+    }
+    await clean();
+  });
+
+  it('PKCE に対応していない相手は、はっきり落とす', async () => {
+    const weak = new OidcDirectory(async (url) => {
+      if (url.includes('.well-known')) {
+        return { status: 200, text: JSON.stringify({
+          issuer: 'https://old.example.com',
+          authorization_endpoint: 'https://old.example.com/authorize',
+          token_endpoint: 'https://old.example.com/token',
+          jwks_uri: 'https://old.example.com/jwks',
+          code_challenge_methods_supported: ['plain'],
+        }) };
+      }
+      return { status: 200, text: JSON.stringify({ keys: [{ kty: 'RSA', kid: 'k' }] }) };
+    });
+    const r = await checkConnection(weak, hq, 'https://old.example.com');
+    assert.equal(r.ok, false);
+    assert.ok(r.steps.find((s) => s.label.includes('PKCE'))?.detail?.includes('対応していません'));
+  });
+
+  it('本部の管理者以外は確かめられない（外に取りに行く経路なので）', async () => {
+    await setup();
+    await assert.rejects(checkConnection(directory, manager, idp.issuer), /本部の管理者/);
+    await assert.rejects(checkConnection(directory, trusted, idp.issuer), /本部の管理者/);
+    await clean();
+  });
+});
+
+describe('ドメインの持ち主であることを確かめる', () => {
+  async function clean() {
+    await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
+    });
+  }
+
+  it('**確かめていないドメインは、入口で使われない**', async () => {
+    // ここが塞げていないと、先に登録した会社が他社の社員の行き先を決められる。
+    // 本物に似せた入力欄に送れば、合言葉を取られる。
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL`));
+    await assert.rejects(
+      startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' }),
+      /まだ用意されていません/,
+    );
+    // 確かめ済みにすれば使える
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
+    const okay = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+    assert.ok(okay.authorizeUrl);
+    await clean();
+  });
+
+  it('DNS に印が置けていれば、確かめ済みになる', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    const [row] = await db.withTenant(T, (q) => q.query<{ verify_token: string }>(
+      `SELECT verify_token FROM sso_domains WHERE domain = $1`, ['kdenki.example.co.jp']));
+    const token = row!.verify_token;
+    assert.match(token, /^[0-9a-f]{32}$/);
+
+    const result = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
+      async (name) => {
+        assert.equal(name, `${VERIFY_PREFIX}.kdenki.example.co.jp`);
+        // TXT は分割されて返ることがあるので、つないで比べられること
+        return [['misenare-verify=', token]];
+      }));
+    assert.equal(result.verified, true, result.detail ?? "");
+    // 使えるようになる
+    assert.ok(await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' }));
+    await clean();
+  });
+
+  it('印が違えば、確かめ済みにしない', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    const wrong = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
+      async () => [['misenare-verify=ちがう印']]));
+    assert.equal(wrong.verified, false);
+    assert.ok(wrong.detail?.includes('別の値'), wrong.detail ?? '');
+
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET checked_at = NULL`));
+    const missing = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp', async () => []));
+    assert.equal(missing.verified, false);
+    assert.ok(missing.detail?.includes('見つかりません'), missing.detail ?? '');
+    await clean();
+  });
+
+  it('引けなくても落ちない（置いた直後は反映待ち）', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    const result = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
+      async () => { throw new Error('ENOTFOUND'); }));
+    assert.equal(result.verified, false);
+    assert.ok(result.detail?.includes('反映'), result.detail ?? '');
+    await clean();
+  });
+
+  it('連打しても DNS を叩き続けない', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    let asked = 0;
+    const ask = () => db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
+      async () => { asked++; return []; }));
+    await ask();
+    await ask();
+    await ask();
+    assert.equal(asked, 1, 'DNS を何度も引いている');
+    await clean();
+  });
+
+  it('置き場所と値を返す（画面に出して、情報システム部に頼むため）', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    const result = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp', async () => []));
+    assert.equal(result.record.name, '_misenare-verify.kdenki.example.co.jp');
+    assert.equal(result.record.type, 'TXT');
+    assert.match(result.record.value, /^misenare-verify=[0-9a-f]{32}$/);
+    await clean();
+  });
+
+  it('本部の管理者以外は確かめられない', async () => {
+    await setup();
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(verifyDomain(q, manager, 'kdenki.example.co.jp', async () => []), /本部の管理者/);
+      await assert.rejects(verifyDomain(q, trusted, 'kdenki.example.co.jp', async () => []), /本部の管理者/);
+    });
+    await clean();
+  });
+});
+
+describe('内緒の鍵の置き方', () => {
+  async function clean() {
+    await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
+    });
+  }
+
+  it('**DB には包まれた形で入り、使うときに開かれる**', async () => {
+    process.env.MISENARE_SECRET_KEYS = `k1:${generateKey()}`;
+    resetSecretBox();
+    try {
+      const added = await setup();
+      // DB を直に見て、そのままの形で入っていないことを確かめる
+      const [row] = await db.withTenant(T, (q) => q.query<{ client_secret: string }>(
+        `SELECT client_secret FROM sso_providers WHERE id = $1`, [added.id]));
+      assert.ok(isSealed(row!.client_secret), '包まれていない');
+      assert.ok(!row!.client_secret.includes('とても内緒'), '中身が見えている');
+
+      // 使うときは開かれる（引換券の交換が通る＝開けている）
+      await db.withTenant(T, (q) => q.query(
+        `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+      const { finish } = await roundTrip();
+      const result = await finish();
+      assert.equal(result.userId, trusted.userId);
+      assert.ok(idp.lastAuthorization?.startsWith('Basic '), '内緒の鍵を送れていない');
+      const pair = Buffer.from(idp.lastAuthorization!.slice(6), 'base64').toString('utf8');
+      assert.ok(pair.includes(encodeURIComponent('とても内緒')), pair);
+    } finally {
+      await clean();
+      delete process.env.MISENARE_SECRET_KEYS;
+      resetSecretBox();
+    }
+  });
+
+  it('鍵を決めていなければ、そのままの形で入る（古い動きのまま）', async () => {
+    const added = await setup();
+    const [row] = await db.withTenant(T, (q) => q.query<{ client_secret: string }>(
+      `SELECT client_secret FROM sso_providers WHERE id = $1`, [added.id]));
+    assert.equal(isSealed(row!.client_secret), false);
+    await clean();
+  });
+
+  it('包んだあとに鍵を外すと、黙って壊れずに止まる', async () => {
+    process.env.MISENARE_SECRET_KEYS = `k1:${generateKey()}`;
+    resetSecretBox();
+    let added;
+    try {
+      added = await setup();
+    } finally {
+      delete process.env.MISENARE_SECRET_KEYS;
+      resetSecretBox();
+    }
+    try {
+      await db.withTenant(T, (q) => q.query(
+        `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+      const { finish } = await roundTrip();
+      // 「鍵が無い」とはっきり言う。黙って空の鍵で交換を試みない
+      await assert.rejects(finish(), /鍵がありません/);
+    } finally {
+      assert.ok(added);
+      await clean();
+    }
   });
 });

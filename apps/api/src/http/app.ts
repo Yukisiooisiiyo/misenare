@@ -90,12 +90,17 @@ import {
 } from '../domain/users.ts';
 import { OidcDirectory } from '../auth/oidc.ts';
 import {
-  addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
-  type SsoSite,
+  approveRequest, getNotifySettings, listRequests, rejectRequest, requestBadge, setNotifyEmail,
+} from '../domain/accessRequests.ts';
+import { mailerFromEnv, noMailer } from '../mail/mailer.ts';
+import {
+  addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
+  verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
+import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
-import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter } from './rateLimit.ts';
+import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
 
@@ -105,7 +110,10 @@ interface Ctx {
   db: Db;
   tokenizer: Tokenizer;
   storage: Storage;
-  /** 会社に属さないテーブル（合言葉など）を触るため */
+  /** 相手の IdP とのやり取り（設定と鍵の覚えを共有するため、1つを回す） */
+  oidc: OidcDirectory;
+  /** 回数を止める。外に取りに行く経路で使う */
+  limit: (req: Request, name: string, rule: RateRule) => Promise<boolean>;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -273,6 +281,14 @@ function requireSsoSite(): SsoSite {
 /** テスト用：設定を読み直す */
 export function resetSsoSite(): void { cachedSsoSite = undefined; }
 
+/**
+ * メールを送れる設定になっているか。
+ * 送り先を入れても届かない状態を、画面で知らせるために見る。
+ */
+function mailConfigured(): boolean {
+  return mailerFromEnv() !== noMailer;
+}
+
 function routes(): Router<Ctx> {
   const r = new Router<Ctx>();
 
@@ -412,6 +428,9 @@ function routes(): Router<Ctx> {
   r.get('/stores/:storeId/badges', async (c, _req, p) => json({
     notices: await noticeBadge(c.db, c.actor, p.storeId!),
     handovers: await handoverBadge(c.db, c.actor, p.storeId!),
+    // 利用の申請は店舗に紐づかない（配属先は承認のときに決める）が、
+    // 気づく場所はホームが一番早いので、ここに混ぜて返す
+    accessRequests: await requestBadge(c.db, c.actor),
   }));
 
   // --- 既存マニュアルの取り込み ---------------------------------------------
@@ -501,6 +520,47 @@ function routes(): Router<Ctx> {
   });
   r.delete('/sso/providers/:providerId', async (c, _req, p) =>
     json(await disableProvider(c.db, c.actor, p.providerId!)));
+  // ドメインの持ち主であることを確かめる。DNS を引くので回数を止める
+  r.post('/sso/domains/verify', async (c, req) => {
+    if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
+      throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
+    }
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.domain !== 'string') throw new HttpError(400, 'domain が必要です');
+    return json(await verifyDomain(c.db, c.actor, b.domain, (name) => dnsResolveTxt(name)));
+  });
+  // つなぎを確かめる。外に取りに行くので、本部の管理者だけ・回数も止める
+  r.post('/sso/check', async (c, req) => {
+    if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
+      throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
+    }
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.issuer !== 'string') throw new HttpError(400, 'issuer が必要です');
+    return json(await checkConnection(c.oidc, c.actor, b.issuer));
+  });
+
+  // --- 利用の申請（会社アカウントで入れたが、登録がまだの人） ------------------
+  r.get('/access-requests', async (c) => json(await listRequests(c.db, c.actor)));
+  r.post('/access-requests/:requestId/approve', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.storeId !== 'string') throw new HttpError(400, '配属する店舗が必要です');
+    return json(await approveRequest(c.db, c.actor, p.requestId!, {
+      storeId: b.storeId,
+      ...(typeof b.name === 'string' ? { name: b.name } : {}),
+      ...(b.trustLevel === 'trusted' || b.trustLevel === 'visitor' ? { trustLevel: b.trustLevel } : {}),
+    }), 201);
+  });
+  r.post('/access-requests/:requestId/reject', async (c, _req, p) =>
+    json(await rejectRequest(c.db, c.actor, p.requestId!)));
+
+  // 知らせの送り先（本部の管理者だけ）
+  r.get('/notify-email', async (c) => json(await getNotifySettings(c.db, c.actor, mailConfigured())));
+  r.put('/notify-email', async (c, req) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const value = typeof b.email === 'string' ? b.email : null;
+    const saved = await setNotifyEmail(c.db, c.actor, value);
+    return json({ ...saved, mailConfigured: mailConfigured() });
+  });
   r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
 
   // --- 利用者・端末 ---------------------------------------------------------
@@ -671,7 +731,10 @@ export function createApp(deps: AppDeps) {
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
       matched.handler(
-        { actor, identity, db, tokenizer: deps.tokenizer, storage },
+        {
+          actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
+          limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
+        },
         req,
         matched.params,
       ),

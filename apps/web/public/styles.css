@@ -339,3 +339,50 @@ button.tag { cursor: pointer; }
 /* ホームの足元から「この端末の設定」へ */
 .home-foot { margin-top: 32px; font-size: 14px; }
 .home-foot a { color: var(--ink-soft); }
+
+/* スタッフ一覧：同名の注意と、会社アカウントのメールアドレス */
+.warn-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  font-size: 11px; font-weight: 700; color: #7A3E00; background: #FFE2B8;
+}
+@media (prefers-color-scheme: dark) {
+  .warn-badge { color: #FFD9A0; background: #4A2D00; }
+}
+.staff-email { display: block; color: var(--ink-soft); font-size: 12px; word-break: break-all; }
+
+/* 利用の申請：メールアドレスと、承認時に直せる名前・配属先 */
+.request-row { align-items: flex-start; }
+.request-who { display: flex; flex-direction: column; gap: 2px; }
+.request-fields { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.request-fields .field { display: flex; flex-direction: column; gap: 2px; }
+.request-fields input, .request-fields select { font: inherit; padding: 6px 8px; min-width: 120px; }
+
+/* ホームの知らせが2行になることがあるので、縦に並べる */
+.home-alert a { display: block; }
+.home-alert a + a { margin-top: 6px; }
+
+/* 会社のアカウントの設定フォーム */
+.sso-form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; }
+.sso-form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; font-weight: 700; }
+.sso-form input[type="url"], .sso-form input[type="text"], .sso-form input[type="password"], .sso-form select {
+  font: inherit; font-weight: 400; padding: 8px; width: 100%; box-sizing: border-box;
+}
+.sso-form .sso-jit { flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 400; }
+.sso-form .sso-jit input { margin-top: 3px; }
+
+/* つなぎを確かめた結果 */
+.check-result { margin: 10px 0; font-size: 14px; }
+.check-ok { color: var(--sign); font-weight: 700; }
+.check-steps { list-style: none; padding: 0; margin: 6px 0; }
+.check-steps li { padding: 3px 0; }
+.check-steps .step-ng { color: #B3261E; }
+@media (prefers-color-scheme: dark) { .check-steps .step-ng { color: #FFB4AB; } }
+.check-steps .hint { display: block; padding-left: 1.3em; }
+
+/* ドメインの確認の案内。情報システム部にそのまま写せるように */
+.verify-box { margin: 8px 0; padding: 10px; border-radius: 6px; background: rgba(127, 127, 127, 0.1); }
+.verify-record {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  overflow-x: auto; padding: 8px; margin: 6px 0; background: var(--paper); border-radius: 4px;
+  -webkit-user-select: all; user-select: all;
+}

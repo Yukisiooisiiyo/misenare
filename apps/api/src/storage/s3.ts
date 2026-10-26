@@ -69,6 +69,17 @@ export interface PresignOptions {
   /** 有効時間（秒）。最大7日 */
   expiresIn: number;
   now: Date;
+  /**
+   * 署名に含める Content-Type。
+   *
+   * **含めないと、端末が好きな形式で保存できる。** S3 は送られてきた
+   * Content-Type をそのまま覚えて、読むときもそのまま返す。しかも S3 の答えには
+   * nosniff が付かないので、`text/html` で上げられると、会社のドメインの下に
+   * 好きな中身を置けることになる（写真の中身はサーバーを通らないので、
+   * こちら側で先頭を見て確かめることもできない）。
+   * だから、置いてよい形式を署名に焼き込む。違う形式で送れば S3 が断る。
+   */
+  contentType?: string;
 }
 
 /** S3 の署名付きURLを作る */
@@ -77,12 +88,18 @@ export function presignS3(config: S3Config, method: 'GET' | 'PUT' | 'DELETE', ke
   const { host, origin, pathPrefix } = hostOf(config);
   const scope = `${date}/${config.region}/${SERVICE}/aws4_request`;
 
+  // 署名に含めるヘッダー。名前は小文字で、名前の順に並べる決まり
+  const signed: Array<[string, string]> = [['host', host]];
+  if (opts.contentType !== undefined) signed.push(['content-type', opts.contentType]);
+  signed.sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  const signedNames = signed.map(([k]) => k).join(';');
+
   const query: Array<[string, string]> = [
     ['X-Amz-Algorithm', ALGORITHM],
     ['X-Amz-Credential', `${config.accessKeyId}/${scope}`],
     ['X-Amz-Date', dateTime],
     ['X-Amz-Expires', String(opts.expiresIn)],
-    ['X-Amz-SignedHeaders', 'host'],
+    ['X-Amz-SignedHeaders', signedNames],
   ];
   if (config.sessionToken) query.push(['X-Amz-Security-Token', config.sessionToken]);
 
@@ -94,7 +111,9 @@ export function presignS3(config: S3Config, method: 'GET' | 'PUT' | 'DELETE', ke
     .join('&');
 
   const canonicalPath = `${pathPrefix}/${encodeKey(key)}`;
-  const canonicalRequest = [method, canonicalPath, canonicalQuery, `host:${host}\n`, 'host', 'UNSIGNED-PAYLOAD'].join('\n');
+  // 値の前後の空白は落とし、中の連続した空白は1つにまとめる決まり
+  const canonicalHeaders = signed.map(([k, v]) => `${k}:${v.trim().replace(/\s+/g, ' ')}\n`).join('');
+  const canonicalRequest = [method, canonicalPath, canonicalQuery, canonicalHeaders, signedNames, 'UNSIGNED-PAYLOAD'].join('\n');
   const stringToSign = [ALGORITHM, dateTime, scope, sha256(canonicalRequest)].join('\n');
   const signature = hmac(signingKey(config.secretAccessKey, date, config.region), stringToSign).toString('hex');
 

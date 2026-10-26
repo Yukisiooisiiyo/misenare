@@ -10,6 +10,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import type { Jwk } from './jwt.ts';
+import { FetchRefused, requireSafeUrl, safeFetch, type SafeResponse } from './safeFetch.ts';
 
 /** 設定と鍵を覚えておく時間。相手が鍵を入れ替えてもこの時間で追いつく */
 export const CACHE_TTL_MS = 60 * 60_000;
@@ -25,7 +26,16 @@ export interface Discovery {
   code_challenge_methods_supported?: string[];
 }
 
-export type Fetch = (url: string, init?: RequestInit) => Promise<Response>;
+/**
+ * 外に取りに行く口。**既定は安全な口（safeFetch）**。
+ *
+ * ここを差し替えられるようにしているのは試験のため（偽の IdP を相手にする）。
+ * 本番で通るのは safeFetch だけで、社内のアドレスや付け替えは全部そこで止まる。
+ */
+export type Fetch = (url: string, init?: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string })
+  => Promise<SafeResponse>;
+
+const defaultFetch: Fetch = (url, init) => safeFetch({ url, ...(init ?? {}) });
 
 export class OidcError extends Error {}
 
@@ -42,7 +52,7 @@ export class OidcDirectory {
   private readonly keys = new Map<string, KeyEntry>();
 
   constructor(
-    private readonly fetchImpl: Fetch = fetch,
+    private readonly fetchImpl: Fetch = defaultFetch,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -52,15 +62,15 @@ export class OidcDirectory {
   }
 
   private async getJson(url: string, what: string): Promise<unknown> {
-    let res: Response;
+    let res: SafeResponse;
     try {
       res = await this.fetchImpl(url, { headers: { accept: 'application/json' } });
     } catch (err) {
       throw new OidcError(`${what}を取得できませんでした: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (!res.ok) throw new OidcError(`${what}を取得できませんでした（${res.status}）`);
+    if (res.status < 200 || res.status >= 300) throw new OidcError(`${what}を取得できませんでした（${res.status}）`);
     try {
-      return await res.json();
+      return JSON.parse(res.text);
     } catch {
       throw new OidcError(`${what}の形が読めません`);
     }
@@ -77,6 +87,20 @@ export class OidcDirectory {
     }
     // 設定自身が名乗る発行元が、登録した発行元と違うなら信用しない
     if (json.issuer !== base) throw new OidcError(`相手の設定の発行元が違います: ${json.issuer}`);
+
+    // **相手の文書に書かれた行き先を、そのまま信用しない。**
+    // ここを確かめずに従うと、相手が「社内のこのアドレスへ取りに行け」と
+    // 書くだけで、こちらのサーバーが社内を触ることになる（safeFetch の冒頭に詳しく）。
+    // 実際につなぐときにも safeFetch が同じ確かめをするが、**設定を入れた時点で
+    // 断る**ほうがよい。入れた人に、その場で理由を返せる。
+    for (const key of ['authorization_endpoint', 'token_endpoint', 'jwks_uri'] as const) {
+      try {
+        requireSafeUrl(json[key]!, `相手の設定の ${key}`);
+      } catch (err) {
+        throw new OidcError(err instanceof FetchRefused ? err.message : String(err));
+      }
+    }
+
     const value = json as Discovery;
     this.discovery.set(base, { value, at: this.now() });
     return value;
@@ -144,20 +168,20 @@ export class OidcDirectory {
       const pair = `${encodeURIComponent(input.clientId)}:${encodeURIComponent(input.clientSecret)}`;
       headers.authorization = `Basic ${Buffer.from(pair, 'utf8').toString('base64')}`;
     }
-    let res: Response;
+    let res: SafeResponse;
     try {
       res = await this.fetchImpl(endpoint, { method: 'POST', headers, body: body.toString() });
     } catch (err) {
       throw new OidcError(`引換券を交換できませんでした: ${err instanceof Error ? err.message : String(err)}`);
     }
-    const text = await res.text();
     let json: { id_token?: unknown; error?: unknown; error_description?: unknown };
     try {
-      json = JSON.parse(text);
+      json = JSON.parse(res.text);
     } catch {
       throw new OidcError(`引換券の交換の答えが読めません（${res.status}）`);
     }
-    if (!res.ok || typeof json.id_token !== 'string') {
+    const ok = res.status >= 200 && res.status < 300;
+    if (!ok || typeof json.id_token !== 'string') {
       const detail = typeof json.error_description === 'string' ? json.error_description
         : typeof json.error === 'string' ? json.error : `${res.status}`;
       throw new OidcError(`引換券を交換できませんでした: ${detail}`);

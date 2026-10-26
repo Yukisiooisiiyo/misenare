@@ -4,7 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
+import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
@@ -48,6 +48,8 @@ async function boot(): Promise<void> {
   if (me.stores.length === 0) return renderFatal(new Error('所属している店舗がありません。店長に確認してください。'));
   if (!session.storeId || !me.stores.some((s) => s.id === session.storeId)) session.storeId = me.stores[0]!.id;
   await loadDictionary();
+  // 数は最初に1回取る。ホーム以外から開いた人にも、上の帯に申請の数が出るようにするため
+  await refreshBadges();
   window.addEventListener('hashchange', route);
   route();
 }
@@ -234,7 +236,12 @@ function shell(tab: Tab | null, ...content: Node[]): void {
           route();
         } }, ...me.stores.map((s) => h('option', { value: s.id, ...(s.id === session.storeId ? { selected: true } : {}) }, s.name)))
       : h('span', { class: 'store-name' }, store?.name ?? ''),
-    isTrusted() ? h('a', { href: '#/manage', class: 'topbar-link' }, '承認・管理') : null,
+    // 申請の数は、ホームだけでなく上の帯にも出す。どの画面にいても目に入るようにするため
+    isTrusted() ? h('a', { href: '#/manage', class: 'topbar-link' }, '承認・管理',
+      (badges?.accessRequests?.pending ?? 0) > 0
+        ? h('span', { class: 'tab-count', 'aria-label': `利用の申請が${badges!.accessRequests.pending}件` },
+            String(badges!.accessRequests.pending))
+        : null) : null,
   ) : null;
   const nav = me ? h('nav', { class: 'tabbar', 'aria-label': '画面の切り替え' },
     navLink('#/home', 'ホーム', tab === 'home'),
@@ -256,6 +263,17 @@ let badges: Badges | null = null;
 function badgeCount(): number {
   if (!badges) return 0;
   return badges.notices.unread + badges.notices.needsAck + badges.handovers.open;
+}
+
+/** 上の帯の「承認・管理」に出す件数を、いまの数に合わせる */
+function updateManageCount(): void {
+  const link = document.querySelector('.topbar-link');
+  if (!link) return;
+  link.querySelector('.tab-count')?.remove();
+  const pending = badges?.accessRequests?.pending ?? 0;
+  if (pending > 0) {
+    link.append(h('span', { class: 'tab-count', 'aria-label': `利用の申請が${pending}件` }, String(pending)));
+  }
 }
 
 /** 数を取り直して、タブの表示を更新する */
@@ -322,11 +340,18 @@ async function renderHome(): Promise<void> {
         : `引き継ぎが${badges.handovers.open}件`);
     }
   }
+  clear(alert);
   if (parts.length > 0) {
-    clear(alert);
     alert.append(h('a', { href: '#/notices' }, `${parts.join('、')}あります`));
-    alert.hidden = false;
   }
+  // 利用の申請は、待っている人がいる話なので別の行で出す。
+  // 承認・管理を開かないと気づけないと、申請した人がいつまでも入れない。
+  const pending = badges?.accessRequests?.pending ?? 0;
+  if (pending > 0) {
+    alert.append(h('a', { href: '#/manage', class: 'alert-request' },
+      `利用の申請が${pending}件あります（承認すると使えるようになります）`));
+  }
+  alert.hidden = alert.childNodes.length === 0;
 }
 
 // --- 連絡 -------------------------------------------------------------------------
@@ -744,7 +769,15 @@ async function renderManage(): Promise<void> {
             action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
     );
     section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
-    if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
+    if (isAdmin()) {
+      section.append(
+        accessRequestPanel(me!.stores, storeId(), () => { void refreshBadges().then(updateManageCount); }),
+        staffPanel(storeId(), me!.id),
+        inviteForm(),
+      );
+      // 会社のアカウントの設定は本部だけ（会社全体に効くため）
+      if (me!.adminScope === 'tenant') section.append(ssoPanel(me!.stores));
+    }
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
   }

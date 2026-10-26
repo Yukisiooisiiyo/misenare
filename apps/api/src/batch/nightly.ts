@@ -18,6 +18,8 @@ import { closeStaleHandovers } from '../domain/handovers.ts';
 import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
 import { sweepChallenges } from '../domain/passkeys.ts';
+import { digestMail, markNotified, pendingDigest, shouldNotify } from '../domain/accessRequests.ts';
+import { mailerFromEnv, type Mailer } from '../mail/mailer.ts';
 import { sweepSsoStates } from '../domain/sso.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
 import type { Storage } from '../storage/storage.ts';
@@ -33,6 +35,10 @@ export interface BatchOptions {
   candidateProviders?: CandidateProvider[];
   /** 写真の保存先（送りかけのまま残った中身を片付けるのに使う） */
   storage?: Storage;
+  /** メールの送り口（試験では偽の送り口を差し込む） */
+  mailer?: Mailer;
+  /** 知らせの文面に入れる、画面の宛先 */
+  appUrl?: string;
 }
 
 /**
@@ -56,6 +62,8 @@ export interface TenantReport {
   sweptPhotos: number;
   /** 持ち越しの期間を過ぎた引き継ぎ */
   closedHandovers: number;
+  /** 本部に知らせを送ったか（送る必要がなければ false） */
+  notifiedRequests: boolean;
 }
 
 /**
@@ -140,10 +148,15 @@ async function candidatesFromPickedLogs(db: Db, tenantId: string, threshold: num
 async function candidatesFromProviders(db: Db, tenantId: string, providers: CandidateProvider[]): Promise<number> {
   if (providers.length === 0) return 0;
   const tags = await db.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE state = 'active'`);
+  // **外の仕組みが返した ID を、そのまま入れない。** 渡したタグの中のものだけを受ける。
+  // 行レベルセキュリティは tenant_id しか見ないので、他社のタグの ID を返されると
+  // 「自社の行から他社のタグを指す」関係ができてしまう。
+  const known = new Set(tags.map((t) => t.id));
   let created = 0;
   for (const p of providers) {
     for (const c of await p.propose(tags)) {
       if (c.fromTagId === c.toTagId) continue;
+      if (!known.has(c.fromTagId) || !known.has(c.toTagId)) continue;
       const rows = await db.query(
         `INSERT INTO tag_relations (tenant_id, kind, from_tag_id, to_tag_id, state, source, evidence)
          SELECT $1, $2, $3, $4, 'candidate', $5, $6
@@ -204,7 +217,22 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
               AND greatest(k.verified_at, v.edited_at) < now() - make_interval(days => $1)`,
           [STALE_DAYS],
         );
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers };
+        // 本部への知らせ。**送るのは取引（トランザクション）の外**にしたいところだが、
+        // 送った印を同じ取引で付けないと、送ってから落ちたときに二重に送る。
+        // 送信の失敗で印だけ残るほうがまし（次の晩に送り直せる）なので、ここで送る。
+        const digest = await pendingDigest(db);
+        let notifiedRequests = false;
+        if (shouldNotify(digest)) {
+          const mail = digestMail(digest, options.appUrl ?? process.env.APP_URL ?? 'http://localhost:8787');
+          try {
+            notifiedRequests = await (options.mailer ?? mailerFromEnv()).send({ to: [digest.to!], ...mail });
+            if (notifiedRequests) await markNotified(db);
+          } catch (err) {
+            // 送れなくても夜間バッチは止めない（次の晩に送り直す）
+            console.error(`tenant ${tenantId}: 利用の申請の知らせを送れませんでした`, err);
+          }
+        }
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, notifiedRequests };
       });
       reports.push(report);
     } catch (err) {
@@ -224,7 +252,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const { assertRlsEnforced } = await import('../db/safety.ts');
   await assertRlsEnforced((sql) => database.raw(sql));
   const { storageFromEnv } = await import('../storage/storage.ts');
-  const reports = await runNightly(database, await chooseTokenizer(), { storage: storageFromEnv() });
+  const reports = await runNightly(database, await chooseTokenizer(), {
+    storage: storageFromEnv(),
+    mailer: mailerFromEnv(),
+  });
   console.log(JSON.stringify(reports, null, 2));
   await database.close();
 }
