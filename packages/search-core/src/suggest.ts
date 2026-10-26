@@ -1,7 +1,7 @@
 // 入力中のタグ候補と「もしかして：」。端末にタグ辞書を同期し、この関数を端末内で動かす想定。
 
 import { hiraToKata, toReadingKey } from './kana.ts';
-import { normalizeTagName } from './normalize.ts';
+import { foldTerm, normalizeTagName } from './normalize.ts';
 import type { TagDictionary, TagEntry } from './tagDictionary.ts';
 
 export interface SuggestInput {
@@ -30,7 +30,7 @@ function prefixMatches(tag: TagEntry, key: string, readingKey: string): boolean 
   if (tag.name.startsWith(key)) return true;
   if (readingKey.length === 0) return false;
   if (hiraToKata(tag.name).startsWith(readingKey)) return true;
-  return tag.reading != null && tag.reading.startsWith(readingKey);
+  return (tag.readings ?? []).some((r) => r.startsWith(readingKey));
 }
 
 /** 制限付き Damerau–Levenshtein 距離（隣接文字の入れ替えを1と数える）。 */
@@ -64,6 +64,9 @@ export function suggestTags(req: SuggestInput): SuggestResult {
   if (key.length === 0) return { candidates: [], maybe: [] };
   const readingKey = toReadingKey(key);
   const selected = new Set(req.selectedTagIds ?? []);
+  // 別名と読みからの前方一致。打った言葉と出てくるタグの字面が違ってもよい。
+  const viaPhrase = dict.phrasePrefixMatches(foldTerm(key));
+  for (const id of dict.phrasePrefixMatches(foldTerm(readingKey))) viaPhrase.add(id);
 
   // 1. 過去に登録されたタグから前方一致で探す
   const affinity = (tag: TagEntry): number => {
@@ -72,7 +75,7 @@ export function suggestTags(req: SuggestInput): SuggestResult {
     return best;
   };
   const candidates = [...dict.tags.values()]
-    .filter((t) => !selected.has(t.id) && prefixMatches(t, key, readingKey))
+    .filter((t) => !selected.has(t.id) && (prefixMatches(t, key, readingKey) || viaPhrase.has(t.id)))
     .map((t) => ({
       t,
       // 完全一致 > 一緒に使われやすさ > 使用回数

@@ -1,5 +1,7 @@
 // 文字列の正規化。索引側と検索側で必ず同じ関数を通す。
 
+import { hiraToKata } from './kana.ts';
+
 /** 全角英数→半角、半角カナ→全角（NFKC）、英字は小文字、空白は1つにまとめる。 */
 export function normalizeText(text: string): string {
   return text.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -26,4 +28,18 @@ export function extractModelNumbers(normalized: string): { modelNumbers: string[
     return ' ';
   });
   return { modelNumbers, rest };
+}
+
+/**
+ * 検索語の畳み込み。ひらがなをカタカナに寄せる。
+ *
+ * 「てれび」と「テレビ」を同じ語として扱うための最後の一手で、
+ * **索引側と検索側の両方で必ず通すこと**。片方だけに掛けると、
+ * 入れたはずのナレッジが当たらなくなる。
+ *
+ * 漢字とかなの揺れ（冷蔵庫／れいぞうこ）はここでは寄らない。
+ * それはタグの読みと別名で受ける。
+ */
+export function foldTerm(term: string): string {
+  return hiraToKata(term);
 }

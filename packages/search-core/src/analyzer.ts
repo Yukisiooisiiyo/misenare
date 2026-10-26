@@ -1,6 +1,6 @@
 // 文書と検索文を、同じ規則で検索語に変換する。
 
-import { extractModelNumbers, normalizeTagName, normalizeText } from './normalize.ts';
+import { extractModelNumbers, foldTerm, normalizeTagName, normalizeText } from './normalize.ts';
 import type { TagDictionary } from './tagDictionary.ts';
 import { filterTerms, type Tokenizer } from './tokenizer.ts';
 
@@ -25,6 +25,7 @@ export interface AnalyzeDeps {
  * 2. 型番を1語として取り出す
  * 3. タグ名・別名を最長一致で拾い、タグ名として加える（「映らない」→ 修理）
  * 4. 残り全体を単語に区切り、機能語を除く
+ * 5. すべての語をカナに畳む（「てれび」＝「テレビ」）。索引側と検索側の両方で通す。
  *
  * splitTagSpans
  *   true （文書側）: タグに一致した部分も単語に分ける。「保証」だけの検索でも「延長保証」を含む文書に当たる。
@@ -50,11 +51,12 @@ function scanText(text: string, deps: AnalyzeDeps, splitTagSpans: boolean): { te
   if (splitTagSpans) {
     // タグに一致した部分も単語に分けて加える。ただしタグ名そのものと同じ語は二重に数えない
     for (const span of scan.spans) {
-      const name = deps.dictionary.tags.get(span.tagId)!.name;
-      for (const w of filterTerms(deps.tokenizer.segment(span.text))) if (w !== name) words.push(w);
+      const name = foldTerm(deps.dictionary.tags.get(span.tagId)!.name);
+      for (const w of filterTerms(deps.tokenizer.segment(span.text))) if (foldTerm(w) !== name) words.push(w);
     }
   }
-  return { terms: [...modelNumbers, ...tagTerms, ...words], tagIds: [...modelTagIds, ...scan.tagIds] };
+  const terms = [...modelNumbers, ...tagTerms, ...words].map(foldTerm);
+  return { terms, tagIds: [...modelTagIds, ...scan.tagIds] };
 }
 
 function count(terms: string[]): Map<string, number> {
@@ -72,7 +74,7 @@ export interface DocumentInput {
 
 export function analyzeDocument(doc: DocumentInput, deps: AnalyzeDeps): AnalyzedDocument {
   // タグ欄はタグ名そのものを1語として扱う（「延長保証」を分割しない）
-  const tagTerms = [...new Set(doc.tagNames.map(normalizeTagName).filter((n) => n.length > 0))];
+  const tagTerms = [...new Set(doc.tagNames.map((n) => foldTerm(normalizeTagName(n))).filter((n) => n.length > 0))];
   const titleTerms = analyzeText(doc.title, deps);
   const bodyTerms = analyzeText(doc.body, deps);
   return {
@@ -105,7 +107,7 @@ export function analyzeQuery(query: string, deps: AnalyzeDeps, expandedWeight = 
   for (const tagId of matchedTagIds) {
     const g = new Map<string, number>();
     for (const e of deps.dictionary.expand(tagId, expandedWeight)) {
-      const name = deps.dictionary.tags.get(e.tagId)!.name;
+      const name = foldTerm(deps.dictionary.tags.get(e.tagId)!.name);
       g.set(name, Math.max(g.get(name) ?? 0, e.weight));
       grouped.add(name);
     }

@@ -279,3 +279,48 @@ button.tag { cursor: pointer; }
 .confirm-q { font-size: 13px; font-weight: 700; color: var(--pending); }
 .photo-item .confirm { position: absolute; top: 4px; right: 4px; }
 .photo-item .confirm-q { background: var(--surface); padding: 2px 6px; border-radius: 3px; }
+
+/* タグの読みの確認：読みをその場で直せるようにする */
+.reading-row { flex-wrap: wrap; align-items: center; gap: 8px; }
+.reading-head { display: inline-flex; align-items: center; gap: 8px; }
+.reading-field {
+  flex: 1 1 140px; min-width: 120px; font-size: 16px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  color: var(--text); font-family: inherit;
+}
+.reading-field:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 保存した直後の、読みのその場確認 */
+.reading-ask h1 { font-size: 20px; }
+.reading-ask .rows { margin: 16px 0; }
+
+/* 読みの候補。押すと入力欄に入るだけで、登録はしない */
+.reading-candidates { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.reading-chip {
+  font-size: 14px; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-family: inherit; cursor: pointer;
+}
+.reading-chip:hover, .reading-chip:focus { border-color: var(--accent); }
+
+/* 読みは複数入れられる */
+.reading-fields { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.reading-line { display: flex; align-items: center; gap: 6px; }
+.reading-line .reading-field { flex: 1 1 auto; }
+.reading-remove {
+  flex: 0 0 auto; width: 32px; height: 32px; line-height: 1; font-size: 18px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--muted); font-family: inherit; cursor: pointer;
+}
+.reading-remove:hover { color: var(--text); border-color: var(--accent); }
+.reading-add {
+  align-self: flex-start; font-size: 14px; padding: 4px 0;
+  border: 0; background: none; color: var(--accent); font-family: inherit; cursor: pointer;
+}
+
+/* 出典表示。常に画面の下に置くが、作業の邪魔にならない大きさにする。 */
+.credits {
+  max-width: 720px; margin: 32px auto; padding: 0 16px 24px;
+  color: var(--ink-soft); font-size: 12px; line-height: 1.8; text-align: center;
+}
+.credits a { color: inherit; text-decoration: underline; }

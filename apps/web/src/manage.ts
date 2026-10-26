@@ -100,6 +100,132 @@ function relationText(r: Relation): HTMLElement {
   return h('span', { class: 'relation' }, from, h('span', { class: 'hint' }, KIND_LABEL[r.kind]), tagChip(r.to_tag, { quiet: true }));
 }
 
+interface ReadingProposal { id: string; name: string; proposed: string; useCount: number; candidates?: string[] }
+
+/**
+ * 読みを1つ尋ねる行。確認待ちの一覧と、保存した直後のその場での確認で、同じ形を使う。
+ * 案は空のことがある（機械が自信を持てなかった語）。そのときは空欄で打ってもらう。
+ */
+export function readingRow(
+  tag: { id: string; name: string; proposed: string; candidates?: string[] },
+  onDone: () => void,
+  extra?: Node | null,
+): HTMLElement {
+  // 読みは複数あってよい。「下取」は シタドリ とも シタトリ とも打たれる。
+  // どちらが正しいかを決めずに両方入れておけば、どちらで打っても当たる。
+  const fields = h('div', { class: 'reading-fields' });
+  let last: HTMLInputElement | null = null;
+
+  const addField = (value = '', focus = false): HTMLInputElement => {
+    const input = h('input', {
+      type: 'text', value, class: 'reading-field',
+      placeholder: 'カタカナで入力',
+      'aria-label': `#${tag.name} の読み`, autocomplete: 'off', spellcheck: 'false',
+    });
+    const remove = h('button', {
+      type: 'button', class: 'reading-remove', 'aria-label': 'この読みを消す',
+      onclick: () => { wrap.remove(); if (fields.children.length === 0) addField('', true); },
+    }, '×');
+    const wrap = h('div', { class: 'reading-line' }, input, remove);
+    fields.append(wrap);
+    if (focus) input.focus();
+    last = input;
+    return input;
+  };
+
+  addField(tag.proposed);
+
+  /** 空いている欄に入れる。無ければ増やす。 */
+  const fill = (value: string) => {
+    const inputs = [...fields.querySelectorAll('input')] as HTMLInputElement[];
+    const empty = inputs.find((i) => i.value.trim() === '');
+    const target = empty ?? addField();
+    target.value = value;
+    target.focus();
+  };
+
+  // 候補は押すと欄に入るだけ。登録はしない。一文字違いならそこから直せる。
+  const candidates = (tag.candidates ?? []).slice(0, 5);
+  const chips = candidates.length === 0 ? null : h('div', { class: 'reading-candidates' },
+    ...candidates.map((c) => h('button', {
+      type: 'button', class: 'reading-chip', onclick: () => fill(c),
+    }, c)));
+
+  const save = async (readings: string[]) => {
+    await api('POST', `/tag-readings/${tag.id}`, { readings });
+    const kept = readings.map((r) => r.trim()).filter((r) => r !== '');
+    toast(kept.length === 0 ? '読みなしで登録しました' : `#${tag.name} を「${kept.join('、')}」で登録しました`);
+    onDone();
+  };
+  const values = () => ([...fields.querySelectorAll('input')] as HTMLInputElement[]).map((i) => i.value);
+
+  return h('li', { class: 'row reading-row' },
+    h('span', { class: 'reading-head' },
+      h('span', { class: 'tag tag-inline' }, `#${tag.name}`),
+      extra ?? null),
+    fields,
+    h('button', {
+      type: 'button', class: 'reading-add',
+      onclick: () => addField('', true),
+    }, '＋ 読みを足す'),
+    chips,
+    h('span', { class: 'row-actions' },
+      action('この読みで登録', 'primary small', () => save(values())),
+      action('あとで', 'secondary small', () => { onDone(); return Promise.resolve(); })));
+}
+
+/**
+ * 保存した直後に、新しく出来たタグの読みをその場で尋ねる。
+ * 一番よく知っているのは、いま打った人なので、ここで聞くのが一番当たる。
+ * 飛ばしても「承認・管理 → タグの読み」に残るので、取りこぼさない。
+ */
+export function askReadings(
+  tags: Array<{ id: string; name: string; proposed: string; candidates?: string[] }>, onFinish: () => void,
+): HTMLElement {
+  const remaining = new Set(tags.map((t) => t.id));
+  const list = h('ul', { class: 'rows' });
+  const done = (id: string) => {
+    remaining.delete(id);
+    if (remaining.size === 0) onFinish();
+  };
+  for (const t of tags) {
+    const row = readingRow(t, () => { row.remove(); done(t.id); });
+    list.append(row);
+  }
+  return h('section', { class: 'page reading-ask' },
+    h('h1', {}, '読みを教えてください'),
+    h('p', { class: 'hint' },
+      '新しいタグができました。読みを登録すると、かなでも引けるようになります'
+      + '（しょくせんき → #食洗機）。候補を押すと入力欄に入るので、'
+      + '違っていたら直してください。あとでもかまいません。'),
+    list,
+    h('button', { type: 'button', class: 'secondary', onclick: onFinish }, 'まとめてあとにする'));
+}
+
+/**
+ * タグの読みの確認。
+ *
+ * 機械が出した読みは外すことがあるので、そのままでは検索に効かせない。
+ * ここで**書き換えられる形で**見せて、人が決めたものだけを登録する。
+ * 「この読みで登録しますか」を、読みを直せる入力欄と一緒に出すのが肝。
+ */
+export function readingPanel(): HTMLElement {
+  return panel('タグの読み（確認待ち）', async (body) => {
+    const rows = await api<ReadingProposal[]>('GET', '/tag-readings');
+    if (rows.length === 0) {
+      body.append(h('p', { class: 'hint' }, '確かめる読みはありません。'));
+      return;
+    }
+    body.append(
+      h('p', { class: 'hint' },
+        '読みを登録すると、かなでも引けるようになります（れいぞうこ → #冷蔵庫）。'
+        + '候補を押すと入力欄に入ります。違っていたら、そのまま直して登録してください。'),
+      ...countedList('確認待ち', rows, (r, remove) =>
+        readingRow(r, remove, h('span', { class: 'hint' }, `${r.useCount}件`))),
+    );
+  });
+}
+
 export function tagPanel(isAdmin: boolean): HTMLElement {
   return panel('タグ辞書', async (body) => {
     const candidates = await api<Relation[]>('GET', '/tag-relations?state=candidate');

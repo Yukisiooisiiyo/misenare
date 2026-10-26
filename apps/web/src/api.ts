@@ -102,7 +102,7 @@ export interface Knowledge {
 }
 
 export interface Dictionary {
-  tags: Array<{ id: string; name: string; reading: string | null; useCount: number }>;
+  tags: Array<{ id: string; name: string; readings: string[]; useCount: number }>;
   relations: Array<{ kind: 'synonym' | 'includes' | 'alias'; from_tag_id: string | null; from_text: string | null; to_tag_id: string }>;
   cooccurrence: Record<string, number>;
 }

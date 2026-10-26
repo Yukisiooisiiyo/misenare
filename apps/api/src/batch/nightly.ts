@@ -11,7 +11,7 @@
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
-import type { Tokenizer } from '@misenare/search-core';
+import { suggestReading, type Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
@@ -57,15 +57,38 @@ export interface TenantReport {
   closedHandovers: number;
 }
 
-/** トークナイザーが読みを返せるなら（kuromoji など）、読みの無いタグに読みを付ける */
+/**
+ * トークナイザーが読みを返せるなら（kuromoji など）、読みの無いタグに**案**を置く。
+ *
+ * ここでは reading を書かない。機械の読みは外すことがあり、読みは検索の別名に
+ * なるので、間違ったまま効かせると検索に嘘が混ざる。人が確かめて初めて
+ * reading に入る（承認・管理 → タグの読み）。
+ *
+ * **信用できない案は置かない。** その判断は suggestReading に置いてある
+ * （タグを作った直後の確認でも同じ判断を使うため)。間違った案を見せるのは、
+ * 何も見せないより悪い。
+ *
+ * すでに人が見たもの（reading_checked_at が入っている）には、もう案を出さない。
+ * 「読みなし」と決めた語に毎晩出し直すのは、確認する人への嫌がらせになる。
+ */
 async function fillReadings(db: Db, tokenizer: Tokenizer): Promise<number> {
   if (!tokenizer.reading) return 0;
-  const tags = await db.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE reading IS NULL AND state = 'active'`);
+  const tags = await db.query<{ id: string; name: string }>(
+    `SELECT id, name FROM hashtags
+      WHERE state = 'active'
+        AND cardinality(readings) = 0
+        AND reading_proposed IS NULL
+        AND reading_checked_at IS NULL`,
+  );
   let filled = 0;
   for (const t of tags) {
-    const r = tokenizer.reading(t.name);
-    if (!r) continue;
-    await db.query(`UPDATE hashtags SET reading = $2 WHERE id = $1`, [t.id, r]);
+    const s = suggestReading(tokenizer, t.name);
+    if (s.kind === 'silent') continue;
+    if (s.kind === 'settled') {
+      await db.query(`UPDATE hashtags SET readings = ARRAY[$2], reading_checked_at = now() WHERE id = $1`, [t.id, s.reading]);
+    } else {
+      await db.query(`UPDATE hashtags SET reading_proposed = $2 WHERE id = $1`, [t.id, s.reading]);
+    }
     filled++;
   }
   return filled;

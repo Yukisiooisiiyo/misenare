@@ -11,7 +11,7 @@ export class LocalDictionary {
 
   constructor(data: Dictionary) {
     this.dictionary = new TagDictionary(
-      data.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })),
+      data.tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: t.useCount })),
       data.relations.flatMap((r): TagRelation[] =>
         r.kind === 'alias'
           ? r.from_text ? [{ kind: 'alias' as const, fromText: r.from_text, toTagId: r.to_tag_id }] : []
@@ -59,12 +59,28 @@ export function renderSuggestions(
     container.hidden = true;
     return;
   }
+  // 同じ意味・上位下位のタグは、別枠ではなく同じ一覧に続けて出す。
+  // 「クーラー」と打ったら #クーラー の下に #エアコン が並ぶのが、探す人には一番近い。
+  // 打ち間違いの疑いだけは、理由が違うので「もしかして」に残す。
+  const reasons: Record<string, string> = { synonym: '同じ意味', includes: 'この中の一つ', parent: 'これを含む', typo: '打ち間違い？' };
+  const related = result.maybe.filter((m) => m.reason !== 'typo');
+  const typos = result.maybe.filter((m) => m.reason === 'typo');
+
   const items: HTMLElement[] = [];
   for (const t of result.candidates) {
     items.push(h('li', {},
       h('button', { type: 'button', class: 'suggest-item', onclick: () => onPick({ tag: t }) },
         h('span', { class: 'tag tag-inline' }, `#${t.name}`),
         h('span', { class: 'suggest-count' }, `${t.useCount}件`))));
+  }
+  for (const m of related) {
+    items.push(h('li', {},
+      h('button', {
+        type: 'button', class: 'suggest-item suggest-related',
+        onclick: () => onPick({ tag: m.tag, ...(m.forTagId ? { maybeFor: m.forTagId } : {}) }),
+      },
+        h('span', { class: 'tag tag-inline' }, `#${m.tag.name}`),
+        h('span', { class: 'suggest-count' }, reasons[m.reason] ?? ''))));
   }
   // 新しいタグを作る選択肢は、既存の候補が1つも無いときだけ出す（既存タグを選ぶ方が手数が少ない画面にする）
   if (allowCreate && result.candidates.length === 0) {
@@ -77,16 +93,15 @@ export function renderSuggestions(
   }
   container.append(h('ul', { class: 'suggest-list', role: 'listbox', 'aria-label': 'タグの候補' }, ...items));
 
-  if (result.maybe.length > 0) {
-    const reasons: Record<string, string> = { synonym: '同じ意味', includes: 'この中の一つ', parent: 'これを含む', typo: '打ち間違い？' };
+  if (typos.length > 0) {
     container.append(
       h('p', { class: 'maybe-label' }, 'もしかして'),
-      h('ul', { class: 'suggest-list suggest-maybe' }, ...result.maybe.map((m) =>
+      h('ul', { class: 'suggest-list suggest-maybe' }, ...typos.map((m) =>
         h('li', {},
           h('button', { type: 'button', class: 'suggest-item', onclick: () => onPick({ tag: m.tag, ...(m.forTagId ? { maybeFor: m.forTagId } : {}) }) },
             h('span', { class: 'tag tag-inline' }, `#${m.tag.name}`),
             h('span', { class: 'suggest-count' }, reasons[m.reason] ?? ''))))),
     );
   }
-  container.hidden = items.length === 0 && result.maybe.length === 0;
+  container.hidden = items.length === 0 && typos.length === 0;
 }

@@ -4,7 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { action, countedList, importPanel, productPanel, staffPanel, tagPanel } from './manage.ts';
+import { action, askReadings, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
@@ -216,7 +216,7 @@ function renderNoticesTab(): void {
 // --- 探す -------------------------------------------------------------------------
 
 async function renderSearch(initial: string): Promise<void> {
-  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: '#冷蔵庫 リサイクル', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
+  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: '冷蔵庫 リサイクル', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
   const suggest = h('div', { class: 'suggest', hidden: true });
   const results = h('div', { class: 'results', 'aria-live': 'polite' });
   let pendingPick: { suggestedTagId: string; pickedTagId: string } | null = null;
@@ -227,7 +227,9 @@ async function renderSearch(initial: string): Promise<void> {
   const lastToken = () => input.value.split(/\s+/).pop() ?? '';
   const updateSuggest = () => {
     const token = lastToken();
-    if (!dict || !token.startsWith('#') || token.length < 2) { suggest.hidden = true; return; }
+    // # が付いていなくても候補を出す。ひらがな・ローマ字でも引けるので、
+    // 「てれび」「terebi」と打っている途中で #テレビ と、その同義語が出る。
+    if (!dict || token.length < 2) { suggest.hidden = true; return; }
     const selected = input.value.split(/\s+/).slice(0, -1).filter((t) => t.startsWith('#')).map((t) => t.slice(1));
     renderSuggestions(suggest, token, dict.suggest(token, selected), pick, false);
   };
@@ -271,7 +273,7 @@ async function renderSearch(initial: string): Promise<void> {
 
   shell('search', h('section', { class: 'page' },
     h('div', { class: 'search-bar' }, input, h('a', { href: '#/scan', class: 'icon-button', 'aria-label': 'バーコードで調べる' }, 'JAN')),
-    h('p', { class: 'hint' }, '# を付けるとタグの候補が出ます'),
+    h('p', { class: 'hint' }, 'ひらがな・ローマ字でも候補が出ます（てれび／terebi → #テレビ）'),
     suggest,
     results,
   ));
@@ -436,11 +438,18 @@ function renderWrite(existing: Knowledge | null): void {
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; tagField.focus(); return; }
     const payload = { title: title.value, body: body.value, tagNames: tags };
     try {
+      type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing
-        ? await api<{ id: string; published: boolean }>('PUT', `/knowledge/${existing.id}`, payload)
-        : await api<{ id: string; published: boolean }>('POST', `/stores/${storeId()}/knowledge`, payload);
+        ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
+        : await api<Saved>('POST', `/stores/${storeId()}/knowledge`, payload);
       toast(r.published ? '公開しました' : '承認を依頼しました');
       await loadDictionary();
+      const goOn = async () => { await loadDictionary(); location.hash = `#/k/${r.id}`; };
+      // 新しいタグができたら、その場で読みを尋ねる。一番よく知っているのは、いま打った人。
+      if (r.readingsNeeded && r.readingsNeeded.length > 0) {
+        shell('write', askReadings(r.readingsNeeded, () => { void goOn(); }));
+        return;
+      }
       location.hash = `#/k/${r.id}`;
     } catch (err) {
       message.textContent = err instanceof Error ? err.message : String(err);
@@ -605,7 +614,7 @@ async function renderManage(): Promise<void> {
           h('span', { class: 'row-actions' },
             action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
     );
-    section.append(productPanel(storeId()), tagPanel(isAdmin()), importPanel(storeId()));
+    section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
     if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));

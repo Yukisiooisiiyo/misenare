@@ -90,9 +90,19 @@ jobs:
         run: |
           set -o pipefail
           npx tsx --test --test-reporter=tap apps/api/test/kuromoji.test.ts | tee kuromoji-output.tap
+      # タグの読みを自動で埋めてよいかの測定。成功しても数字を注記に残す。
+      - name: Measure reading accuracy
+        run: |
+          set -o pipefail
+          npx tsx --test --test-reporter=tap apps/api/test/readingBench.test.ts | tee reading-bench.tap
+      - name: Publish reading accuracy
+        if: always()
+        run: node .github/scripts/notice-file.mjs reading-bench.md 'タグの読みの精度'
       - name: Report failures as annotations
         if: failure()
-        run: node .github/scripts/annotate-tap.mjs kuromoji-output.tap
+        run: |
+          node .github/scripts/annotate-tap.mjs kuromoji-output.tap || true
+          [ -f reading-bench.tap ] && node .github/scripts/annotate-tap.mjs reading-bench.tap || true
 
   # Dockerfile が本当に動くかを、組み立てて起動して確かめる（デプロイはしない）
   docker:

@@ -4,7 +4,7 @@
 //   関係の承認・却下 … trusted 以上（visitor の提案は候補として残る）
 //   タグの統合       … administrator（店長・本部）
 
-import { normalizeTagName, normalizeText, type Tokenizer } from '@misenare/search-core';
+import { hiraToKata, normalizeTagName, normalizeText, readingCandidates, suggestReading, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -164,4 +164,103 @@ export async function mergeTags(db: Db, tokenizer: Tokenizer, actor: Actor, from
   for (const { knowledge_id } of affected) await indexKnowledge(db, tokenizer, knowledge_id);
   await refreshUseCounts(db, [fromId, intoId]);
   return { from: fromId, into: intoId, reindexed: affected.length };
+}
+
+// --- タグの読みの確認 ---------------------------------------------------------------
+//
+// 読みは「れいぞうこ」で #冷蔵庫 に当たるための別名になる。機械が出した読みは
+// 音読み訓読みの揺れや連濁で外すことがあるので、**人が見るまで検索には効かせない**。
+// 夜間バッチは reading_proposed に案を置くだけで、reading は人が決める。
+
+export interface ReadingProposal {
+  id: string;
+  name: string;
+  /**
+   * 機械が出した案。**空のことがある。**
+   * 信用できない読みは案にしないので、その語はここが空で来る。
+   * 間違った案を見せるのは、何も見せないより悪い。
+   */
+  proposed: string;
+  /** このタグが付いているナレッジの数。多いものから確かめたい */
+  useCount: number;
+  /** 漢字の読みの総当たりから作った候補。押すと入力欄に入り、そこから直せる */
+  candidates: string[];
+}
+
+/** 読みの案はカタカナと長音符だけ。ひらがなで来たらカタカナに直して受ける。 */
+export function normalizeReading(input: string): string {
+  const kata = hiraToKata(normalizeText(input)).replace(/\s+/g, '');
+  return kata;
+}
+
+export function validateReading(reading: string): void {
+  assert([...reading].length <= 30, 'invalid', '読みは30文字までです');
+  assert(/^[ァ-ヶー]+$/.test(reading), 'invalid', '読みはカタカナで入力してください');
+}
+
+/** 確認待ちの読み。使われている数が多い順に出す（直す価値が大きい順） */
+export async function listReadingProposals(
+  db: Db,
+  tokenizer: Tokenizer,
+  actor: Actor,
+  limit = 50,
+): Promise<ReadingProposal[]> {
+  assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
+  // 案の有無にかかわらず、読みが決まっていないタグを出す。
+  // 案があるものを先に（直すだけで済むので手が早い）、次に使われている数の多い順。
+  const rows = await db.query<{ id: string; name: string; reading_proposed: string | null; use_count: number }>(
+    `SELECT id, name, reading_proposed, use_count
+       FROM hashtags
+      WHERE state = 'active' AND cardinality(readings) = 0 AND reading_checked_at IS NULL
+      ORDER BY (reading_proposed IS NULL), use_count DESC, name
+      LIMIT $1`,
+    [limit],
+  );
+  return rows.map((r) => {
+    // バッチが置いた案が無ければ、ここで作る（バッチが流れる前でも空欄にしない）
+    const s = r.reading_proposed === null ? suggestReading(tokenizer, r.name) : null;
+    const proposed = r.reading_proposed ?? (s?.kind === 'proposal' ? s.reading : '');
+    return {
+      id: r.id,
+      name: r.name,
+      proposed,
+      useCount: r.use_count,
+      candidates: readingCandidates(r.name).filter((c) => c !== proposed),
+    };
+  });
+}
+
+/** 1つのタグに登録できる読みの数。これ以上は辞書が太るだけで役に立たない。 */
+const MAX_READINGS = 5;
+
+/**
+ * 読みを確定する。**複数登録できる。**
+ * 「下取」は シタドリ とも シタトリ とも打たれる。どちらが正しいかを
+ * 決めようとすると必ず外すし、決める必要もない。両方持てば両方で当たる。
+ *
+ * 空の配列は「読みなし」として確定する（以後この語に案は出さない）。
+ * どちらの場合も、もう確認待ちには出てこない。
+ */
+export async function confirmReading(
+  db: Db, actor: Actor, tagId: string, readings: readonly string[],
+): Promise<{ id: string; readings: string[] }> {
+  assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
+  const cleaned: string[] = [];
+  for (const raw of readings) {
+    const value = normalizeReading(raw);
+    if (value.length === 0) continue; // 空の欄は無視する（＋を押して打たなかった場合）
+    validateReading(value);
+    if (!cleaned.includes(value)) cleaned.push(value);
+  }
+  assert(cleaned.length <= MAX_READINGS, 'invalid', `読みは${MAX_READINGS}つまでです`);
+  const rows = await db.query<{ id: string }>(
+    `UPDATE hashtags
+        SET readings = $2::text[], reading_proposed = NULL,
+            reading_checked_at = now(), reading_checked_by = $3
+      WHERE id = $1 AND state = 'active'
+      RETURNING id`,
+    [tagId, cleaned, actor.userId],
+  );
+  assert(rows.length === 1, 'not_found', 'タグが見つかりません');
+  return { id: tagId, readings: cleaned };
 }

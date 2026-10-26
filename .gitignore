@@ -8,3 +8,4 @@ dist/
 apps/web/dist/
 test-output.tap
 apps/web/demo/dist/
+.ci/

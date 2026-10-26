@@ -72,7 +72,10 @@ import {
   startPhotoUpload,
 } from '../domain/photos.ts';
 import { recordSearchFeedback, search, zeroHitQueries } from '../domain/search.ts';
-import { decideRelation, deleteRelation, listRelations, mergeTags, proposeRelation, type RelationInput } from '../domain/tagAdmin.ts';
+import {
+  confirmReading, decideRelation, deleteRelation, listReadingProposals, listRelations,
+  mergeTags, proposeRelation, type RelationInput,
+} from '../domain/tagAdmin.ts';
 import { exportDictionary } from '../domain/tags.ts';
 import {
   acceptInvitation,
@@ -420,6 +423,17 @@ function routes(): Router<Ctx> {
   r.delete('/tag-relations/:relationId', async (c, _req, p) => {
     await deleteRelation(c.db, c.actor, p.relationId!);
     return json({ ok: true });
+  });
+  // タグの読み：機械が出した案を人が確かめる。確かめたものだけが検索に効く。
+  r.get('/tag-readings', async (c) => json(await listReadingProposals(c.db, c.tokenizer, c.actor)));
+  r.post('/tag-readings/:tagId', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    // readings を省く、または空の配列にすると「読みなし」として確定する
+    const raw = b.readings ?? [];
+    if (!Array.isArray(raw) || raw.some((x) => typeof x !== 'string')) {
+      throw new HttpError(400, 'readings は文字列の配列です');
+    }
+    return json(await confirmReading(c.db, c.actor, p.tagId!, raw as string[]));
   });
   r.post('/tags/merge', async (c, req) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
