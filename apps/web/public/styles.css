@@ -302,3 +302,18 @@ button.tag { cursor: pointer; }
   font-family: inherit; cursor: pointer;
 }
 .reading-chip:hover, .reading-chip:focus { border-color: var(--accent); }
+
+/* 読みは複数入れられる */
+.reading-fields { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.reading-line { display: flex; align-items: center; gap: 6px; }
+.reading-line .reading-field { flex: 1 1 auto; }
+.reading-remove {
+  flex: 0 0 auto; width: 32px; height: 32px; line-height: 1; font-size: 18px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--muted); font-family: inherit; cursor: pointer;
+}
+.reading-remove:hover { color: var(--text); border-color: var(--accent); }
+.reading-add {
+  align-self: flex-start; font-size: 14px; padding: 4px 0;
+  border: 0; background: none; color: var(--accent); font-family: inherit; cursor: pointer;
+}

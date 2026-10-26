@@ -6,6 +6,7 @@ import { createKnowledge } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
 import { confirmReading, decideRelation, listReadingProposals, listRelations, mergeTags, proposeRelation } from '../src/domain/tagAdmin.ts';
 import { exportDictionary } from '../src/domain/tags.ts';
+import { TagDictionary } from '@misenare/search-core';
 import { freshDatabase, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
@@ -120,17 +121,17 @@ describe('タグの読みの確認', () => {
       const { id } = await one<{ id: string }>(q,
         `UPDATE hashtags SET reading_proposed = 'レイゾウコ' WHERE name = '冷蔵庫' RETURNING id`);
 
-      // 確かめる前は reading が空なので、辞書には読みが入らない＝かなでは引けない
+      // 確かめる前は readings が空なので、辞書には読みが入らない＝かなでは引けない
       const before = await exportDictionary(q, manager, STORE_A);
-      assert.equal(before.tags.find((t) => t.name === '冷蔵庫')?.reading, null, '確かめる前に読みが効いている');
+      assert.deepEqual(before.tags.find((t) => t.name === '冷蔵庫')?.readings, [], '確かめる前に読みが効いている');
 
       const pending = await listReadingProposals(q, manager);
       assert.deepEqual(pending.filter((p) => p.name === '冷蔵庫').map((p) => [p.name, p.proposed]),
         [['冷蔵庫', 'レイゾウコ']]);
 
-      await confirmReading(q, manager, id, 'レイゾウコ');
+      await confirmReading(q, manager, id, ['レイゾウコ']);
       const after = await exportDictionary(q, manager, STORE_A);
-      assert.equal(after.tags.find((t) => t.name === '冷蔵庫')?.reading, 'レイゾウコ');
+      assert.deepEqual(after.tags.find((t) => t.name === '冷蔵庫')?.readings, ['レイゾウコ']);
       assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === '冷蔵庫'),
         '確かめたものが確認待ちに残っている');
     });
@@ -140,10 +141,10 @@ describe('タグの読みの確認', () => {
     await db.withTenant(T, async (q) => {
       const { id } = await one<{ id: string }>(q,
         `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, '下取り', 'シタトリ') RETURNING id`, [T]);
-      await confirmReading(q, manager, id, 'シタドリ');
-      const row = await one<{ reading: string | null; reading_proposed: string | null }>(q,
-        `SELECT reading, reading_proposed FROM hashtags WHERE id = $1`, [id]);
-      assert.equal(row.reading, 'シタドリ');
+      await confirmReading(q, manager, id, ['シタドリ']);
+      const row = await one<{ readings: string[]; reading_proposed: string | null }>(q,
+        `SELECT readings, reading_proposed FROM hashtags WHERE id = $1`, [id]);
+      assert.deepEqual(row.readings, ['シタドリ']);
       assert.equal(row.reading_proposed, null);
     });
   });
@@ -152,10 +153,10 @@ describe('タグの読みの確認', () => {
     await db.withTenant(T, async (q) => {
       const { id } = await one<{ id: string }>(q,
         `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, 'リ券', 'リケン') RETURNING id`, [T]);
-      await confirmReading(q, manager, id, null);
-      const row = await one<{ reading: string | null; checked: boolean }>(q,
-        `SELECT reading, reading_checked_at IS NOT NULL AS checked FROM hashtags WHERE id = $1`, [id]);
-      assert.equal(row.reading, null);
+      await confirmReading(q, manager, id, []);
+      const row = await one<{ readings: string[]; checked: boolean }>(q,
+        `SELECT readings, reading_checked_at IS NOT NULL AS checked FROM hashtags WHERE id = $1`, [id]);
+      assert.deepEqual(row.readings, []);
       assert.equal(row.checked, true);
       assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === 'リ券'),
         '「読みなし」で確定した語が確認待ちに残っている');
@@ -166,10 +167,51 @@ describe('タグの読みの確認', () => {
     await db.withTenant(T, async (q) => {
       const { id } = await one<{ id: string }>(q,
         `INSERT INTO hashtags (tenant_id, name, reading_proposed) VALUES ($1, '搬入', 'ハンニュウ') RETURNING id`, [T]);
-      const r = await confirmReading(q, manager, id, 'はんにゅう');
-      assert.equal(r.reading, 'ハンニュウ');
-      await assert.rejects(confirmReading(q, manager, id, '搬入'), /カタカナ/);
-      await assert.rejects(confirmReading(q, manager, id, 'ア'.repeat(31)), /30文字/);
+      const r = await confirmReading(q, manager, id, ['はんにゅう']);
+      assert.deepEqual(r.readings, ['ハンニュウ']);
+      await assert.rejects(confirmReading(q, manager, id, ['搬入']), /カタカナ/);
+      await assert.rejects(confirmReading(q, manager, id, ['ア'.repeat(31)]), /30文字/);
+    });
+  });
+
+  it('読みを複数登録でき、どちらで打っても当たる', async () => {
+    await db.withTenant(T, async (q) => {
+      const k = await createKnowledge(q, tokenizer, manager, {
+        storeId: STORE_A, title: '下取の受付', body: '本人確認が要る。', tagNames: ['下取'],
+      });
+      await q.query(`UPDATE knowledge SET status = 'published' WHERE id = $1`, [k.id]);
+      const { id } = await one<{ id: string }>(q, `SELECT id FROM hashtags WHERE name = '下取'`);
+
+      // どちらが正しいかを決めずに、両方入れる
+      const r = await confirmReading(q, manager, id, ['シタドリ', 'シタトリ']);
+      assert.deepEqual(r.readings, ['シタドリ', 'シタトリ']);
+
+      const dict = await exportDictionary(q, manager, STORE_A);
+      const entry = dict.tags.find((t) => t.name === '下取');
+      assert.deepEqual(entry?.readings, ['シタドリ', 'シタトリ']);
+
+      // 辞書に通すと、どちらの打ち方でも同じタグに当たる
+      const local = new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: t.useCount })));
+      assert.deepEqual(local.matchPhrases('したどり'), [entry!.id]);
+      assert.deepEqual(local.matchPhrases('したとり'), [entry!.id]);
+    });
+  });
+
+  it('同じ読みを2回入れても1つにまとめ、空の欄は捨てる', async () => {
+    await db.withTenant(T, async (q) => {
+      const { id } = await one<{ id: string }>(q,
+        `INSERT INTO hashtags (tenant_id, name) VALUES ($1, '値札') RETURNING id`, [T]);
+      const r = await confirmReading(q, manager, id, ['ネフダ', '  ', 'ねふだ', 'ネダ']);
+      assert.deepEqual(r.readings, ['ネフダ', 'ネダ']);
+    });
+  });
+
+  it('読みは5つまで', async () => {
+    await db.withTenant(T, async (q) => {
+      const { id } = await one<{ id: string }>(q,
+        `INSERT INTO hashtags (tenant_id, name) VALUES ($1, '開梱') RETURNING id`, [T]);
+      await assert.rejects(
+        confirmReading(q, manager, id, ['ア', 'イ', 'ウ', 'エ', 'オ', 'カ']), /5つまで/);
     });
   });
 

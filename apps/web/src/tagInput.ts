@@ -11,7 +11,7 @@ export class LocalDictionary {
 
   constructor(data: Dictionary) {
     this.dictionary = new TagDictionary(
-      data.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })),
+      data.tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: t.useCount })),
       data.relations.flatMap((r): TagRelation[] =>
         r.kind === 'alias'
           ? r.from_text ? [{ kind: 'alias' as const, fromText: r.from_text, toTagId: r.to_tag_id }] : []

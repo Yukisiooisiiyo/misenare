@@ -11,17 +11,17 @@ import {
 import type { Db } from '../db/db.ts';
 import { assert, canAccessStore, isTrusted, type Actor } from './actor.ts';
 
-interface TagRow { id: string; name: string; reading: string | null; use_count: number; state: string }
+interface TagRow { id: string; name: string; readings: string[]; use_count: number; state: string }
 
 /** 検索・候補表示に使う辞書。active なタグと approved な関係だけを含む。 */
 export async function loadDictionary(db: Db): Promise<TagDictionary> {
   const tags = await db.query<TagRow>(
-    `SELECT id, name, reading, use_count, state FROM hashtags WHERE state = 'active'`,
+    `SELECT id, name, readings, use_count, state FROM hashtags WHERE state = 'active'`,
   );
   const rels = await db.query<{ kind: TagRelation['kind']; from_tag_id: string | null; from_text: string | null; to_tag_id: string }>(
     `SELECT kind, from_tag_id, from_text, to_tag_id FROM tag_relations WHERE state = 'approved'`,
   );
-  const entries: TagEntry[] = tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.use_count }));
+  const entries: TagEntry[] = tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings ?? [], useCount: t.use_count }));
   const relations: TagRelation[] = rels.map((r) =>
     r.kind === 'alias'
       ? { kind: 'alias', fromText: r.from_text!, toTagId: r.to_tag_id }
@@ -107,17 +107,17 @@ export async function exportDictionary(db: Db, actor: Actor, storeId: string) {
     SELECT kt.knowledge_id, kt.hashtag_id FROM knowledge_tags kt
       JOIN knowledge k ON k.id = kt.knowledge_id
      WHERE k.status = 'published' AND (k.scope = 'tenant' OR k.store_id = $1)`;
-  const tags = await db.query<{ id: string; name: string; reading: string | null; n: number }>(
+  const tags = await db.query<{ id: string; name: string; readings: string[]; n: number }>(
     `WITH v AS (${VISIBLE}),
           used AS (
             SELECT hashtag_id, count(*)::int AS n FROM v GROUP BY hashtag_id
             UNION ALL
             SELECT pt.hashtag_id, 0 FROM product_tags pt JOIN products p ON p.id = pt.product_id WHERE p.state = 'active'
           )
-     SELECT h.id, h.name, h.reading, max(u.n)::int AS n
+     SELECT h.id, h.name, h.readings, max(u.n)::int AS n
        FROM used u JOIN hashtags h ON h.id = u.hashtag_id
       WHERE h.state = 'active'
-      GROUP BY h.id, h.name, h.reading
+      GROUP BY h.id, h.name, h.readings
       ORDER BY n DESC, h.name`,
     [storeId],
   );
@@ -145,7 +145,7 @@ export async function exportDictionary(db: Db, actor: Actor, storeId: string) {
   );
   return {
     storeId,
-    tags: tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.n })),
+    tags: tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings ?? [], useCount: t.n })),
     relations,
     cooccurrence: Object.fromEntries([...npmi].filter(([, v]) => v > 0).map(([k, v]) => [k, Math.round(v * 1000) / 1000])),
   };

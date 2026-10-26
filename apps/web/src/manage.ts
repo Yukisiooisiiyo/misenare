@@ -111,32 +111,66 @@ export function readingRow(
   onDone: () => void,
   extra?: Node | null,
 ): HTMLElement {
-  const field = h('input', {
-    type: 'text', value: tag.proposed, class: 'reading-field',
-    placeholder: tag.proposed === '' ? 'カタカナで入力' : '',
-    'aria-label': `#${tag.name} の読み`, autocomplete: 'off', spellcheck: 'false',
-  });
-  // 候補は押すと入力欄に入るだけ。そのまま登録してもいいし、
-  // 一文字違いなら直してから登録できる。打ち直すより速い。
+  // 読みは複数あってよい。「下取」は シタドリ とも シタトリ とも打たれる。
+  // どちらが正しいかを決めずに両方入れておけば、どちらで打っても当たる。
+  const fields = h('div', { class: 'reading-fields' });
+  let last: HTMLInputElement | null = null;
+
+  const addField = (value = '', focus = false): HTMLInputElement => {
+    const input = h('input', {
+      type: 'text', value, class: 'reading-field',
+      placeholder: 'カタカナで入力',
+      'aria-label': `#${tag.name} の読み`, autocomplete: 'off', spellcheck: 'false',
+    });
+    const remove = h('button', {
+      type: 'button', class: 'reading-remove', 'aria-label': 'この読みを消す',
+      onclick: () => { wrap.remove(); if (fields.children.length === 0) addField('', true); },
+    }, '×');
+    const wrap = h('div', { class: 'reading-line' }, input, remove);
+    fields.append(wrap);
+    if (focus) input.focus();
+    last = input;
+    return input;
+  };
+
+  addField(tag.proposed);
+
+  /** 空いている欄に入れる。無ければ増やす。 */
+  const fill = (value: string) => {
+    const inputs = [...fields.querySelectorAll('input')] as HTMLInputElement[];
+    const empty = inputs.find((i) => i.value.trim() === '');
+    const target = empty ?? addField();
+    target.value = value;
+    target.focus();
+  };
+
+  // 候補は押すと欄に入るだけ。登録はしない。一文字違いならそこから直せる。
   const candidates = (tag.candidates ?? []).slice(0, 5);
-  const chips = candidates.length === 0 ? null : h('span', { class: 'reading-candidates' },
+  const chips = candidates.length === 0 ? null : h('div', { class: 'reading-candidates' },
     ...candidates.map((c) => h('button', {
-      type: 'button', class: 'reading-chip',
-      onclick: () => { field.value = c; field.focus(); },
+      type: 'button', class: 'reading-chip', onclick: () => fill(c),
     }, c)));
-  const save = async (reading: string | null) => {
-    await api('POST', `/tag-readings/${tag.id}`, { reading });
-    toast(reading === null ? '読みなしで登録しました' : `#${tag.name} を「${reading}」で登録しました`);
+
+  const save = async (readings: string[]) => {
+    await api('POST', `/tag-readings/${tag.id}`, { readings });
+    const kept = readings.map((r) => r.trim()).filter((r) => r !== '');
+    toast(kept.length === 0 ? '読みなしで登録しました' : `#${tag.name} を「${kept.join('、')}」で登録しました`);
     onDone();
   };
+  const values = () => ([...fields.querySelectorAll('input')] as HTMLInputElement[]).map((i) => i.value);
+
   return h('li', { class: 'row reading-row' },
     h('span', { class: 'reading-head' },
       h('span', { class: 'tag tag-inline' }, `#${tag.name}`),
       extra ?? null),
-    field,
+    fields,
+    h('button', {
+      type: 'button', class: 'reading-add',
+      onclick: () => addField('', true),
+    }, '＋ 読みを足す'),
     chips,
     h('span', { class: 'row-actions' },
-      action('この読みで登録', 'primary small', () => save(field.value)),
+      action('この読みで登録', 'primary small', () => save(values())),
       action('あとで', 'secondary small', () => { onDone(); return Promise.resolve(); })));
 }
 

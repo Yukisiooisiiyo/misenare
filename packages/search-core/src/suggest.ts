@@ -30,7 +30,7 @@ function prefixMatches(tag: TagEntry, key: string, readingKey: string): boolean 
   if (tag.name.startsWith(key)) return true;
   if (readingKey.length === 0) return false;
   if (hiraToKata(tag.name).startsWith(readingKey)) return true;
-  return tag.reading != null && tag.reading.startsWith(readingKey);
+  return (tag.readings ?? []).some((r) => r.startsWith(readingKey));
 }
 
 /** 制限付き Damerau–Levenshtein 距離（隣接文字の入れ替えを1と数える）。 */

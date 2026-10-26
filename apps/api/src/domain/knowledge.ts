@@ -162,7 +162,7 @@ async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<Readi
        FROM hashtags
       WHERE id = ANY($1::uuid[])
         AND state = 'active'
-        AND reading IS NULL
+        AND cardinality(readings) = 0
         AND reading_checked_at IS NULL
       ORDER BY name`,
     [[...tagIds]],

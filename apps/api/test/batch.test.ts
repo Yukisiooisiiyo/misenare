@@ -85,7 +85,7 @@ describe('夜間バッチ', () => {
 
     const localDict = async () => {
       const dict = await run((q) => exportDictionary(q, trusted, STORE_A));
-      return new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: t.useCount })));
+      return new TagDictionary(dict.tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: t.useCount })));
     };
 
     // 機械の読みは外すことがあるので、確かめるまでは効かせない
@@ -97,7 +97,7 @@ describe('夜間バッチ', () => {
     assert.ok(target, `確認待ちに出ない: ${pending.map((p) => p.name).join(',')}`);
     assert.equal(target.proposed, 'オオガタカデン');
 
-    await run((q) => confirmReading(q, trusted, target.id, target.proposed));
+    await run((q) => confirmReading(q, trusted, target.id, [target.proposed]));
     assert.equal(suggestTags({ input: 'おおがた', dictionary: await localDict() }).candidates[0]?.name, '大型家電');
   });
 
@@ -107,8 +107,8 @@ describe('夜間バッチ', () => {
     await runNightly(db, withReading);
     const pending = await run((q) => listReadingProposals(q, trusted));
     assert.ok(!pending.some((p) => p.name === 'キャンペーン'), '確かめるまでもない語が確認待ちに出ている');
-    const row = await run((q) => q.query<{ reading: string | null }>(`SELECT reading FROM hashtags WHERE name = 'キャンペーン'`));
-    assert.equal(row[0]?.reading, 'キャンペーン');
+    const row = await run((q) => q.query<{ readings: string[] }>(`SELECT readings FROM hashtags WHERE name = 'キャンペーン'`));
+    assert.deepEqual(row[0]?.readings, ['キャンペーン']);
   });
 
   it('一定期間、更新も確認もされていないナレッジを見直しの一覧に出し、確認すると外れる', async () => {

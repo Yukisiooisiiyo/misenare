@@ -206,7 +206,7 @@ export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Pr
   const rows = await db.query<{ id: string; name: string; reading_proposed: string | null; use_count: number }>(
     `SELECT id, name, reading_proposed, use_count
        FROM hashtags
-      WHERE state = 'active' AND reading IS NULL AND reading_checked_at IS NULL
+      WHERE state = 'active' AND cardinality(readings) = 0 AND reading_checked_at IS NULL
       ORDER BY (reading_proposed IS NULL), use_count DESC, name
       LIMIT $1`,
     [limit],
@@ -220,33 +220,37 @@ export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Pr
   }));
 }
 
+/** 1つのタグに登録できる読みの数。これ以上は辞書が太るだけで役に立たない。 */
+const MAX_READINGS = 5;
+
 /**
- * 読みを確定する。reading が null なら「読みなし」として確定する
- * （以後この語に案は出さない）。どちらの場合も、もう確認待ちには出てこない。
+ * 読みを確定する。**複数登録できる。**
+ * 「下取」は シタドリ とも シタトリ とも打たれる。どちらが正しいかを
+ * 決めようとすると必ず外すし、決める必要もない。両方持てば両方で当たる。
+ *
+ * 空の配列は「読みなし」として確定する（以後この語に案は出さない）。
+ * どちらの場合も、もう確認待ちには出てこない。
  */
 export async function confirmReading(
-  db: Db, actor: Actor, tagId: string, reading: string | null,
-): Promise<{ id: string; reading: string | null }> {
+  db: Db, actor: Actor, tagId: string, readings: readonly string[],
+): Promise<{ id: string; readings: string[] }> {
   assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
-  let value: string | null = null;
-  if (reading !== null) {
-    value = normalizeReading(reading);
-    assert(value.length > 0, 'invalid', '読みを入力するか、「読みなし」を選んでください');
+  const cleaned: string[] = [];
+  for (const raw of readings) {
+    const value = normalizeReading(raw);
+    if (value.length === 0) continue; // 空の欄は無視する（＋を押して打たなかった場合）
     validateReading(value);
+    if (!cleaned.includes(value)) cleaned.push(value);
   }
+  assert(cleaned.length <= MAX_READINGS, 'invalid', `読みは${MAX_READINGS}つまでです`);
   const rows = await db.query<{ id: string }>(
     `UPDATE hashtags
-        SET reading = $2, reading_proposed = NULL,
+        SET readings = $2::text[], reading_proposed = NULL,
             reading_checked_at = now(), reading_checked_by = $3
       WHERE id = $1 AND state = 'active'
       RETURNING id`,
-    [tagId, value, actor.userId],
+    [tagId, cleaned, actor.userId],
   );
   assert(rows.length === 1, 'not_found', 'タグが見つかりません');
-  return { id: tagId, reading: value };
-}
-
-/** いちど確かめた読みを直す。確認待ちに戻さず、その場で入れ替える。 */
-export async function updateReading(db: Db, actor: Actor, tagId: string, reading: string | null) {
-  return confirmReading(db, actor, tagId, reading);
+  return { id: tagId, readings: cleaned };
 }

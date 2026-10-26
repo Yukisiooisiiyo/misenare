@@ -39,7 +39,7 @@ export interface Knowledge {
   pendingVersions: number[];
 }
 export interface Dictionary {
-  tags: Array<{ id: string; name: string; reading: string | null; useCount: number }>;
+  tags: Array<{ id: string; name: string; readings: string[]; useCount: number }>;
   relations: Array<{ kind: 'synonym' | 'includes' | 'alias'; from_tag_id: string | null; from_text: string | null; to_tag_id: string }>;
   cooccurrence: Record<string, number>;
 }
@@ -89,7 +89,7 @@ function ensureTag(name: string): string {
   const normalized = normalizeTagName(name);
   const found = tags.find((t) => t.name === normalized);
   if (found) return found.id;
-  const created = { id: `da000000-0000-0000-0000-${String(tags.length).padStart(12, '0')}`, name: normalized, reading: null };
+  const created = { id: `da000000-0000-0000-0000-${String(tags.length).padStart(12, '0')}`, name: normalized, readings: [] as string[] };
   tags.push(created);
   return created.id;
 }
@@ -102,7 +102,7 @@ function useCount(tagId: string): number {
 
 function dictionary(): TagDictionary {
   return new TagDictionary(
-    tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: useCount(t.id) })),
+    tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: useCount(t.id) })),
     RELATIONS.flatMap((r): TagRelation[] =>
       r.kind === 'alias'
         ? r.fromText ? [{ kind: 'alias', fromText: r.fromText, toTagId: r.to }] : []
@@ -161,7 +161,7 @@ function exportDictionary(): Dictionary {
   }
   const npmi = computeNpmi(Math.max(1, knowledge.length), counts, pairs);
   return {
-    tags: tags.map((t) => ({ id: t.id, name: t.name, reading: t.reading, useCount: counts.get(t.id) ?? 0 })),
+    tags: tags.map((t) => ({ id: t.id, name: t.name, readings: t.readings, useCount: counts.get(t.id) ?? 0 })),
     relations: RELATIONS.map((r) => ({ kind: r.kind, from_tag_id: r.from, from_text: r.fromText, to_tag_id: r.to })),
     cooccurrence: Object.fromEntries([...npmi].filter(([, v]) => v > 0).map(([k, v]) => [k, Math.round(v * 1000) / 1000])),
   };
@@ -283,7 +283,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     const readingsNeeded = created.tags
       .filter((n) => !before.has(n))
       .map((n) => tags.find((t) => t.name === n))
-      .filter((t): t is NonNullable<typeof t> => t != null && t.reading == null)
+      .filter((t): t is NonNullable<typeof t> => t != null && t.readings.length === 0)
       // 本物と同じで、漢字の読みの総当たりから候補を作る
       .map((t) => ({ id: t.id, name: t.name, proposed: '', candidates: readingCandidates(t.name) }));
     return { id: created.id, version: 1, published: true, readingsNeeded } as T;
@@ -425,14 +425,17 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     })) as T;
   }
   if (method === 'POST' && parts[0] === 'tag-readings') {
-    const raw = typeof body?.reading === 'string' ? body.reading : null;
-    // 本物と同じで、ひらがなで入れてもカタカナに直す
-    const reading = raw === null || raw.trim() === '' ? null : hiraToKata(raw.trim());
+    const raw = Array.isArray(body?.readings) ? (body.readings as unknown[]) : [];
+    // 本物と同じで、ひらがなで入れてもカタカナに直し、空の欄は捨てる
+    const readings = raw
+      .filter((x): x is string => typeof x === 'string')
+      .map((x) => hiraToKata(x.trim()))
+      .filter((x) => x !== '');
     const i = readingProposals.findIndex((r) => r.id === parts[1]);
     if (i >= 0) readingProposals.splice(i, 1);
     // 確かめた読みだけがタグに入る
     const tag = tags.find((t) => t.id === parts[1]);
-    if (tag) tag.reading = reading;
+    if (tag) tag.readings = [...new Set(readings)];
     return { ok: true } as T;
   }
   if (method === 'GET' && rawPath.startsWith('/tag-relations')) {

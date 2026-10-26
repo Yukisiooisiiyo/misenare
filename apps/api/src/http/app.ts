@@ -406,10 +406,12 @@ function routes(): Router<Ctx> {
   r.get('/tag-readings', async (c) => json(await listReadingProposals(c.db, c.actor)));
   r.post('/tag-readings/:tagId', async (c, req, p) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
-    // reading を省く、または null にすると「読みなし」として確定する
-    const reading = b.reading === undefined || b.reading === null ? null : b.reading;
-    if (reading !== null && typeof reading !== 'string') throw new HttpError(400, 'reading は文字列か null です');
-    return json(await confirmReading(c.db, c.actor, p.tagId!, reading));
+    // readings を省く、または空の配列にすると「読みなし」として確定する
+    const raw = b.readings ?? [];
+    if (!Array.isArray(raw) || raw.some((x) => typeof x !== 'string')) {
+      throw new HttpError(400, 'readings は文字列の配列です');
+    }
+    return json(await confirmReading(c.db, c.actor, p.tagId!, raw as string[]));
   });
   r.post('/tags/merge', async (c, req) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};

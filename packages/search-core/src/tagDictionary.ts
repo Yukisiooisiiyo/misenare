@@ -6,8 +6,12 @@ export interface TagEntry {
   id: string;
   /** 正規化済みのタグ名（# なし） */
   name: string;
-  /** カタカナの読み（任意）。形態素解析器が使える環境で埋める。 */
-  reading?: string | null;
+  /**
+   * カタカナの読み。**1つとは限らない。**
+   * 「下取」は シタドリ とも シタトリ とも打たれる。どちらが正しいかを
+   * 決めずに両方持てば、どちらで打っても当たる。
+   */
+  readings?: readonly string[];
   useCount: number;
 }
 
@@ -56,9 +60,9 @@ export class TagDictionary {
       this.byName.set(entry.name, entry);
       this.addPhrase(entry.name, entry.id);
       // 読み（カタカナ）も別名として登録する。「れいぞうこ」で #冷蔵庫 に当たるようにするため。
-      // 読みは夜間バッチが形態素解析器で埋める。空ならこの経路は効かない。
-      if (entry.reading != null && entry.reading.length > 0) {
-        this.addPhrase(normalizeTagName(entry.reading), entry.id);
+      // 複数あればすべて登録する。読みは人が確かめたものだけが入っている。
+      for (const r of entry.readings ?? []) {
+        if (r.length > 0) this.addPhrase(normalizeTagName(r), entry.id);
       }
     }
     this.tags = map;

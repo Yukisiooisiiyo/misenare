@@ -79,7 +79,7 @@ async function fillReadings(db: Db, tokenizer: Tokenizer): Promise<number> {
   const tags = await db.query<{ id: string; name: string }>(
     `SELECT id, name FROM hashtags
       WHERE state = 'active'
-        AND reading IS NULL
+        AND cardinality(readings) = 0
         AND reading_proposed IS NULL
         AND reading_checked_at IS NULL`,
   );
@@ -90,7 +90,7 @@ async function fillReadings(db: Db, tokenizer: Tokenizer): Promise<number> {
     if (!r) continue;
     // 読みが見出しと同じ（カタカナ語）なら、確かめるまでもないので確定してよい
     if (r === t.name) {
-      await db.query(`UPDATE hashtags SET reading = $2, reading_checked_at = now() WHERE id = $1`, [t.id, r]);
+      await db.query(`UPDATE hashtags SET readings = ARRAY[$2], reading_checked_at = now() WHERE id = $1`, [t.id, r]);
       filled++;
       continue;
     }

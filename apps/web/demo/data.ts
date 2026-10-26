@@ -1,6 +1,6 @@
 // デモ用の仮データ。本番の seed-demo.ts と同じ中身を、端末の中だけに置く。
 
-export interface DemoTag { id: string; name: string; reading: string | null }
+export interface DemoTag { id: string; name: string; readings: string[] }
 export interface DemoKnowledge {
   id: string; storeId: string | null; title: string; body: string; tags: string[];
   updatedAt: string; updatedBy: string; verifiedAt: string | null; verifiedBy: string | null;
@@ -45,7 +45,7 @@ const TAG_NAMES: Array<[name: string, reading: string]> = [
 export const TAGS: DemoTag[] = TAG_NAMES.map(([name, reading], i) => ({
   id: `da000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
   name,
-  reading,
+  readings: [reading],
 }));
 const tagId = (name: string): string => TAGS.find((t) => t.name === name)!.id;
 
