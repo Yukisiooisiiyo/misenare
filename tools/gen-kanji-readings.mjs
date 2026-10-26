@@ -25,10 +25,14 @@ const OUT = process.argv[2] ?? 'packages/search-core/src/kanjiReadings.generated
 
 /**
  * 載せる漢字を絞る。
- * grade が付いているもの＝常用漢字（1〜8）と人名用漢字（9〜10）。
- * それ以外は売場の言葉には出てこないし、入れると表が太って候補も荒れる。
+ *   grade … 常用漢字（1〜8）と人名用漢字（9〜10）
+ *   freq  … 新聞での出現頻度の順位。常用外でもよく使う字が拾える
+ *
+ * grade だけだと「梱」（開梱）が落ちた。売場では使う字なので、
+ * 頻度の付いている字も入れる。どちらも無い字は、まず出てこない。
  */
 const KEEP_GRADES = new Set(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']);
+const hasFreq = (block) => /<freq>\d+<\/freq>/.test(block);
 
 console.error(`取得: ${SOURCE}`);
 const res = await fetch(SOURCE);
@@ -54,7 +58,7 @@ for (const block of xml.split('<character>').slice(1)) {
   const literal = /<literal>(.)<\/literal>/u.exec(block)?.[1];
   if (!literal) continue;
   const grade = /<grade>(\d+)<\/grade>/.exec(block)?.[1];
-  if (grade === undefined || !KEEP_GRADES.has(grade)) { skipped++; continue; }
+  if (!(grade !== undefined && KEEP_GRADES.has(grade)) && !hasFreq(block)) { skipped++; continue; }
 
   const on = [];
   const kun = [];
@@ -87,7 +91,7 @@ const body = `// === 自動生成。手で書き換えないこと ===
 //   https://www.edrdg.org/edrdg/license.html
 // 著作権は EDRDG および James William Breen 氏が保持しています。
 //
-// 収録: 常用漢字・人名用漢字 ${kept} 字。
+// 収録: 常用漢字・人名用漢字と、新聞での出現頻度が付いている字、あわせて ${kept} 字。
 // 形: 「漢字:音読み,音読み|訓読み,訓読み」を「;」でつないだ1本の文字列。
 //     オブジェクトのリテラルで持つより小さく、端末に送る量が減る。
 //     訓読みは送り仮名（「かわ.く」の「く」）を落とした、漢字そのものの読み。
