@@ -338,7 +338,16 @@ export function productPanel(storeId: string): HTMLElement {
 
 // --- スタッフ -------------------------------------------------------------------------
 
-interface StaffRow { id: string; name: string; trust_level: 'visitor' | 'trusted'; admin_scope: 'none' | 'store' | 'tenant'; status: 'active' | 'disabled'; last_used_at: string | null; devices: number }
+interface StaffRow {
+  id: string; name: string; trust_level: 'visitor' | 'trusted'; admin_scope: 'none' | 'store' | 'tenant';
+  status: 'active' | 'disabled'; last_used_at: string | null; devices: number;
+  /** 会社のアカウント（SSO）のメールアドレス。招待で入った人は無い */
+  email: string | null;
+  /** 会社のアカウントで入っているか。名前は相手の IdP が名乗ったもの */
+  via_sso: boolean;
+  /** この店に同じ名前の人が他にもいるか */
+  same_name: boolean;
+}
 
 export function staffPanel(storeId: string, meId: string): HTMLElement {
   return panel('スタッフ', async (body) => {
@@ -347,8 +356,18 @@ export function staffPanel(storeId: string, meId: string): HTMLElement {
     const draw = (u: StaffRow, row: HTMLElement) => {
       clear(row);
       const role = u.admin_scope === 'tenant' ? '本部' : u.admin_scope === 'store' ? '店長' : u.trust_level === 'trusted' ? 'trusted' : 'visitor';
+      // 同名の人がいるときは、名前だけでは見分けられないことを先に伝える。
+      // 会社のアカウントで入った人の名前は相手の IdP が名乗ったものなので、
+      // 既存の人に似せた名前で入ってくる余地がある。
+      const marks: Node[] = [];
+      if (u.same_name) marks.push(h('span', { class: 'warn-badge', title: 'この店に同じ名前の人がいます' }, '同名あり'));
+      if (u.via_sso) marks.push(h('span', { class: 'pending' }, '会社アカウント'));
       row.append(
-        h('span', {}, h('strong', {}, u.name), u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null),
+        h('span', {},
+          h('strong', {}, u.name),
+          u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null,
+          ...marks,
+          u.email ? h('span', { class: 'staff-email' }, u.email) : null),
         h('span', { class: 'hint' }, `${role}・端末${u.devices}台・${u.last_used_at ? `${relativeDate(u.last_used_at)}に利用` : '未利用'}`),
         u.id === meId || u.admin_scope !== 'none' ? h('span', {}) : h('span', { class: 'row-actions' },
           u.status === 'active'
@@ -446,5 +465,56 @@ export function importPanel(storeId: string): HTMLElement {
       button, file, status, result,
     );
     await drawList();
+  });
+}
+
+interface AccessRequestRow {
+  id: string;
+  email: string;
+  claimedName: string | null;
+  attempts: number;
+  requestedAt: string;
+  lastSeenAt: string;
+  nameTaken: boolean;
+}
+
+/**
+ * 会社のアカウントで入れたが、まだ登録されていない人の申請。
+ *
+ * ここに並ぶのは「その会社の人であることは確かだが、こちらに登録がない」人。
+ * 名前は相手の IdP が名乗ったものなので、**そのまま使わずに直せる形**で出す。
+ * 既存の人と同じ名前なら、その場で知らせる（似せた名前での紛れを防ぐため）。
+ */
+export function accessRequestPanel(stores: Array<{ id: string; name: string }>, currentStoreId: string): HTMLElement {
+  return panel('利用の申請', async (body) => {
+    const rows = await api<AccessRequestRow[]>('GET', '/access-requests');
+    body.append(...countedList('承認を待っている人', rows, (r, remove) => {
+      const name = h('input', { type: 'text', value: r.claimedName ?? '', placeholder: '名前',
+        'aria-label': `${r.email} の名前` });
+      const store = h('select', { 'aria-label': `${r.email} の配属先` },
+        ...stores.map((s) => h('option', { value: s.id, ...(s.id === currentStoreId ? { selected: true } : {}) }, s.name)));
+      return h('li', { class: 'row request-row' },
+        h('span', { class: 'request-who' },
+          h('strong', {}, r.email),
+          r.nameTaken
+            ? h('span', { class: 'warn-badge' }, `「${r.claimedName}」は既にいます`)
+            : null,
+          h('span', { class: 'hint' },
+            `${relativeDate(r.requestedAt)}に申請`
+            + (r.attempts > 1 ? `・${r.attempts}回入ろうとしています` : ''))),
+        h('span', { class: 'request-fields' },
+          h('span', { class: 'field' }, h('span', { class: 'hint' }, '名前'), name),
+          h('span', { class: 'field' }, h('span', { class: 'hint' }, '配属先'), store)),
+        h('span', { class: 'row-actions' },
+          action('承認する', 'primary small', async () => {
+            const value = name.value.trim();
+            if (value === '') { toast('名前を入れてください'); return; }
+            await api('POST', `/access-requests/${r.id}/approve`, { storeId: store.value, name: value });
+            toast(`${value}さんを登録しました`);
+            remove();
+          }),
+          confirmAction('断る', 'secondary small', `${r.email} の申請を断ります。`,
+            async () => { await api('POST', `/access-requests/${r.id}/reject`); toast('断りました'); remove(); })));
+    }, 'h3'));
   });
 }

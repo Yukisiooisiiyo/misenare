@@ -140,6 +140,7 @@ describe('入口', () => {
 describe('誰として入れるか', () => {
   async function clean() {
     await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM access_requests`);
       await q.query(`DELETE FROM sso_identities`);
       await q.query(`DELETE FROM sso_domains`);
       await q.query(`DELETE FROM sso_providers`);
@@ -150,10 +151,11 @@ describe('誰として入れるか', () => {
     });
   }
 
-  it('登録済みでなければ、既定では断る（自動で作らない）', async () => {
+  it('登録済みでなければ、既定では作らない（申請として受ける）', async () => {
     await setup();
     const { finish } = await roundTrip();
-    await assert.rejects(finish(), /まだ登録されていません/);
+    // 行き止まりにせず、店長が見て決められる形にする（apps/api/test/accessRequests.test.ts）
+    await assert.rejects(finish(), /利用の申請を出しました/);
     await clean();
   });
 
@@ -221,6 +223,7 @@ describe('誰として入れるか', () => {
 describe('相手が名乗ったことを、そのまま信じない', () => {
   async function clean() {
     await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM access_requests`);
       await q.query(`DELETE FROM sso_identities`);
       await q.query(`DELETE FROM sso_domains`);
       await q.query(`DELETE FROM sso_providers`);

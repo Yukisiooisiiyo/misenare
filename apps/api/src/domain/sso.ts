@@ -16,6 +16,7 @@
 // 初回だけ、メールアドレスで既存の利用者を探して結びつける。
 
 import { maybeOne, one, type Database, type Db } from '../db/db.ts';
+import { recordRequest } from './accessRequests.ts';
 import { assert, DomainError, type Actor } from './actor.ts';
 import { hashToken, issueToken } from './users.ts';
 import { createPkce, OidcError, randomToken, safeReturnTo, type OidcDirectory } from '../auth/oidc.ts';
@@ -187,15 +188,38 @@ export async function finishSso(
     throw new DomainError('forbidden', err instanceof Error ? err.message : String(err));
   }
 
-  return database.withTenant(memo.tenant_id, async (db) => {
-    const userId = await resolveUser(db, provider, claims);
+  const outcome = await database.withTenant(memo.tenant_id, async (db) => {
+    const resolved = await resolveUser(db, provider, claims);
+    // 申請として受けるぶんは、**取引（トランザクション）の外で書く**。
+    // 中で書いてから例外を投げると巻き戻され、申請が残らない。
+    // （パスキーで複製を止めるときと同じ理由。試験では「申請を出しました」と
+    //  出るのに一覧が空、という形で出た）
+    if (resolved.kind === 'request') return resolved;
     const sessionToken = issueToken(memo.tenant_id);
     await db.query(
       `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
-      [memo.tenant_id, userId, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
+      [memo.tenant_id, resolved.userId, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
     );
-    return { sessionToken, userId, returnTo: memo.return_to };
+    return { kind: 'session' as const, sessionToken, userId: resolved.userId };
   });
+
+  if (outcome.kind === 'session') {
+    return { sessionToken: outcome.sessionToken, userId: outcome.userId, returnTo: memo.return_to };
+  }
+
+  const recorded = await database.withTenant(memo.tenant_id, (db) => recordRequest(db, {
+    tenantId: provider.tenant_id,
+    providerId: provider.id,
+    subject: claims.sub,
+    email: outcome.email,
+    name: outcome.name,
+  }));
+  if (recorded.kind === 'rejected') {
+    throw new DomainError('forbidden', 'この申請は断られています。店長か本部にご確認ください');
+  }
+  throw new DomainError('forbidden', recorded.kind === 'created'
+    ? '利用の申請を出しました。店長が承認すると使えるようになります'
+    : 'まだ承認されていません。店長にご確認ください');
 }
 
 /**
@@ -215,7 +239,12 @@ export async function finishSso(
  * 相手が1社専用の IdP なら発行元の固定で足りるが、複数の会社を受ける IdP も
  * あるので、こちらでも線を引く。
  */
-async function resolveUser(db: Db, provider: ProviderRow, claims: IdTokenClaims): Promise<string> {
+type Resolution =
+  | { kind: 'user'; userId: string }
+  /** 登録が無い。申請として受ける（書くのは取引の外） */
+  | { kind: 'request'; email: string; name: string | null };
+
+async function resolveUser(db: Db, provider: ProviderRow, claims: IdTokenClaims): Promise<Resolution> {
   const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : null;
   const linked = await maybeOne<{ user_id: string }>(
     db,
@@ -226,7 +255,7 @@ async function resolveUser(db: Db, provider: ProviderRow, claims: IdTokenClaims)
   if (linked) {
     const status = await maybeOne<{ status: string }>(db, `SELECT status FROM users WHERE id = $1`, [linked.user_id]);
     assert(status?.status === 'active', 'forbidden', 'この利用者は無効化されています');
-    return linked.user_id;
+    return { kind: 'user', userId: linked.user_id };
   }
 
   const verified = claims.email_verified === true;
@@ -242,22 +271,29 @@ async function resolveUser(db: Db, provider: ProviderRow, claims: IdTokenClaims)
     if (existing) {
       assert(existing.status === 'active', 'forbidden', 'この利用者は無効化されています');
       await link(db, provider, claims.sub, existing.id, email);
-      return existing.id;
+      return { kind: 'user', userId: existing.id };
     }
   }
 
+  const claimedName = typeof claims.name === 'string' && claims.name.trim() !== ''
+    ? claims.name.trim().slice(0, 60)
+    : null;
+
   if (!provider.jit_enabled) {
-    throw new DomainError('forbidden',
-      'このアカウントはまだ登録されていません。店長か本部に、利用者の登録を依頼してください');
+    // 行き止まりにしない。ここまで来た人は「その会社の人であることは確か」なので、
+    // 申請として受けて、店長が見て決められるようにする。
+    if (email === null || !verified) {
+      throw new DomainError('forbidden',
+        'このアカウントはまだ登録されていません。店長か本部に、利用者の登録を依頼してください');
+    }
+    return { kind: 'request', email, name: claimedName };
   }
   assert(provider.default_store_id !== null, 'invalid', '自動登録の配属先が決まっていません。本部にご確認ください');
   if (email === null || !verified) {
     throw new DomainError('forbidden', '会社のメールアドレスが確認できませんでした');
   }
 
-  const name = typeof claims.name === 'string' && claims.name.trim() !== ''
-    ? claims.name.trim().slice(0, 60)
-    : email.split('@')[0]!.slice(0, 60);
+  const name = claimedName ?? email.split('@')[0]!.slice(0, 60);
   const created = await one<{ id: string }>(
     db,
     `INSERT INTO users (tenant_id, name, trust_level, employment_type, email)
@@ -269,7 +305,7 @@ async function resolveUser(db: Db, provider: ProviderRow, claims: IdTokenClaims)
     [provider.tenant_id, created.id, provider.default_store_id],
   );
   await link(db, provider, claims.sub, created.id, email);
-  return created.id;
+  return { kind: 'user', userId: created.id };
 }
 
 async function link(db: Db, provider: ProviderRow, subject: string, userId: string, email: string | null): Promise<void> {

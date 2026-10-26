@@ -89,6 +89,7 @@ import {
   type UserPatch,
 } from '../domain/users.ts';
 import { OidcDirectory } from '../auth/oidc.ts';
+import { approveRequest, listRequests, rejectRequest } from '../domain/accessRequests.ts';
 import {
   addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   type SsoSite,
@@ -501,6 +502,20 @@ function routes(): Router<Ctx> {
   });
   r.delete('/sso/providers/:providerId', async (c, _req, p) =>
     json(await disableProvider(c.db, c.actor, p.providerId!)));
+
+  // --- 利用の申請（会社アカウントで入れたが、登録がまだの人） ------------------
+  r.get('/access-requests', async (c) => json(await listRequests(c.db, c.actor)));
+  r.post('/access-requests/:requestId/approve', async (c, req, p) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.storeId !== 'string') throw new HttpError(400, '配属する店舗が必要です');
+    return json(await approveRequest(c.db, c.actor, p.requestId!, {
+      storeId: b.storeId,
+      ...(typeof b.name === 'string' ? { name: b.name } : {}),
+      ...(b.trustLevel === 'trusted' || b.trustLevel === 'visitor' ? { trustLevel: b.trustLevel } : {}),
+    }), 201);
+  });
+  r.post('/access-requests/:requestId/reject', async (c, _req, p) =>
+    json(await rejectRequest(c.db, c.actor, p.requestId!)));
   r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
 
   // --- 利用者・端末 ---------------------------------------------------------

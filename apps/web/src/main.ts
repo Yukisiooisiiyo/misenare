@@ -4,7 +4,7 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
+import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
@@ -744,7 +744,7 @@ async function renderManage(): Promise<void> {
             action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
     );
     section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
-    if (isAdmin()) section.append(staffPanel(storeId(), me!.id), inviteForm());
+    if (isAdmin()) section.append(accessRequestPanel(me!.stores, storeId()), staffPanel(storeId(), me!.id), inviteForm());
   } catch (e) {
     section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
   }

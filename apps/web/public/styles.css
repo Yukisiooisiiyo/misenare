@@ -339,3 +339,20 @@ button.tag { cursor: pointer; }
 /* ホームの足元から「この端末の設定」へ */
 .home-foot { margin-top: 32px; font-size: 14px; }
 .home-foot a { color: var(--ink-soft); }
+
+/* スタッフ一覧：同名の注意と、会社アカウントのメールアドレス */
+.warn-badge {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  font-size: 11px; font-weight: 700; color: #7A3E00; background: #FFE2B8;
+}
+@media (prefers-color-scheme: dark) {
+  .warn-badge { color: #FFD9A0; background: #4A2D00; }
+}
+.staff-email { display: block; color: var(--ink-soft); font-size: 12px; word-break: break-all; }
+
+/* 利用の申請：メールアドレスと、承認時に直せる名前・配属先 */
+.request-row { align-items: flex-start; }
+.request-who { display: flex; flex-direction: column; gap: 2px; }
+.request-fields { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
+.request-fields .field { display: flex; flex-direction: column; gap: 2px; }
+.request-fields input, .request-fields select { font: inherit; padding: 6px 8px; min-width: 120px; }
