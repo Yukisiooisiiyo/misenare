@@ -3,18 +3,29 @@
 #   docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
 #   docker compose run --rm api npx tsx apps/api/src/cli/bootstrap.ts "会社名" "店舗名" "あなたの名前"
 # 写真はローカル保存（photos ボリューム）。S3 を使うときは S3_BUCKET などを足す。
+#
+# 本番（と、本番のつもりで確かめる環境）は deploy/docker-compose.yml を使う。
+# あちらは https と夜間バッチが付き、アプリの口を外に出さない。
 
 services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_USER: misenare
-      POSTGRES_PASSWORD: misenare
-      POSTGRES_DB: misenare
+      # **管理用。アプリはこのロールでつながない。**
+      # postgres のイメージは POSTGRES_USER をスーパーユーザーとして作る。
+      # スーパーユーザーは行レベルセキュリティを素通りするので、
+      # アプリは起動を拒否する（apps/api/src/db/safety.ts）。
+      # アプリ用のロールは deploy/init/01-app-role.sh が別に作る。
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      APP_DB_PASSWORD: misenare
     ports: ['5432:5432']
-    volumes: ['pgdata:/var/lib/postgresql/data']
+    volumes:
+      - 'pgdata:/var/lib/postgresql/data'
+      - './deploy/init:/docker-entrypoint-initdb.d:ro'
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U misenare']
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -24,9 +35,12 @@ services:
     depends_on:
       db: { condition: service_healthy }
     environment:
+      # 素通りしないロールでつなぐ（上の init スクリプトが作る）
       DATABASE_URL: postgresql://misenare:misenare@db:5432/misenare
       PORT: '8787'
       PHOTO_DIR: /var/misenare/photos
+      # 手元では、足りない設定で止めない（本番では止める）
+      NODE_ENV: development
       # TRUST_PROXY: '1'        # ロードバランサーの後ろに置くとき
       # TOKENIZER: kuromoji     # 形態素解析を使うとき（npm install kuromoji が必要）
     ports: ['8787:8787']

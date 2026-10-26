@@ -1,0 +1,29 @@
+# HTTPS を自動で用意する（Let's Encrypt）。
+#
+# パスキーは **https でしか動かない**ので、ここが要になる。
+# ドメイン名は .env の MISENARE_HOST で決める。
+# 証明書は caddy_data に残るので、作り直しても取り直しにならない。
+
+{$MISENARE_HOST} {
+	encode zstd gzip
+
+	# アプリは外に口を開けていない。ここだけが入口
+	reverse_proxy api:8787
+
+	# 接続元の IP は X-Forwarded-For の最後に積まれる。
+	# アプリは TRUST_PROXY=1 のとき、その最後（Caddy が見た接続元）を使う
+	header {
+		# 同じ出どころ以外に埋め込ませない（パスキーの画面を囲われないため）
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# 1年間 https のみ（証明書が取れてから入れる。試す段では外してよい）
+		# Strict-Transport-Security "max-age=31536000"
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 3
+		}
+	}
+}

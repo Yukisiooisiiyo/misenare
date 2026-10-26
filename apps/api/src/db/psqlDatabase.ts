@@ -58,7 +58,10 @@ export class PsqlDatabase implements Database {
     if (process.env.NODE_ENV === 'production') {
       throw new Error('PsqlDatabase は開発・テスト専用です。本番では PgDatabase（DB_DRIVER=pg）を使ってください。');
     }
-    this.proc = spawn('psql', [connectionString, '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=0'], {
+    // -w：合言葉を聞かない。これが無いと、合言葉が要る接続で psql が入力を待ち続け、
+    // サーバーが**理由を言わずに起動したまま固まる**（起動時の点検の途中で止まる）。
+    // 聞かずに失敗してくれれば、理由が出る。
+    this.proc = spawn('psql', [connectionString, '-X', '-q', '-A', '-t', '-w', '-v', 'ON_ERROR_STOP=0'], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.proc.stdout.setEncoding('utf8');

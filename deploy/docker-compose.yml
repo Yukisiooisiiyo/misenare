@@ -1,0 +1,99 @@
+# 1台で全部動かす（本番と、本番のつもりで確かめる環境）。
+#
+# 中身：PostgreSQL + アプリ + Caddy（https を自動で用意）+ 夜間バッチ。
+# ミセナレは1台で動く設計なので、無料枠の小さな箱にもそのまま載る。
+#
+#   cp .env.example .env && vi .env     ← 先にここを埋める
+#   docker compose up -d --build
+#   docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
+#   docker compose run --rm api npx tsx apps/api/src/cli/bootstrap.ts "会社名" "店舗名" "あなたの名前"
+#
+# 手元で開発するときは、リポジトリの root にある docker-compose.yml を使う。
+# こちらは https と夜間バッチが付き、アプリの口を外に出さない。
+
+name: misenare
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      # 管理用。アプリはこのロールでつながない（素通りするので起動を拒否される）
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD を決めてください}
+      POSTGRES_DB: postgres
+      # init スクリプトが読む。アプリ用ロールの合言葉
+      APP_DB_PASSWORD: ${DB_APP_PASSWORD:?DB_APP_PASSWORD を決めてください}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # 初回起動のときだけ走る（データが既にあれば走らない）
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+    # 外に口を開けない（同じ箱の中だけ）
+    expose: ['5432']
+
+  api:
+    build: ..
+    depends_on:
+      db: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://misenare:${DB_APP_PASSWORD}@db:5432/misenare
+      # Caddy の後ろに置くので、接続元の IP は X-Forwarded-For から読む
+      TRUST_PROXY: '1'
+      PHOTO_DIR: /var/misenare/photos
+    volumes:
+      - photos:/var/misenare/photos
+    # ここも外に出さない。入口は Caddy だけ
+    expose: ['8787']
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    depends_on: [api]
+    environment:
+      MISENARE_HOST: ${MISENARE_HOST:?MISENARE_HOST（ドメイン名）を決めてください}
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+  # 夜間バッチ。1日1回、索引の作り直し・期限切れの片付け・読みの案・知らせのメール。
+  # cron を入れる代わりに、次の時刻まで寝て起きるだけの輪にしてある
+  # （イメージを増やさず、時刻の計算を node に任せられる）。
+  batch:
+    build: ..
+    depends_on:
+      db: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://misenare:${DB_APP_PASSWORD}@db:5432/misenare
+      PHOTO_DIR: /var/misenare/photos
+    volumes:
+      - photos:/var/misenare/photos
+    restart: unless-stopped
+    # 日本時間の 03:30（= 18:30 UTC）に走る
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          wait_for=$$(node -e 'const n=new Date();const t=new Date(n);t.setUTCHours(18,30,0,0);if(t<=n)t.setUTCDate(t.getUTCDate()+1);process.stdout.write(String(Math.ceil((t-n)/1000)))')
+          echo "次の夜間バッチまで $${wait_for} 秒待ちます"
+          sleep "$${wait_for}"
+          npx tsx apps/api/src/batch/nightly.ts || echo "夜間バッチが失敗しました（次の晩にやり直します）"
+        done
+
+volumes:
+  pgdata:
+  photos:
+  caddy_data:
+  caddy_config:
