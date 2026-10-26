@@ -63,6 +63,25 @@ export function checkConfig(env: NodeJS.ProcessEnv = process.env): ConfigReport 
     add(prod ? 'warn' : 'info', 'ALERT_WEBHOOK_URL', 'サーバー側のエラーが誰にも届きません');
   }
 
+  // メール。決めなければ、申請が来ても本部に届かない（画面を開けば分かる）
+  if (!env.SMTP_HOST || !env.MAIL_FROM) {
+    add(prod ? 'warn' : 'info', 'SMTP_HOST',
+      '知らせのメールを送れません（利用の申請は、画面を開くまで気づけません）');
+  } else {
+    if (!env.MAIL_FROM.includes('@')) add('error', 'MAIL_FROM', 'メールアドレスの形ではありません');
+    const port = Number(env.SMTP_PORT ?? 587);
+    if (!Number.isFinite(port) || port <= 0) add('error', 'SMTP_PORT', '番号ではありません');
+    // 25 番は中継用で、ふつう認証も暗号化もできない。業者の窓口は 587 か 465
+    if (port === 25 && env.SMTP_ALLOW_PLAINTEXT !== '1') {
+      add('warn', 'SMTP_PORT', '25 番は暗号化できないことが多いです。587 か 465 をお使いください');
+    }
+    if (env.SMTP_USER && !env.SMTP_PASS) add('warn', 'SMTP_PASS', '利用者名はあるのに合言葉がありません');
+    if (env.SMTP_ALLOW_PLAINTEXT === '1') {
+      add(prod ? 'warn' : 'info', 'SMTP_ALLOW_PLAINTEXT',
+        '暗号化しないまま送ります。合言葉と本文がそのまま流れるので、閉じた経路だけで使ってください');
+    }
+  }
+
   if (env.TOKENIZER !== 'kuromoji') {
     add('info', 'TOKENIZER', 'Intl.Segmenter で分割します（kuromoji のほうが検索が当たります）');
   }

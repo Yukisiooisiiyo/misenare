@@ -603,10 +603,31 @@ export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLEleme
       }
     });
 
+    // 知らせの送り先。申請が来ても、アプリを開かない日は気づけないので、
+    // 会社の窓口アドレスに送る。Slack を使っていない店舗が多いためメールにしている。
+    const notify = await api<{ notifyEmail: string | null; mailConfigured: boolean }>('GET', '/notify-email');
+    const notifyInput = h('input', { type: 'email', value: notify.notifyEmail ?? '',
+      placeholder: 'joho-system@kdenki.example.co.jp', 'aria-label': '知らせの送り先' });
+    const saveNotify = action('この宛先に知らせる', 'secondary', async () => {
+      const saved = await api<{ notifyEmail: string | null }>('PUT', '/notify-email', { email: notifyInput.value });
+      toast(saved.notifyEmail === null ? '知らせを止めました' : '送り先を決めました');
+    });
+
     body.append(
       h('p', { class: 'hint' },
         '相手の情報システム部から受け取るのは、発行元（issuer）と client_id、必要なら内緒の鍵だけです。'
         + '残りは相手が公開している設定から自動で読みます。'),
+      h('h3', {}, '申請が来たときの知らせ'),
+      h('p', {}, '利用の申請が来たら、この宛先にメールを送ります。空にすると送りません。'),
+      h('p', { class: 'hint' },
+        '店長が招待QRで入っている場合、こちらにメールアドレスがありません。'
+        + '情報システム部や人事の窓口アドレスを1つ決めて、そこから店舗に回してください。'),
+      ...(notify.mailConfigured
+        ? []
+        : [h('p', { class: 'warn-badge' }, 'いまはメールを送れる設定になっていません（サーバー側の SMTP_HOST と MAIL_FROM が必要です）')]),
+      h('div', { class: 'sso-form' }, h('label', {}, '知らせの送り先', notifyInput)),
+      saveNotify,
+      h('h3', {}, '会社アカウントの設定'),
       list,
       h('h3', {}, '設定を足す'),
       h('div', { class: 'sso-form' },

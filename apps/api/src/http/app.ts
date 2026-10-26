@@ -89,7 +89,10 @@ import {
   type UserPatch,
 } from '../domain/users.ts';
 import { OidcDirectory } from '../auth/oidc.ts';
-import { approveRequest, listRequests, rejectRequest, requestBadge } from '../domain/accessRequests.ts';
+import {
+  approveRequest, getNotifySettings, listRequests, rejectRequest, requestBadge, setNotifyEmail,
+} from '../domain/accessRequests.ts';
+import { mailerFromEnv, noMailer } from '../mail/mailer.ts';
 import {
   addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   type SsoSite,
@@ -273,6 +276,14 @@ function requireSsoSite(): SsoSite {
 
 /** テスト用：設定を読み直す */
 export function resetSsoSite(): void { cachedSsoSite = undefined; }
+
+/**
+ * メールを送れる設定になっているか。
+ * 送り先を入れても届かない状態を、画面で知らせるために見る。
+ */
+function mailConfigured(): boolean {
+  return mailerFromEnv() !== noMailer;
+}
 
 function routes(): Router<Ctx> {
   const r = new Router<Ctx>();
@@ -519,6 +530,15 @@ function routes(): Router<Ctx> {
   });
   r.post('/access-requests/:requestId/reject', async (c, _req, p) =>
     json(await rejectRequest(c.db, c.actor, p.requestId!)));
+
+  // 知らせの送り先（本部の管理者だけ）
+  r.get('/notify-email', async (c) => json(await getNotifySettings(c.db, c.actor, mailConfigured())));
+  r.put('/notify-email', async (c, req) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const value = typeof b.email === 'string' ? b.email : null;
+    const saved = await setNotifyEmail(c.db, c.actor, value);
+    return json({ ...saved, mailConfigured: mailConfigured() });
+  });
   r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
 
   // --- 利用者・端末 ---------------------------------------------------------

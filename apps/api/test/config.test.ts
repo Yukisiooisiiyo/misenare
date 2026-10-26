@@ -97,3 +97,39 @@ describe('入口の設定', () => {
       .includes('SSO_REDIRECT_URI'));
   });
 });
+
+describe('メールの設定', () => {
+  it('決めなければ、知らせが届かないことだけ言う（止めない）', () => {
+    const r = checkConfig(prod());
+    assert.equal(r.fatal, false);
+    assert.ok(checkConfig(prod()).findings.some((f) => f.key === 'SMTP_HOST' && f.level === 'warn'));
+  });
+
+  it('差出人の形が違えば止める', () => {
+    const env = prod({ SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'ただの文字' });
+    assert.ok(keys(env, 'error').includes('MAIL_FROM'));
+  });
+
+  it('25 番は警告する（暗号化できないことが多い）', () => {
+    const env = prod({ SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'a@example.com', SMTP_PORT: '25' });
+    assert.ok(keys(env, 'warn').includes('SMTP_PORT'));
+    // 明示して許しているなら言わない
+    const allowed = prod({ ...env, SMTP_ALLOW_PLAINTEXT: '1' });
+    assert.ok(!keys(allowed, 'warn').includes('SMTP_PORT'));
+  });
+
+  it('暗号化しない送信を許していたら、本番では警告する', () => {
+    const env = prod({ SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'a@example.com', SMTP_ALLOW_PLAINTEXT: '1' });
+    assert.ok(keys(env, 'warn').includes('SMTP_ALLOW_PLAINTEXT'));
+  });
+
+  it('合言葉だけ忘れていたら警告する', () => {
+    const env = prod({ SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'a@example.com', SMTP_USER: 'u' });
+    assert.ok(keys(env, 'warn').includes('SMTP_PASS'));
+  });
+
+  it('揃っていれば、何も言わない', () => {
+    const env = prod({ SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'misenare@example.com', SMTP_USER: 'u', SMTP_PASS: 'p' });
+    assert.equal(checkConfig(env).findings.some((f) => f.key.startsWith('SMTP') || f.key === 'MAIL_FROM'), false);
+  });
+});

@@ -9,6 +9,7 @@
 // 既定はこちら。1万人を先に登録してもらう必要はなく、知らない人も勝手には入れない。
 
 import { maybeOne, one, type Db } from '../db/db.ts';
+import { looksLikeEmail } from '../mail/mailer.ts';
 import { assert, DomainError, type Actor, type TrustLevel } from './actor.ts';
 
 /** 待っている申請の上限。これを超えたら新しい申請を受けない */
@@ -201,4 +202,120 @@ export async function requestBadge(db: Db, actor: Actor): Promise<{ pending: num
     db, `SELECT count(*)::int AS count FROM access_requests WHERE status = 'pending'`,
   );
   return { pending: row.count };
+}
+
+// --- 本部への知らせ -----------------------------------------------------------
+
+export interface PendingDigest {
+  /** 送る先。決まっていなければ null */
+  to: string | null;
+  pending: number;
+  /** 新しい順に、いくつか */
+  samples: Array<{ email: string; claimedName: string | null }>;
+  /** 最後に知らせた時刻 */
+  notifiedAt: string | null;
+  /** 知らせたあとに来た申請があるか */
+  hasNew: boolean;
+}
+
+/** 念押しの間隔。待っている申請があっても、これより短い間隔では送らない */
+export const REMINDER_DAYS = 7;
+
+/**
+ * 知らせるべきことがあるかを調べる。
+ *
+ * 毎晩送ると、1件が1か月放置されただけで30通になる。
+ * **新しい申請が来たとき**と、**週に1回の念押し**だけにする。
+ */
+export async function pendingDigest(db: Db): Promise<PendingDigest> {
+  const tenant = await one<{ notify_email: string | null; requests_notified_at: string | null }>(
+    db, `SELECT notify_email, requests_notified_at::text AS requests_notified_at FROM tenants LIMIT 1`,
+  );
+  const rows = await db.query<{ email: string; claimed_name: string | null; requested_at: string }>(
+    `SELECT email, claimed_name, requested_at::text AS requested_at
+       FROM access_requests WHERE status = 'pending' ORDER BY requested_at DESC`,
+  );
+  const since = tenant.requests_notified_at === null ? null : new Date(tenant.requests_notified_at).getTime();
+  return {
+    to: tenant.notify_email,
+    pending: rows.length,
+    samples: rows.slice(0, 5).map((r) => ({ email: r.email, claimedName: r.claimed_name })),
+    notifiedAt: tenant.requests_notified_at,
+    hasNew: since === null
+      ? rows.length > 0
+      : rows.some((r) => new Date(r.requested_at).getTime() > since),
+  };
+}
+
+export function shouldNotify(digest: PendingDigest, now = Date.now()): boolean {
+  if (digest.to === null || digest.pending === 0) return false;
+  if (digest.hasNew) return true;
+  if (digest.notifiedAt === null) return true;
+  const elapsed = now - new Date(digest.notifiedAt).getTime();
+  return elapsed >= REMINDER_DAYS * 24 * 60 * 60_000;
+}
+
+export async function markNotified(db: Db): Promise<void> {
+  await db.query(`UPDATE tenants SET requests_notified_at = now()`);
+}
+
+/**
+ * 知らせの文面。
+ *
+ * 申請者のメールアドレスを載せるのは、受け取った本部が**誰のことか分かる**ようにするため。
+ * 載せないと「3件あります」だけになり、アプリを開くまで誰だか分からない。
+ * 宛先は会社が自分で決めた窓口で、申請者は同じ会社の人なので、ここで出してよい。
+ * ただし出すのは5件までにして、全員の名簿がメールで回ることは避ける。
+ */
+export function digestMail(digest: PendingDigest, appUrl: string): { subject: string; text: string } {
+  const lines = [
+    `会社のアカウントで入ろうとしている方が ${digest.pending} 名、承認をお待ちです。`,
+    '',
+    ...digest.samples.map((s) => `  ・${s.claimedName ?? '（名前なし）'}（${s.email}）`),
+    ...(digest.pending > digest.samples.length ? [`  ほか ${digest.pending - digest.samples.length} 名`] : []),
+    '',
+    'ミセナレの「承認・管理 → 利用の申請」で、名前と配属先を決めて承認してください。',
+    `  ${appUrl}/app/#/manage`,
+    '',
+    '※ 承認するまで、この方はミセナレを使えません。',
+    '※ 心当たりのない方が並んでいる場合は、承認せずに「断る」を押してください。',
+    '',
+    'このメールはミセナレが自動で送っています。返信は不要です。',
+    '送り先を変えるには、本部の管理者が「承認・管理 → 会社のアカウント」で設定してください。',
+  ];
+  return {
+    subject: `【ミセナレ】利用の申請が${digest.pending}件あります`,
+    text: lines.join('\n'),
+  };
+}
+
+// --- 知らせの送り先（本部の管理者が決める） -----------------------------------
+
+export interface NotifySettings {
+  notifyEmail: string | null;
+  /** メールを送れる設定になっているか（なっていなければ、入れても届かない） */
+  mailConfigured: boolean;
+}
+
+export async function getNotifySettings(db: Db, actor: Actor, mailConfigured: boolean): Promise<NotifySettings> {
+  assert(actor.adminScope === 'tenant', 'forbidden', '知らせの送り先を触れるのは本部の管理者だけです');
+  const row = await one<{ notify_email: string | null }>(db, `SELECT notify_email FROM tenants LIMIT 1`);
+  return { notifyEmail: row.notify_email, mailConfigured };
+}
+
+/**
+ * 送り先を決める。空にすれば知らせを止める。
+ *
+ * 宛先は1つだけにしている。複数にすると「誰が見るか」が曖昧になり、
+ * かえって誰も見なくなる。会社の窓口アドレス（情報システム部など）を1つ預かる形。
+ */
+export async function setNotifyEmail(db: Db, actor: Actor, value: string | null): Promise<NotifySettings> {
+  assert(actor.adminScope === 'tenant', 'forbidden', '知らせの送り先を触れるのは本部の管理者だけです');
+  const email = value === null ? null : value.trim();
+  if (email !== null && email !== '') {
+    assert(looksLikeEmail(email), 'invalid', 'メールアドレスの形が違います');
+    assert(email.length <= 200, 'invalid', 'メールアドレスが長すぎます');
+  }
+  await db.query(`UPDATE tenants SET notify_email = $1`, [email === '' ? null : email]);
+  return { notifyEmail: email === '' ? null : email, mailConfigured: true };
 }
