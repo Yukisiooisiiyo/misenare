@@ -403,7 +403,7 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // タグの読み：機械が出した案を人が確かめる。確かめたものだけが検索に効く。
-  r.get('/tag-readings', async (c) => json(await listReadingProposals(c.db, c.actor)));
+  r.get('/tag-readings', async (c) => json(await listReadingProposals(c.db, c.tokenizer, c.actor)));
   r.post('/tag-readings/:tagId', async (c, req, p) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     // readings を省く、または空の配列にすると「読みなし」として確定する

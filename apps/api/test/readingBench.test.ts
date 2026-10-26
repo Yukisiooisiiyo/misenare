@@ -15,7 +15,7 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { readingCandidates } from '@misenare/search-core';
+import { readingCandidates, suggestReading } from '@misenare/search-core';
 import { createMorphologicalTokenizer } from '../src/search/kuromojiTokenizer.ts';
 
 const kuromoji = await createMorphologicalTokenizer().catch(() => null);
@@ -268,5 +268,55 @@ describe('タグの読みの候補：人が選べるかの測定', () => {
     });
     record('タグの読みの候補：揺れる語', ['正解表に入れていない語の、候補の出方:', ...rows].join('\n'));
     assert.ok(true);
+  });
+});
+
+/**
+ * 利用者が実際に見る画面で測る。
+ *
+ * 上の2つは経路ごとの数字だが、タグを作った直後の確認画面には**両方が同時に出る**。
+ *   入力欄 … 形態素解析器の案（信用できないときは空）
+ *   その下 … 漢字の読みの総当たりから作った候補（押すと入力欄に入る）
+ * どちらかに正解があれば、打たずに済む。だから見るべき数字はその**合わせ技**。
+ *
+ * 2つの経路は外す語が違う（辞書に載っている複合語と、載っていない複合語）。
+ * 片方だけを見ていると、この補い合いが数字に出ない。
+ */
+describe('タグの読み：画面に出るもの全部での測定', { skip: kuromoji ? false : 'kuromoji が入っていません' }, () => {
+  it('入力欄か候補のどこかに正解がある率を測る', () => {
+    const rows: string[] = [];
+    let box = 0; let chips = 0; let either = 0;
+    const missed: string[] = [];
+
+    for (const [word, want] of ANSWERS) {
+      const s = suggestReading(kuromoji!, word);
+      // settled（カタカナ語）は尋ねずに登録される。確認の手間はゼロ。
+      const proposed = s.kind === 'silent' ? '' : s.reading;
+      const candidates = readingCandidates(word, 5).filter((c) => c !== proposed);
+      const inBox = proposed === want;
+      const inChips = candidates.includes(want);
+      if (inBox) box++;
+      if (inChips) chips++;
+      if (inBox || inChips) either++;
+      else { missed.push(`${word}（正しくは ${want}）`); }
+      rows.push(`  ${inBox ? '欄' : inChips ? '候' : '×'} ${word}: 欄=${proposed || '（空）'} 候=${candidates.join('／')}`);
+    }
+
+    const total = ANSWERS.length;
+    const report = [
+      `語数 ${total}`,
+      `入力欄に正解が入っていた ${box}（${((box / total) * 100).toFixed(1)}%）… そのまま登録できる`,
+      `候補に正解があった ${chips}（${((chips / total) * 100).toFixed(1)}%）… 1回押せば入る`,
+      `**どちらかにあった ${either}（${((either / total) * 100).toFixed(1)}%）**… 打たずに済む`,
+      '',
+      ...(missed.length > 0 ? ['どちらにも無かった語（人が打つ）:', ...missed.map((m) => `  ${m}`), ''] : []),
+      '語ごとの内訳（欄＝入力欄が正解／候＝候補に正解）:',
+      ...rows,
+    ].join('\n');
+    record('タグの読み：画面に出るもの全部', report);
+
+    // 2つの経路は外す語が違うので、合わせれば取りこぼしはごく少ないはず。
+    // ここが下がったら、片方の経路が壊れたか、両方が同じ語で外し始めた合図。
+    assert.ok(either / total >= 0.97, `打たずに済む率が下がった: ${((either / total) * 100).toFixed(1)}%`);
   });
 });

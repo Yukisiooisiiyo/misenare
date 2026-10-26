@@ -2,7 +2,7 @@
 // visitor の変更は承認待ちの版（pending）として積み、trusted の変更はその場で公開する。
 // どちらの場合も、編集のたびに版を1つ追加して残す。
 
-import { readingCandidates, type Tokenizer } from '@misenare/search-core';
+import { readingCandidates, suggestReading, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -141,7 +141,7 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
   if (isTrusted(actor)) await publish(db, tokenizer, actor, k.id, 1);
   // 新しく作ったタグのうち、まだ読みが決まっていないものを返す。
   // 画面はこれを見て、その場で読みを尋ねる（一番よく知っているのは、いま打った人）。
-  const readingsNeeded = await pendingReadings(db, tagIds);
+  const readingsNeeded = await pendingReadings(db, tokenizer, tagIds);
   return { id: k.id, version: 1, published: isTrusted(actor), readingsNeeded };
 }
 
@@ -155,7 +155,14 @@ export interface ReadingNeeded {
   candidates: string[];
 }
 
-async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<ReadingNeeded[]> {
+/**
+ * 読みが決まっていないタグを、その場で尋ねられる形にして返す。
+ *
+ * 案（入力欄の初期値）は**ここで作る**。夜間バッチも同じ案を貯めるが、
+ * タグを作った直後にいちばん詳しいのはいま打った人なので、バッチを待たない。
+ * カタカナ語のように確かめるまでもない読みは、その場で登録して尋ねない。
+ */
+async function pendingReadings(db: Db, tokenizer: Tokenizer, tagIds: readonly string[]): Promise<ReadingNeeded[]> {
   if (tagIds.length === 0) return [];
   const rows = await db.query<{ id: string; name: string; reading_proposed: string | null }>(
     `SELECT id, name, reading_proposed
@@ -167,13 +174,27 @@ async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<Readi
       ORDER BY name`,
     [[...tagIds]],
   );
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    proposed: r.reading_proposed ?? '',
-    // 案と重なる候補は省く（同じものを2回見せない）
-    candidates: readingCandidates(r.name).filter((c) => c !== r.reading_proposed),
-  }));
+  const out: ReadingNeeded[] = [];
+  for (const r of rows) {
+    // バッチが置いた案があればそれを使い、無ければいま作る
+    const suggestion = r.reading_proposed === null ? suggestReading(tokenizer, r.name) : null;
+    if (suggestion?.kind === 'settled') {
+      await db.query(
+        `UPDATE hashtags SET readings = ARRAY[$2], reading_checked_at = now() WHERE id = $1`,
+        [r.id, suggestion.reading],
+      );
+      continue; // 尋ねない
+    }
+    const proposed = r.reading_proposed ?? (suggestion?.kind === 'proposal' ? suggestion.reading : '');
+    out.push({
+      id: r.id,
+      name: r.name,
+      proposed,
+      // 案と重なる候補は省く（同じものを2回見せない）
+      candidates: readingCandidates(r.name).filter((c) => c !== proposed),
+    });
+  }
+  return out;
 }
 
 export async function editKnowledge(

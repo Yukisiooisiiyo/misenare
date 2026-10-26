@@ -4,7 +4,7 @@
 //   関係の承認・却下 … trusted 以上（visitor の提案は候補として残る）
 //   タグの統合       … administrator（店長・本部）
 
-import { hiraToKata, normalizeTagName, normalizeText, readingCandidates, type Tokenizer } from '@misenare/search-core';
+import { hiraToKata, normalizeTagName, normalizeText, readingCandidates, suggestReading, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -199,7 +199,12 @@ export function validateReading(reading: string): void {
 }
 
 /** 確認待ちの読み。使われている数が多い順に出す（直す価値が大きい順） */
-export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Promise<ReadingProposal[]> {
+export async function listReadingProposals(
+  db: Db,
+  tokenizer: Tokenizer,
+  actor: Actor,
+  limit = 50,
+): Promise<ReadingProposal[]> {
   assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
   // 案の有無にかかわらず、読みが決まっていないタグを出す。
   // 案があるものを先に（直すだけで済むので手が早い）、次に使われている数の多い順。
@@ -211,13 +216,18 @@ export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Pr
       LIMIT $1`,
     [limit],
   );
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    proposed: r.reading_proposed ?? '',
-    useCount: r.use_count,
-    candidates: readingCandidates(r.name).filter((c) => c !== r.reading_proposed),
-  }));
+  return rows.map((r) => {
+    // バッチが置いた案が無ければ、ここで作る（バッチが流れる前でも空欄にしない）
+    const s = r.reading_proposed === null ? suggestReading(tokenizer, r.name) : null;
+    const proposed = r.reading_proposed ?? (s?.kind === 'proposal' ? s.reading : '');
+    return {
+      id: r.id,
+      name: r.name,
+      proposed,
+      useCount: r.use_count,
+      candidates: readingCandidates(r.name).filter((c) => c !== proposed),
+    };
+  });
 }
 
 /** 1つのタグに登録できる読みの数。これ以上は辞書が太るだけで役に立たない。 */
