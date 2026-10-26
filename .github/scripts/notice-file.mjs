@@ -23,13 +23,30 @@ try {
   process.exit(0);
 }
 
-// 注記1件は長すぎると切られるので、節ごとに分けて出す
+// 注記1件に入る量には限りがある。切り捨てると、読む側は
+// 「切れた」ことに気づけないまま欠けた表を見ることになるので、
+// 長い節は行の切れ目で分け、何分の何かを題に書いて全部出す。
+const LIMIT = 3500;
 const blocks = text.split(/^## /m).filter((b) => b.trim().length > 0);
 for (const block of blocks) {
   const [head, ...rest] = block.split('\n');
-  const body = rest.join('\n').replace(/```/g, '').trim();
-  const esc = body.replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A');
-  console.log(`::notice title=${head.trim()}::${esc.slice(0, 4000)}`);
+  const title = head.trim();
+  const lines = rest.join('\n').replace(/```/g, '').trim().split('\n');
+
+  const chunks = [[]];
+  let size = 0;
+  for (const line of lines) {
+    // %0A と %25 で膨らむぶんを見込んで、実際に送る長さで数える
+    const cost = line.replace(/%/g, '%25').length + 3;
+    if (size + cost > LIMIT && chunks.at(-1).length > 0) { chunks.push([]); size = 0; }
+    chunks.at(-1).push(line);
+    size += cost;
+  }
+  for (const [i, chunk] of chunks.entries()) {
+    const label = chunks.length > 1 ? `${title}（${i + 1}/${chunks.length}）` : title;
+    const esc = chunk.join('\n').replace(/%/g, '%25').replace(/\r/g, '').replace(/\n/g, '%0A');
+    console.log(`::notice title=${label}::${esc}`);
+  }
 }
 
 // 仕事の要約にも出しておく（人が GitHub で見るとき用）
