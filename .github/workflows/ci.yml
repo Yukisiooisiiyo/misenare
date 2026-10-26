@@ -108,15 +108,25 @@ jobs:
           echo "::error title=パスキーの通し確認::サーバーが起動しなかった"
           cat e2e-out/server.log
           exit 1
-      - name: Install Chromium for Playwright
-        run: npx playwright install --with-deps chromium
+      # Playwright は本番にも試験にも要らないので、依存には入れず、ここで入れる。
+      # `playwright install` はブラウザの実体を落とすだけで、import できる形には
+      # ならない。初回の失敗はこれだった（サーバーは起動していたのに、台本が
+      # playwright を見つけられずに落ちていた）。
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --no-audit --no-fund playwright@1.63.0
+          npx playwright install --with-deps chromium
       - name: Walk through registration and sign-in
-        run: node apps/web/e2e/passkey.mjs e2e-out
-      - name: Show the server log when it fails
+        run: |
+          set -o pipefail
+          node apps/web/e2e/passkey.mjs e2e-out 2>&1 | tee e2e-out/walk.log
+      - name: Report what went wrong
         if: failure()
         run: |
-          echo '--- server.log ---'
-          tail -100 e2e-out/server.log || true
+          # 通し確認の失敗は、ログを開かないと中身が分からない。
+          # 注記（annotation）に出して、実行の画面を開かずに読めるようにする。
+          node .github/scripts/notice-file.mjs e2e-out/walk.log 'パスキーの通し確認' error || true
+          node .github/scripts/notice-file.mjs e2e-out/server.log 'サーバーのログ' error || true
       - name: Keep the screenshots
         if: always()
         uses: actions/upload-artifact@v4
