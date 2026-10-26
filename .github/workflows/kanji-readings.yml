@@ -1,0 +1,42 @@
+# 漢字の読みの表を、出典から取り直してコミットする。
+#
+# KANJIDIC2 のライセンス（CC BY-SA 4.0）は、使うなら定期的に最新版へ
+# 更新する手順を持つことを求めている。手でやると必ず忘れるので、仕事にする。
+# 手で書く保守からも、これで解放される。
+name: 漢字の読みの表
+
+on:
+  schedule:
+    - cron: '17 20 1 * *'   # 毎月1日 20:17 UTC（日本時間 翌5:17）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Regenerate
+        run: node tools/gen-kanji-readings.mjs
+      - name: Commit if changed
+        run: |
+          set -o pipefail
+          if git diff --quiet -- packages/search-core/src/kanjiReadings.generated.ts; then
+            echo "::notice title=漢字の読みの表::変わりなし"
+            exit 0
+          fi
+          added=$(git diff --numstat -- packages/search-core/src/kanjiReadings.generated.ts | cut -f1)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add packages/search-core/src/kanjiReadings.generated.ts
+          git commit -m "漢字の読みの表を取り直す（KANJIDIC2）
+
+          出典の更新を取り込んだ。CC BY-SA 4.0 の求める定期更新。
+          .github/workflows/kanji-readings.yml が自動で行っている。"
+          git push
+          echo "::notice title=漢字の読みの表::更新してコミットした（差分 ${added} 行）"
