@@ -530,16 +530,50 @@ export function accessRequestPanel(
   });
 }
 
+interface DomainRow { domain: string; verified: boolean; token: string }
+
 interface ProviderRow {
   id: string;
   issuer: string;
   clientId: string;
   hasSecret: boolean;
-  domains: string[];
+  domains: DomainRow[];
   jitEnabled: boolean;
   defaultStoreId: string | null;
   defaultTrust: 'visitor' | 'trusted';
   disabled: boolean;
+}
+
+/**
+ * ドメインの持ち主であることを確かめる案内。
+ *
+ * 確かめるまで、そのドメインは入口で使われない。確かめないと、
+ * 先に登録した会社が他社の社員の行き先を決められてしまうため。
+ * 情報システム部に頼むものなので、置き場所と値をそのまま写せる形で出す。
+ */
+function domainVerifyBlock(d: DomainRow): HTMLElement {
+  const box = h('div', { class: 'verify-box' });
+  const draw = (detail?: string): void => {
+    clear(box);
+    box.append(
+      h('p', { class: 'warn-badge' }, `${d.domain} は未確認です（このドメインの人はまだ入れません）`),
+      h('p', { class: 'hint' }, 'このドメインの DNS に、次の TXT レコードを1つ置いてください。'),
+      h('pre', { class: 'verify-record' }, `${'_misenare-verify'}.${d.domain}  TXT  misenare-verify=${d.token}`),
+      h('p', { class: 'hint' }, '置いたら下を押してください。反映に数分から数時間かかることがあります。'),
+      ...(detail === undefined ? [] : [h('p', { class: 'error' }, detail)]),
+      action('置けたか確かめる', 'secondary small', async () => {
+        const r = await api<{ verified: boolean; detail?: string }>('POST', '/sso/domains/verify', { domain: d.domain });
+        if (r.verified) {
+          clear(box);
+          box.append(h('p', { class: 'check-ok' }, `${d.domain} を確認しました。このドメインの人が入れるようになりました。`));
+          return;
+        }
+        draw(r.detail ?? '見つかりませんでした');
+      }),
+    );
+  };
+  draw();
+  return box;
 }
 
 /**
@@ -560,14 +594,17 @@ export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLEleme
       list.append(...countedList('登録済み', rows.filter((r) => !r.disabled), (r, remove) =>
         h('li', { class: 'row' },
           h('span', {},
-            h('strong', {}, r.domains.join('、') || '（ドメインなし）'),
+            h('strong', {}, r.domains.map((d) => d.domain).join('、') || '（ドメインなし）'),
             h('span', { class: 'staff-email' }, r.issuer),
             h('span', { class: 'hint' },
               `${r.hasSecret ? '内緒の鍵あり' : 'PKCE のみ'}・`
-              + (r.jitEnabled ? '初回に自動で作る' : '初回は申請にする'))),
+              + (r.jitEnabled ? '初回に自動で作る' : '初回は申請にする')),
+            // 確かめていないドメインは、入口で使われない。何をすればよいかをその場に出す
+            ...r.domains.filter((d) => !d.verified).map((d) => domainVerifyBlock(d)),
+          ),
           h('span', { class: 'row-actions' },
             confirmAction('止める', 'secondary small',
-              `${r.domains.join('、')} の人は、会社のアカウントで入れなくなります（登録済みの人は招待やパスキーで入れます）。`,
+              `${r.domains.map((x) => x.domain).join('、')} の人は、会社のアカウントで入れなくなります（登録済みの人は招待やパスキーで入れます）。`,
               async () => { await api('DELETE', `/sso/providers/${r.id}`); toast('止めました'); remove(); }))), 'h3'));
     };
 
@@ -581,6 +618,42 @@ export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLEleme
     const jit = h('input', { type: 'checkbox', id: 'sso-jit' });
     const store = h('select', { 'aria-label': '自動で作るときの配属先' },
       ...stores.map((s) => h('option', { value: s.id }, s.name)));
+
+    // つなぎを確かめる。発行元までしか分からないので、何が確かめられていないかも出す。
+    // 「つながりました」だけ出すと、入れる気になって当日に詰まる。
+    const checkResult = h('div', { class: 'check-result', hidden: true });
+    const check = action('つなぎを確かめる', 'secondary', async () => {
+      problem.hidden = true;
+      clear(checkResult);
+      checkResult.hidden = false;
+      checkResult.append(h('p', { class: 'hint' }, '確かめています…'));
+      try {
+        const r = await api<{
+          ok: boolean;
+          steps: Array<{ ok: boolean; label: string; detail?: string }>;
+          remaining: string[];
+        }>('POST', '/sso/check', { issuer: issuer.value.trim() });
+        clear(checkResult);
+        checkResult.append(
+          h('p', { class: r.ok ? 'check-ok' : 'error' },
+            r.ok ? 'ここまでは問題ありません' : 'つながりませんでした'),
+          h('ul', { class: 'check-steps' }, ...r.steps.map((s) =>
+            h('li', { class: s.ok ? 'step-ok' : 'step-ng' },
+              `${s.ok ? '○' : '×'} ${s.label}`,
+              s.detail ? h('span', { class: 'hint' }, s.detail) : null))),
+          ...(r.remaining.length > 0
+            ? [
+                h('p', { class: 'hint' }, 'ここでは確かめられないこと：'),
+                h('ul', { class: 'check-steps' }, ...r.remaining.map((t) => h('li', { class: 'hint' }, `・${t}`))),
+                h('p', {}, '最後は、ご自身で一度「会社のアカウントで入る」をお試しください。'),
+              ]
+            : []),
+        );
+      } catch (e) {
+        clear(checkResult);
+        checkResult.append(h('p', { class: 'error' }, e instanceof Error ? e.message : String(e)));
+      }
+    });
 
     const add = action('この設定で登録する', 'primary', async () => {
       problem.hidden = true;
@@ -644,7 +717,8 @@ export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLEleme
           + '自動で作る場合は、下の店舗に配属され、権限は visitor（投稿は承認を通る）になります。'),
         h('label', {}, '自動で作るときの配属先', store),
       ),
-      add,
+      h('div', { class: 'row-actions' }, check, add),
+      checkResult,
       problem,
     );
     await refresh();

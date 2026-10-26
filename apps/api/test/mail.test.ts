@@ -15,6 +15,19 @@ let server: FakeSmtp | null = null;
 before(async () => { server = await fakeSmtp(); });
 after(async () => { await server?.close(); });
 
+/**
+ * にせのメールサーバーは、その場で証明書を作るのに openssl を使う。
+ * 無い環境では立てられないので、その試験だけ飛ばす。
+ *
+ * **describe の skip には書けない。** describe が読まれる時点では before が
+ * まだ走っておらず、server は必ず null なので、判定が効かない（見張り役の指摘）。
+ * 試験の中で判断する。
+ */
+function needServer(t: { skip(reason?: string): void }): FakeSmtp | null {
+  if (server === null) t.skip('openssl が無いので、にせのメールサーバーを立てられません');
+  return server;
+}
+
 const config = (over: Record<string, unknown> = {}) => ({
   host: 'localhost', port: server!.port, secure: false, ca: server!.ca, timeoutMs: 8000, ...over,
 });
@@ -60,8 +73,9 @@ describe('メールの組み立て', () => {
   });
 });
 
-describe('SMTP のやり取り', { skip: server === null ? undefined : false }, () => {
-  it('暗号化に上げて、認証して、送る', async () => {
+describe('SMTP のやり取り', () => {
+  it('暗号化に上げて、認証して、送る', async (t) => {
+    if (!needServer(t)) return;
     const before = server!.received.length;
     await sendSmtp(config({ user: 'misenare', pass: 'ひみつ' }), {
       from: 'misenare@example.com',
@@ -83,7 +97,8 @@ describe('SMTP のやり取り', { skip: server === null ? undefined : false }, 
     assert.ok(got.data.includes('=?UTF-8?B?'), '件名が生のままになっている');
   });
 
-  it('認証を使わない相手にも送れる', async () => {
+  it('認証を使わない相手にも送れる', async (t) => {
+    if (!needServer(t)) return;
     const before = server!.received.length;
     await sendSmtp(config(), {
       from: 'a@example.com', to: ['b@example.com'],
@@ -92,9 +107,10 @@ describe('SMTP のやり取り', { skip: server === null ? undefined : false }, 
     assert.equal(server!.received[before]!.auth, null);
   });
 
-  it('暗号化できない相手には、既定では送らない', async () => {
+  it('暗号化できない相手には、既定では送らない', async (t) => {
+    if (!needServer(t)) return;
     const plain = await fakeSmtp({ capabilities: ['AUTH PLAIN'] });
-    assert.ok(plain, 'openssl が無い環境');
+    assert.ok(plain, 'にせのメールサーバーを立てられませんでした');
     try {
       const envelope = {
         from: 'a@example.com', to: ['b@example.com'],
@@ -117,7 +133,8 @@ describe('SMTP のやり取り', { skip: server === null ? undefined : false }, 
     }
   });
 
-  it('断られたら、理由を添えて失敗する', async () => {
+  it('断られたら、理由を添えて失敗する', async (t) => {
+    if (!needServer(t)) return;
     server!.refuse('RCPT', '550 5.1.1 そのような宛先はありません');
     await assert.rejects(
       sendSmtp(config(), {
@@ -128,7 +145,8 @@ describe('SMTP のやり取り', { skip: server === null ? undefined : false }, 
     );
   });
 
-  it('認証を断られたら、送らずに失敗する', async () => {
+  it('認証を断られたら、送らずに失敗する', async (t) => {
+    if (!needServer(t)) return;
     const before = server!.received.length;
     server!.refuse('AUTH', '535 5.7.8 合言葉が違います');
     await assert.rejects(
@@ -153,7 +171,8 @@ describe('送り口の組み立て', () => {
     assert.equal(await mailer.send({ to: ['a@example.com'], subject: 'x', text: 'y' }), false);
   });
 
-  it('宛先の形が全部おかしければ、送らない', async () => {
+  it('宛先の形が全部おかしければ、送らない', async (t) => {
+    if (!needServer(t)) return;
     const mailer = new SmtpMailer(config(), 'misenare@example.com');
     assert.equal(await mailer.send({ to: ['ただの文字'], subject: 'x', text: 'y' }), false);
   });
@@ -163,5 +182,30 @@ describe('送り口の組み立て', () => {
     assert.equal(smtpFromEnv({ SMTP_HOST: 'a', SMTP_PORT: '587' })?.secure, false);
     assert.equal(smtpFromEnv({ SMTP_HOST: 'a' })?.port, 587, '既定は 587');
     assert.equal(smtpFromEnv({})?.secure, undefined, '設定が無ければ null');
+  });
+});
+
+describe('ヘッダーへの差し込み', () => {
+  it('件名に改行を入れられても、別のヘッダーにならない', () => {
+    // ここが抜けると、Bcc を足して知らない宛先に送らせられる。
+    // 長い件名は「改行＋空白」で折り返すのが決まりなので、改行そのものは出る。
+    // 危ないのは「改行のあとが空白でない」形（そこから別のヘッダーが始まる）。
+    const folded = (value: string): boolean => {
+      for (let i = value.indexOf('\n'); i >= 0; i = value.indexOf('\n', i + 1)) {
+        const next = value[i + 1];
+        if (next !== ' ' && next !== '\t') return false;
+      }
+      return true;
+    };
+    const nasty = encodeHeader('ふつうの件名\r\nBcc: warui@example.com');
+    assert.ok(folded(nasty), nasty);
+    assert.ok(!nasty.includes('Bcc'), '中身がそのまま出ている');
+    const ascii = encodeHeader('subject\r\nBcc: warui@example.com');
+    assert.equal(ascii, 'subject Bcc: warui@example.com');
+    assert.ok(folded(ascii));
+  });
+
+  it('宛先に改行の入ったものは、そもそも送らない', () => {
+    assert.equal(looksLikeEmail('a@example.com\r\nBcc: warui@example.com'), false);
   });
 });

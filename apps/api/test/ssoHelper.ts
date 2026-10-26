@@ -10,8 +10,9 @@ export interface FakeIdp {
   issuer: string;
   clientId: string;
   clientSecret: string;
-  /** OidcDirectory に差し込む fetch */
-  fetch: (url: string, init?: RequestInit) => Promise<Response>;
+  /** OidcDirectory に差し込む取りに行く口（本番は safeFetch） */
+  fetch: (url: string, init?: { method?: 'GET' | 'POST'; headers?: Record<string, string>; body?: string })
+    => Promise<{ status: number; text: string }>;
   /** 次の交換で返す ID トークンを決める */
   issue(claims: Record<string, unknown>, options?: { kid?: string; alg?: string }): void;
   /** 交換のときに相手が受け取った中身（PKCE が本当に送られているかを見る） */
@@ -55,8 +56,8 @@ export function fakeIdp(options: { issuer?: string; clientId?: string } = {}): F
     },
     refuse(error) { refusal = error; },
     async fetch(url, init) {
-      const json = (body: unknown, status = 200): Response =>
-        new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+      const json = (body: unknown, status = 200): { status: number; text: string } =>
+        ({ status, text: JSON.stringify(body) });
 
       if (url === `${issuer}/.well-known/openid-configuration`) {
         return json({
@@ -72,16 +73,16 @@ export function fakeIdp(options: { issuer?: string; clientId?: string } = {}): F
         return json({ keys: [{ ...jwk, kid, use: 'sig', alg: 'RS256' }] });
       }
       if (url === `${issuer}/token`) {
-        self.lastTokenRequest = Object.fromEntries(new URLSearchParams(String(init?.body ?? '')));
-        const headers = new Headers(init?.headers ?? {});
-        self.lastAuthorization = headers.get('authorization');
+        self.lastTokenRequest = Object.fromEntries(new URLSearchParams(init?.body ?? ''));
+        const entries = Object.entries(init?.headers ?? {});
+        self.lastAuthorization = entries.find(([k]) => k.toLowerCase() === 'authorization')?.[1] ?? null;
         if (refusal) { const e = refusal; refusal = null; return json({ error: 'invalid_grant', error_description: e }, 400); }
         if (!nextToken) return json({ error: 'invalid_grant', error_description: 'まだ用意していません' }, 400);
         const token = nextToken;
         nextToken = null;
         return json({ token_type: 'Bearer', id_token: token, access_token: 'aaa', expires_in: 3600 });
       }
-      return new Response('not found', { status: 404 });
+      return { status: 404, text: 'not found' };
     },
   };
   return self;

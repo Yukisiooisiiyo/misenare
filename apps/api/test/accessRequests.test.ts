@@ -47,6 +47,9 @@ async function setup() {
     issuer: idp.issuer, clientId: idp.clientId, clientSecret: idp.clientSecret,
     domains: ['kdenki.example.co.jp'],
   }));
+  // ドメインは DNS に印を置くまで入口で使われない（なりすまし対策）。
+  // ここでは置けたことにする。印そのものの試験は sso.test.ts。
+  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
 }
 
 /** 会社のアカウントで入ろうとする（登録が無いので弾かれる） */

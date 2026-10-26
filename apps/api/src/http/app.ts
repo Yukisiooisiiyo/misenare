@@ -94,12 +94,13 @@ import {
 } from '../domain/accessRequests.ts';
 import { mailerFromEnv, noMailer } from '../mail/mailer.ts';
 import {
-  addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
-  type SsoSite,
+  addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
+  verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
+import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
-import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter } from './rateLimit.ts';
+import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
 import { HttpError, json, readJson, Router } from './router.ts';
 
@@ -109,7 +110,10 @@ interface Ctx {
   db: Db;
   tokenizer: Tokenizer;
   storage: Storage;
-  /** 会社に属さないテーブル（合言葉など）を触るため */
+  /** 相手の IdP とのやり取り（設定と鍵の覚えを共有するため、1つを回す） */
+  oidc: OidcDirectory;
+  /** 回数を止める。外に取りに行く経路で使う */
+  limit: (req: Request, name: string, rule: RateRule) => Promise<boolean>;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -516,6 +520,24 @@ function routes(): Router<Ctx> {
   });
   r.delete('/sso/providers/:providerId', async (c, _req, p) =>
     json(await disableProvider(c.db, c.actor, p.providerId!)));
+  // ドメインの持ち主であることを確かめる。DNS を引くので回数を止める
+  r.post('/sso/domains/verify', async (c, req) => {
+    if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
+      throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
+    }
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.domain !== 'string') throw new HttpError(400, 'domain が必要です');
+    return json(await verifyDomain(c.db, c.actor, b.domain, (name) => dnsResolveTxt(name)));
+  });
+  // つなぎを確かめる。外に取りに行くので、本部の管理者だけ・回数も止める
+  r.post('/sso/check', async (c, req) => {
+    if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
+      throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
+    }
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.issuer !== 'string') throw new HttpError(400, 'issuer が必要です');
+    return json(await checkConnection(c.oidc, c.actor, b.issuer));
+  });
 
   // --- 利用の申請（会社アカウントで入れたが、登録がまだの人） ------------------
   r.get('/access-requests', async (c) => json(await listRequests(c.db, c.actor)));
@@ -709,7 +731,10 @@ export function createApp(deps: AppDeps) {
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
       matched.handler(
-        { actor, identity, db, tokenizer: deps.tokenizer, storage },
+        {
+          actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
+          limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
+        },
         req,
         matched.params,
       ),

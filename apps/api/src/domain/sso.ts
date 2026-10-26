@@ -94,8 +94,13 @@ export async function startSso(
   if (!domain) throw new DomainError('invalid', 'メールアドレスの形が違います');
 
   const raw: Raw = (sql, params) => database.raw(sql, params);
+  // **確かめ済みのドメインだけを使う。** 確かめていないドメインを使うと、
+  // 先に登録した会社が、そのドメインの人の行き先を決められてしまう
+  // （本物に似せた入力欄に送って合言葉を取る、という筋が通ってしまう）。
   const found = await maybeOneRaw<{ tenant_id: string; provider_id: string }>(
-    raw, `SELECT tenant_id, provider_id FROM sso_domains WHERE domain = $1`, [domain],
+    raw,
+    `SELECT tenant_id, provider_id FROM sso_domains WHERE domain = $1 AND verified_at IS NOT NULL`,
+    [domain],
   );
   if (!found) {
     throw new DomainError('not_found', `${domain} の会社アカウントでの入り方は、まだ用意されていません。招待のQRコードをお使いください`);
@@ -349,13 +354,21 @@ export interface ProviderInput {
   defaultTrust?: 'visitor' | 'trusted';
 }
 
+export interface DomainView {
+  domain: string;
+  /** DNS に印を置けたか。置けるまで、このドメインは入口で使われない */
+  verified: boolean;
+  /** DNS に置いてもらう印 */
+  token: string;
+}
+
 export interface ProviderView {
   id: string;
   issuer: string;
   clientId: string;
   /** 内緒の鍵そのものは返さない。入っているかどうかだけ */
   hasSecret: boolean;
-  domains: string[];
+  domains: DomainView[];
   jitEnabled: boolean;
   defaultStoreId: string | null;
   defaultTrust: 'visitor' | 'trusted';
@@ -368,23 +381,30 @@ function requireTenantAdmin(actor: Actor): void {
 
 export async function listProviders(db: Db, actor: Actor): Promise<ProviderView[]> {
   requireTenantAdmin(actor);
-  const rows = await db.query<ProviderRow & { domains: string[] | null }>(
+  const rows = await db.query<ProviderRow & { domain_rows: string | null }>(
     `SELECT p.id, p.tenant_id, p.issuer, p.client_id, p.client_secret, p.jit_enabled,
             p.default_store_id, p.default_trust, p.disabled_at::text AS disabled_at,
-            (SELECT array_agg(d.domain ORDER BY d.domain) FROM sso_domains d WHERE d.provider_id = p.id) AS domains
+            (SELECT json_agg(json_build_object(
+                      'domain', d.domain,
+                      'verified', d.verified_at IS NOT NULL,
+                      'token', d.verify_token) ORDER BY d.domain)::text
+               FROM sso_domains d WHERE d.provider_id = p.id) AS domain_rows
        FROM sso_providers p ORDER BY p.created_at`,
   );
-  return rows.map((r) => ({
-    id: r.id,
-    issuer: r.issuer,
-    clientId: r.client_id,
-    hasSecret: r.client_secret !== null,
-    domains: r.domains ?? [],
-    jitEnabled: r.jit_enabled,
-    defaultStoreId: r.default_store_id,
-    defaultTrust: r.default_trust,
-    disabled: r.disabled_at !== null,
-  }));
+  return rows.map((r) => {
+    const domains = (r.domain_rows === null ? [] : JSON.parse(r.domain_rows)) as DomainView[];
+    return {
+      id: r.id,
+      issuer: r.issuer,
+      clientId: r.client_id,
+      hasSecret: r.client_secret !== null,
+      domains,
+      jitEnabled: r.jit_enabled,
+      defaultStoreId: r.default_store_id,
+      defaultTrust: r.default_trust,
+      disabled: r.disabled_at !== null,
+    };
+  });
 }
 
 /**
@@ -455,4 +475,160 @@ export async function disableProvider(db: Db, actor: Actor, id: string): Promise
 export async function sweepSsoStates(raw: Raw): Promise<number> {
   const rows = await raw(`DELETE FROM sso_states WHERE expires_at < now() RETURNING state`);
   return rows.length;
+}
+
+// --- つなぎを確かめる ---------------------------------------------------------
+
+export interface ConnectionCheck {
+  ok: boolean;
+  /** 人が読む結果。順に並べる */
+  steps: Array<{ ok: boolean; label: string; detail?: string }>;
+  /** 確かめられなかったこと（これは自分で入ってみるしかない） */
+  remaining: string[];
+}
+
+/**
+ * 入れた設定で、相手に本当につながるかを確かめる。
+ *
+ * **確かめられるのは発行元までで、client_id と内緒の鍵が正しいかは分からない。**
+ * それを確かめる唯一の方法は、本部の人が自分で一度入ってみること。
+ * 分からないことは「確かめられなかったこと」として正直に返す。
+ * 「つながりました」だけ出すと、入れる気になって当日に詰まる。
+ *
+ * 行き先はすべて safeFetch を通る（社内のアドレスや付け替えは、そこで止まる）。
+ * ここを足すことで外に取りに行く入口が1つ増えるので、
+ * **呼べるのは本部の管理者だけ**にし、回数も止めている（RULES.ssoLogin と同じ口）。
+ */
+export async function checkConnection(
+  directory: OidcDirectory, actor: Actor, issuer: string,
+): Promise<ConnectionCheck> {
+  assert(actor.adminScope === 'tenant', 'forbidden', 'つなぎを確かめられるのは本部の管理者だけです');
+  const steps: ConnectionCheck['steps'] = [];
+  const base = issuer.trim().replace(/\/+$/, '');
+
+  // 1. 形。ここで止まるなら打ち間違い
+  try {
+    const url = new URL(base);
+    assert(url.protocol === 'https:', 'invalid', '発行元は https で始まる必要があります');
+    assert(url.search === '' && url.hash === '', 'invalid', '発行元に ? や # は付けられません');
+    steps.push({ ok: true, label: '発行元の形' });
+  } catch (err) {
+    steps.push({ ok: false, label: '発行元の形', detail: err instanceof Error ? err.message : String(err) });
+    return { ok: false, steps, remaining: [] };
+  }
+
+  // 2. 相手に届くか・名乗る発行元が一致するか・行き先が安全か（describe が全部見る）
+  let discovery;
+  try {
+    discovery = await directory.describe(base);
+    steps.push({ ok: true, label: '相手の設定を読めた' });
+    steps.push({ ok: true, label: '相手が名乗る発行元が、入れた値と一致した' });
+  } catch (err) {
+    steps.push({
+      ok: false,
+      label: '相手の設定を読めた',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, steps, remaining: [] };
+  }
+
+  // 3. PKCE。対応していない相手は、こちらが受けない
+  const methods = discovery.code_challenge_methods_supported;
+  if (methods === undefined) {
+    steps.push({ ok: true, label: 'PKCE（S256）', detail: '相手が対応を公表していません。入るときに試されます' });
+  } else if (methods.includes('S256')) {
+    steps.push({ ok: true, label: 'PKCE（S256）' });
+  } else {
+    steps.push({ ok: false, label: 'PKCE（S256）', detail: `相手が対応していません（${methods.join('、')}）` });
+  }
+
+  // 4. 鍵。署名を確かめるのに要る
+  try {
+    const keys = await directory.signingKeys(base);
+    const usable = keys.filter((k) => k.kty === 'RSA' || k.kty === 'EC');
+    assert(usable.length > 0, 'invalid', '使える鍵がありません');
+    steps.push({ ok: true, label: `署名の鍵を読めた（${usable.length}本）` });
+  } catch (err) {
+    steps.push({ ok: false, label: '署名の鍵を読めた', detail: err instanceof Error ? err.message : String(err) });
+  }
+
+  return {
+    ok: steps.every((s) => s.ok),
+    steps,
+    remaining: [
+      'client_id と内緒の鍵が正しいか（引換券の交換は、実際に入るときにしか起きません）',
+      '相手側に、戻り先（SSO_REDIRECT_URI）が登録されているか',
+      'どの社員にこのアプリを使わせるか（相手側の割り当て）',
+    ],
+  };
+}
+
+// --- ドメインの持ち主であることを確かめる -------------------------------------
+
+/** DNS に印を置く場所。この下に TXT で印を置いてもらう */
+export const VERIFY_PREFIX = '_misenare-verify';
+/** 確かめに行く間隔の下限（連打で DNS を叩かないため） */
+export const VERIFY_COOLDOWN_MS = 30_000;
+
+export interface DomainCheck {
+  domain: string;
+  verified: boolean;
+  /** 置いてもらう場所と値 */
+  record: { name: string; type: 'TXT'; value: string };
+  detail?: string;
+}
+
+/** TXT を引く口。試験では差し替える */
+export type ResolveTxt = (name: string) => Promise<string[][]>;
+
+/**
+ * ドメインの持ち主であることを確かめる。
+ *
+ * `_misenare-verify.<ドメイン>` に TXT で `misenare-verify=<印>` を置いてもらい、
+ * それを引いて一致すれば、そのドメインの DNS を触れる人＝持ち主だと見なす。
+ * Google や Microsoft と同じやり方。
+ *
+ * **DNS を引くのは safeFetch の対象外**（HTTP で取りに行くわけではないので、
+ * 社内のアドレスを指されても、こちらは何もつなぎに行かない）。
+ */
+export async function verifyDomain(
+  db: Db, actor: Actor, domain: string, resolveTxt: ResolveTxt,
+): Promise<DomainCheck> {
+  requireTenantAdmin(actor);
+  const name = domain.trim().toLowerCase();
+  const row = await maybeOne<{ verify_token: string; verified_at: string | null; checked_at: string | null }>(
+    db,
+    `SELECT verify_token, verified_at::text AS verified_at, checked_at::text AS checked_at
+       FROM sso_domains WHERE domain = $1`,
+    [name],
+  );
+  if (!row) throw new DomainError('not_found', `${name} は登録されていません`);
+  const record = { name: `${VERIFY_PREFIX}.${name}`, type: 'TXT' as const, value: `misenare-verify=${row.verify_token}` };
+  if (row.verified_at !== null) return { domain: name, verified: true, record };
+
+  if (row.checked_at !== null && Date.now() - new Date(row.checked_at).getTime() < VERIFY_COOLDOWN_MS) {
+    return { domain: name, verified: false, record, detail: '少し待ってからもう一度お試しください（DNS は反映に時間がかかります）' };
+  }
+  await db.query(`UPDATE sso_domains SET checked_at = now() WHERE domain = $1`, [name]);
+
+  let records: string[][];
+  try {
+    records = await resolveTxt(record.name);
+  } catch (err) {
+    return {
+      domain: name, verified: false, record,
+      detail: `${record.name} の TXT を引けませんでした（${err instanceof Error ? err.message : String(err)}）。`
+        + '置いた直後なら、反映を待ってからもう一度お試しください',
+    };
+  }
+  // TXT は長い値が分割されて返るので、つないでから比べる
+  const found = records.map((parts) => parts.join('')).map((v) => v.trim());
+  if (!found.includes(record.value)) {
+    return {
+      domain: name, verified: false, record,
+      detail: found.length === 0 ? '印が見つかりません' : `見つかったのは別の値です（${found.slice(0, 3).join('、')}）`,
+    };
+  }
+  await db.query(`UPDATE sso_domains SET verified_at = now() WHERE domain = $1`, [name]);
+  return { domain: name, verified: true, record };
 }

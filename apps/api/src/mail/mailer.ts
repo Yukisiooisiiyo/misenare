@@ -19,8 +19,15 @@ export interface Mailer {
   send(mail: Mail): Promise<boolean>;
 }
 
-/** 件名などのヘッダーに日本語を入れる形。ASCII だけならそのまま */
+/**
+ * 件名などのヘッダーに日本語を入れる形。ASCII だけならそのまま。
+ *
+ * 改行は先に落とす。ヘッダーに改行を入れられると、そこから別のヘッダーを
+ * 差し込める（Bcc を足して、知らない宛先に送らせる）。
+ * いまの呼び出し元に人の入力は入らないが、1行で塞げるので塞いでおく。
+ */
 export function encodeHeader(value: string): string {
+  value = value.replace(/[\r\n]+/g, ' ');
   if (/^[\x20-\x7E]*$/.test(value)) return value;
   // 1行が長くなりすぎないよう、適当な長さで区切って並べる
   const chunks: string[] = [];
