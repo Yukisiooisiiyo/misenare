@@ -4,7 +4,8 @@
 import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { action, askReadings, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
+import { action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, staffPanel, tagPanel } from './manage.ts';
+import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
@@ -19,6 +20,19 @@ async function boot(): Promise<void> {
   // 招待のQRコードは /app/#invite=<token> を開く
   const invite = /^#invite=(.+)$/.exec(location.hash);
   if (invite) return acceptInvite(decodeURIComponent(invite[1]!));
+  // 会社アカウントから戻ってきたところ。#sso=<token>[&to=#/...]
+  const sso = /^#sso=([^&]+)(?:&to=(.+))?$/.exec(location.hash);
+  if (sso) {
+    session.token = decodeURIComponent(sso[1]!);
+    const to = sso[2] ? decodeURIComponent(sso[2]) : '#/home';
+    history.replaceState(null, '', `${location.pathname}${to.startsWith('#/') ? to : '#/home'}`);
+    return boot();
+  }
+  const ssoError = /^#sso-error=(.+)$/.exec(location.hash);
+  if (ssoError) {
+    history.replaceState(null, '', location.pathname);
+    return renderWelcome(decodeURIComponent(ssoError[1]!));
+  }
   if (!session.token) return renderWelcome();
   try {
     me = await api<Me>('GET', '/me');
@@ -72,19 +86,132 @@ function renderWelcome(error?: string): void {
     const m = /#invite=([^\s]+)/.exec(v);
     void acceptInvite(m ? decodeURIComponent(m[1]!) : v);
   };
+  const problem = h('p', { class: 'error', role: 'alert', hidden: !error }, error ?? '');
+
+  // パスキーを作ってある人は、招待を待たずに自分で入り直せる。
+  // 端末を買い替えた・データを消した、は売場では普通に起きる。
+  const signIn = h('button', { type: 'button', class: 'primary' }, 'パスキーで入る');
+  signIn.onclick = async () => {
+    problem.hidden = true;
+    signIn.disabled = true;
+    signIn.textContent = '端末で確認しています…';
+    try {
+      session.token = await loginWithPasskey();
+      history.replaceState(null, '', `${location.pathname}#/home`);
+      await boot();
+      return;
+    } catch (e) {
+      // 利用者が途中でやめた場合は、失敗として騒がない
+      const aborted = e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'AbortError');
+      problem.textContent = aborted ? 'パスキーでの確認が中断されました。' : e instanceof Error ? e.message : String(e);
+      problem.hidden = false;
+    }
+    signIn.disabled = false;
+    signIn.textContent = 'パスキーで入る';
+  };
+
+  // 会社のアカウント（社員向け）。打ったアドレスのドメインから、相手の IdP を決める。
+  // 登録が無いドメインなら、その場で招待の案内に戻す。
+  const email = h('input', { id: 'sso-email', type: 'email', autocomplete: 'username',
+    placeholder: 'you@example.co.jp', inputmode: 'email' });
+  const company = action('会社のアカウントで入る', 'secondary', async () => {
+    problem.hidden = true;
+    const value = email.value.trim();
+    if (value === '') { problem.textContent = '会社のメールアドレスを入れてください。'; problem.hidden = false; return; }
+    try {
+      const r = await api<{ authorizeUrl: string }>('POST', '/auth/sso/start', { email: value });
+      location.href = r.authorizeUrl;
+    } catch (e) {
+      problem.textContent = e instanceof Error ? e.message : String(e);
+      problem.hidden = false;
+    }
+  });
+
   shell(null, h('section', { class: 'page welcome' },
     h('h1', { class: 'brand' }, 'ミセナレ'),
     h('p', { class: 'lead' }, '店のやり方を、接客の合間にすぐ探せます。'),
+    problem,
+    passkeySupported() ? h('div', { class: 'welcome-signin' },
+      signIn,
+      h('p', { class: 'hint' }, 'この端末にパスキーを作ってある場合は、こちらから入れます。'),
+    ) : null,
+    h('p', { class: 'or' }, '会社のアカウントをお持ちの方'),
+    h('label', { for: 'sso-email' }, '会社のメールアドレス'),
+    email,
+    company,
+    h('p', { class: 'or' }, 'はじめての端末'),
     h('p', {}, '使い始めるには、店長が発行する招待のQRコードをスマホのカメラで読み取ってください。'),
-    error ? h('p', { class: 'error', role: 'alert' }, error) : null,
     h('label', { for: 'invite' }, 'リンクやコードを受け取った場合'),
     input,
-    h('button', { type: 'button', class: 'primary', onclick: submit }, 'この端末を登録する'),
+    h('button', { type: 'button', class: 'secondary', onclick: submit }, 'この端末を登録する'),
   ));
 }
 
 function renderFatal(e: unknown): void {
   shell(null, h('section', { class: 'page center' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
+}
+
+// --- この端末 -------------------------------------------------------------------
+//
+// パスキーの管理は、店長だけでなく**全員**が使う。端末を替えたときに自分で
+// 入り直せるようにするのが目的なので、承認・管理（trusted 以上）には置かない。
+
+async function renderDevice(): Promise<void> {
+  const section = h('section', { class: 'page' },
+    h('h1', {}, 'この端末の設定'),
+    h('p', { class: 'hint' }, `いまお使いの端末：${guessDeviceName()}`),
+  );
+  shell(null, section);
+
+  const list = h('div');
+  const problem = h('p', { class: 'error', role: 'alert', hidden: true });
+
+  const refresh = async (): Promise<void> => {
+    clear(list);
+    let rows: PasskeyRow[];
+    try {
+      rows = await listPasskeys();
+    } catch (e) {
+      list.append(h('p', { class: 'hint' }, e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    list.append(...countedList('登録したパスキー', rows, (row, remove) =>
+      h('li', { class: 'row' },
+        h('span', {}, row.name ?? '名前なし'),
+        h('span', { class: 'hint' },
+          row.disabled ? '使えません' : row.last_used_at ? `最後に使った日 ${relativeDate(row.last_used_at)}` : 'まだ使っていません'),
+        h('span', { class: 'row-actions' },
+          confirmAction('消す', 'secondary small', `${row.name ?? 'このパスキー'}を消します。この端末からは入れなくなります。`,
+            async () => { await deletePasskey(row.id); toast('消しました'); remove(); })))));
+  };
+
+  if (!passkeySupported()) {
+    section.append(h('p', { class: 'note' }, 'この端末ではパスキーを使えません。入り直すときは、店長に招待をもう一度発行してもらってください。'));
+    return;
+  }
+
+  const add = action('この端末にパスキーを作る', 'primary', async () => {
+    problem.hidden = true;
+    try {
+      await registerPasskey();
+      toast('パスキーを作りました');
+      await refresh();
+    } catch (e) {
+      const aborted = e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'AbortError');
+      problem.textContent = aborted ? '端末での確認が中断されました。' : e instanceof Error ? e.message : String(e);
+      problem.hidden = false;
+    }
+  });
+
+  section.append(
+    h('h2', {}, 'パスキー'),
+    h('p', {}, 'この端末にパスキーを作っておくと、端末を替えたときやデータを消したときに、招待を待たずに自分で入り直せます。'),
+    h('p', { class: 'hint' }, '鍵は端末の中に残ります。暗証番号や指紋での確認が要るので、他の人には使えません。'),
+    add,
+    problem,
+    list,
+  );
+  await refresh();
 }
 
 // --- 画面の枠 -------------------------------------------------------------------
@@ -162,6 +289,7 @@ function route(): void {
   if (path === '/scan') return renderScan(params.get('jan') ?? '');
   if (path === '/notices') return void renderNoticesTab();
   if (path === '/manage') return void renderManage();
+  if (path === '/device') return void renderDevice();
   return void renderHome();
 }
 
@@ -180,6 +308,7 @@ async function renderHome(): Promise<void> {
     me!.trustLevel === 'visitor' && !isAdmin()
       ? h('p', { class: 'note' }, 'あなたの投稿や修正は、trusted のメンバーが承認すると公開されます。')
       : null,
+    h('p', { class: 'home-foot' }, h('a', { href: '#/device' }, 'この端末の設定')),
   ));
   // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）
   await refreshBadges();

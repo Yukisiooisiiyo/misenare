@@ -324,3 +324,18 @@ button.tag { cursor: pointer; }
   color: var(--ink-soft); font-size: 12px; line-height: 1.8; text-align: center;
 }
 .credits a { color: inherit; text-decoration: underline; }
+
+/* ログイン前の画面：パスキーで入る導線と、はじめての端末の区切り */
+.welcome-signin { margin: 20px 0 8px; }
+.welcome-signin .hint { margin-top: 6px; }
+.welcome .or {
+  margin: 24px 0 8px; color: var(--ink-soft); font-size: 13px; font-weight: 700;
+  display: flex; align-items: center; gap: 12px;
+}
+.welcome .or::before, .welcome .or::after {
+  content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.25;
+}
+
+/* ホームの足元から「この端末の設定」へ */
+.home-foot { margin-top: 32px; font-size: 14px; }
+.home-foot a { color: var(--ink-soft); }

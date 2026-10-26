@@ -13,6 +13,9 @@ function literal(v: unknown): string {
   }
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
   if (v instanceof Date) return quote(v.toISOString());
+  // bytea は16進の書き方で渡す（standard_conforming_strings が on なので \x はそのまま届く）
+  if (Buffer.isBuffer(v)) return quote(`\\x${v.toString('hex')}`);
+  if (v instanceof Uint8Array) return quote(`\\x${Buffer.from(v).toString('hex')}`);
   if (Array.isArray(v)) {
     const items = v.map((x) => (x === null ? 'NULL' : `"${String(x).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`));
     return quote(`{${items.join(',')}}`);
@@ -111,10 +114,14 @@ export class PsqlDatabase implements Database {
    */
   private txChain: Promise<unknown> = Promise.resolve();
 
+  /** 取引を開いているあいだ true。raw() の誤用をその場で知らせるために持つ */
+  private inTransaction = false;
+
   withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
     const task = this.txChain.then(async () => {
       const db: Db = { query: async <R>(sql: string, params?: readonly unknown[]) => (await this.run(sql, params)) as R[] };
       await this.run('BEGIN');
+      this.inTransaction = true;
       try {
         await this.run("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
         const result = await fn(db);
@@ -123,15 +130,35 @@ export class PsqlDatabase implements Database {
       } catch (err) {
         await this.run('ROLLBACK');
         throw err;
+      } finally {
+        this.inTransaction = false;
       }
     });
     this.txChain = task.catch(() => undefined);
     return task;
   }
 
-  /** テナントを設定せずに実行する（マイグレーションやテストの準備用）。 */
-  async raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
-    return this.run(sql, params);
+  /**
+   * テナントを設定せずに実行する（マイグレーション、テストの準備、
+   * ログイン前の処理など、まだ会社が決まっていないもの）。
+   *
+   * withTenant と同じ順番待ちに並べる。psql の接続は1本しかないので、
+   * これを飛ばすと他の取引の BEGIN と COMMIT のあいだに割り込み、
+   * 相手のトランザクションの中で実行されてしまう。
+   * （実際、パスキーの合言葉の削除がそうなって、取引が開いたまま残った）
+   */
+  raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
+    if (this.inTransaction) {
+      // そのまま並べると、自分が待っている取引が自分の完了を待つ形になって永久に止まる。
+      // 黙って固まるより、理由を言って落ちるほうがよい。
+      return Promise.reject(new Error(
+        'raw() は withTenant の中からは呼べません（psql の接続は1本しかなく、順番待ちが噛み合わずに止まります）。'
+        + `取引の中では db.query を使ってください: ${sql.trim().slice(0, 120)}`,
+      ));
+    }
+    const task = this.txChain.then(() => this.run(sql, params));
+    this.txChain = task.catch(() => undefined);
+    return task;
   }
 
   async close(): Promise<void> {

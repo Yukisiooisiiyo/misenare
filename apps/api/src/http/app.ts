@@ -41,6 +41,16 @@ import {
 } from '../domain/handovers.ts';
 import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
 import {
+  deletePasskey,
+  finishRegistration,
+  listPasskeys,
+  loginWithPasskey,
+  siteConfigFromEnv,
+  startLogin,
+  startRegistration,
+  type SiteConfig,
+} from '../domain/passkeys.ts';
+import {
   ackNotice,
   createNotice,
   deleteNotice,
@@ -78,6 +88,11 @@ import {
   type InvitationInput,
   type UserPatch,
 } from '../domain/users.ts';
+import { OidcDirectory } from '../auth/oidc.ts';
+import {
+  addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
+  type SsoSite,
+} from '../domain/sso.ts';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter } from './rateLimit.ts';
@@ -90,6 +105,7 @@ interface Ctx {
   db: Db;
   tokenizer: Tokenizer;
   storage: Storage;
+  /** 会社に属さないテーブル（合言葉など）を触るため */
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -234,6 +250,28 @@ function intParam(v: string | undefined, name: string): number {
   if (!Number.isInteger(n) || n < 1) throw new HttpError(400, `${name} が正しくありません`);
   return n;
 }
+
+/** パスキーの設定。WEBAUTHN_RP_ID を決めていなければ使えない */
+let cachedSite: SiteConfig | null | undefined;
+function requireSite(): SiteConfig {
+  if (cachedSite === undefined) cachedSite = siteConfigFromEnv();
+  if (!cachedSite) throw new HttpError(404, 'この環境ではパスキーを使えません（WEBAUTHN_RP_ID が未設定）');
+  return cachedSite;
+}
+
+/** テスト用：設定を読み直す */
+export function resetPasskeySite(): void { cachedSite = undefined; }
+
+/** 会社アカウント（SSO）の設定。SSO_REDIRECT_URI を決めていなければ使えない */
+let cachedSsoSite: SsoSite | null | undefined;
+function requireSsoSite(): SsoSite {
+  if (cachedSsoSite === undefined) cachedSsoSite = ssoSiteFromEnv();
+  if (!cachedSsoSite) throw new HttpError(404, 'この環境では会社アカウントで入れません（SSO_REDIRECT_URI が未設定）');
+  return cachedSsoSite;
+}
+
+/** テスト用：設定を読み直す */
+export function resetSsoSite(): void { cachedSsoSite = undefined; }
 
 function routes(): Router<Ctx> {
   const r = new Router<Ctx>();
@@ -419,6 +457,52 @@ function routes(): Router<Ctx> {
     return json(await mergeTags(c.db, c.tokenizer, c.actor, b.from, b.into));
   });
 
+  // --- パスキー -------------------------------------------------------------
+  r.post('/passkeys/register/start', async (c, req) => {
+    const site = requireSite();
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const name = typeof b.name === 'string' ? b.name : '';
+    const who = await me(c.db, c.actor);
+    return json(await startRegistration(c.db, c.actor, site, name || who.name));
+  });
+  r.post('/passkeys/register/finish', async (c, req) => {
+    const site = requireSite();
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    for (const key of ['clientDataJSON', 'attestationObject']) {
+      if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+    }
+    return json(await finishRegistration(c.db, c.actor, site, {
+      clientDataJSON: b.clientDataJSON as string,
+      attestationObject: b.attestationObject as string,
+      ...(typeof b.name === 'string' ? { name: b.name } : {}),
+    }), 201);
+  });
+  r.get('/passkeys', async (c) => json(await listPasskeys(c.db, c.actor)));
+
+  // --- 会社アカウント（SSO）の設定：本部の管理者だけ -------------------------
+  r.get('/sso/providers', async (c) => json(await listProviders(c.db, c.actor)));
+  r.post('/sso/providers', async (c, req) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    if (typeof b.issuer !== 'string' || typeof b.clientId !== 'string') {
+      throw new HttpError(400, 'issuer と clientId が必要です');
+    }
+    if (!Array.isArray(b.domains) || b.domains.some((d) => typeof d !== 'string')) {
+      throw new HttpError(400, 'domains（メールアドレスのドメイン）が必要です');
+    }
+    return json(await addProvider(c.db, c.actor, {
+      issuer: b.issuer,
+      clientId: b.clientId,
+      clientSecret: typeof b.clientSecret === 'string' ? b.clientSecret : null,
+      domains: b.domains as string[],
+      jitEnabled: b.jitEnabled === true,
+      defaultStoreId: typeof b.defaultStoreId === 'string' ? b.defaultStoreId : null,
+      defaultTrust: b.defaultTrust === 'trusted' ? 'trusted' : 'visitor',
+    }), 201);
+  });
+  r.delete('/sso/providers/:providerId', async (c, _req, p) =>
+    json(await disableProvider(c.db, c.actor, p.providerId!)));
+  r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
+
   // --- 利用者・端末 ---------------------------------------------------------
   r.get('/me', async (c) => json(await me(c.db, c.actor)));
   r.post('/auth/logout', async (c) => {
@@ -451,6 +535,8 @@ export interface AppDeps {
   metrics?: Metrics;
   logger?: Logger;
   alerts?: Alerts;
+  /** 相手の IdP とのやり取り（試験では偽の IdP を差し込む） */
+  oidc?: OidcDirectory;
 }
 
 export function createApp(deps: AppDeps) {
@@ -462,6 +548,12 @@ export function createApp(deps: AppDeps) {
   const metrics = deps.metrics ?? new Metrics();
   const logger = deps.logger ?? new Logger();
   const alerts = deps.alerts ?? new Alerts();
+  // 相手の IdP の設定と鍵は覚えておく（毎回取りに行くと、相手が落ちている間こちらも入れない）
+  const directory = deps.oidc ?? new OidcDirectory();
+
+  /** 画面に戻す。断片（#）に載せたものはサーバーに送られないので、記録に残らない */
+  const appRedirect = (fragment: string): Response =>
+    new Response(null, { status: 302, headers: { location: `/app/#${fragment}` } });
   const tooMany = () => json({ error: 'rate_limited', message: '試行回数が多すぎます。しばらく待ってからもう一度お試しください。' }, 429);
 
   /** 数え取りは、設定した合言葉を知っている人だけに見せる（本番で合言葉が無ければ出さない） */
@@ -500,6 +592,67 @@ export function createApp(deps: AppDeps) {
       return json(result, 201);
     }
 
+    // ログイン前に呼ぶ、パスキーの2本。
+    // 招待リンクと違い、**端末を変えても自分で入り直せる**のがパスキーの値打ちなので、
+    // ここが無いと登録だけできて使えない（登録はログイン後の経路にある）。
+    if (url.pathname === '/auth/passkey/start' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'passkey'), RULES.passkeyLogin))) return tooMany();
+      const site = requireSite();
+      return json(await startLogin((sql, params) => deps.database.raw(sql, params), site));
+    }
+    if (url.pathname === '/auth/passkey/finish' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'passkey'), RULES.passkeyLogin))) return tooMany();
+      const site = requireSite();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      for (const key of ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature', 'userHandle']) {
+        if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+      }
+      const result = await loginWithPasskey(deps.database, site, {
+        credentialId: b.credentialId as string,
+        clientDataJSON: b.clientDataJSON as string,
+        authenticatorData: b.authenticatorData as string,
+        signature: b.signature as string,
+        userHandle: b.userHandle as string,
+        ...(typeof b.deviceName === 'string' ? { deviceName: b.deviceName.slice(0, MAX_DEVICE_NAME) } : {}),
+      });
+      return json(result, 201);
+    }
+
+    // ログイン前に呼ぶ、会社アカウント（SSO）の2本。
+    //
+    // 戻り（callback）は相手の IdP が利用者のブラウザを飛ばしてくる GET なので、
+    // JSON ではなく画面に戻す。端末セッションは URL の断片（#）に載せる。
+    // 断片はサーバーに送られず、記録にも残らない（招待リンクと同じ考え方）。
+    if (url.pathname === '/auth/sso/start' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'sso'), RULES.ssoLogin))) return tooMany();
+      const site = requireSsoSite();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      if (typeof b.email !== 'string') throw new HttpError(400, 'メールアドレスが必要です');
+      return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo }));
+    }
+    if (url.pathname === '/auth/sso/callback' && req.method === 'GET') {
+      if (!(await limiter.take(clientKey(req, 'sso'), RULES.ssoLogin))) return tooMany();
+      const site = requireSsoSite();
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      // 相手が断った場合（利用者が「許可しない」を押した、など）も戻ってくる
+      const denied = url.searchParams.get('error_description') ?? url.searchParams.get('error');
+      if (denied !== null) return appRedirect(`sso-error=${encodeURIComponent(denied.slice(0, 200))}`);
+      if (code === null || state === null) return appRedirect('sso-error=' + encodeURIComponent('戻り方が正しくありませんでした'));
+      try {
+        const result = await finishSso(deps.database, directory, site, {
+          code, state, deviceName: 'ブラウザ（会社アカウント）',
+        });
+        const back = result.returnTo === null ? '' : `&to=${encodeURIComponent(result.returnTo)}`;
+        return appRedirect(`sso=${encodeURIComponent(result.sessionToken)}${back}`);
+      } catch (err) {
+        const message = err instanceof DomainError ? err.message
+          : err instanceof Error ? err.message : String(err);
+        logger.warn('sso callback failed', { requestId: id, error: message });
+        return appRedirect(`sso-error=${encodeURIComponent(message.slice(0, 200))}`);
+      }
+    }
+
     const matched = router.match(req.method, url.pathname);
     if (matched === undefined) throw new HttpError(404, 'Not Found');
     if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
@@ -517,7 +670,11 @@ export function createApp(deps: AppDeps) {
     if (!actor) throw new HttpError(401, 'この利用者は無効です');
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
-      matched.handler({ actor, identity, db, tokenizer: deps.tokenizer, storage }, req, matched.params),
+      matched.handler(
+        { actor, identity, db, tokenizer: deps.tokenizer, storage },
+        req,
+        matched.params,
+      ),
     );
   }
 
