@@ -133,3 +133,37 @@ describe('メールの設定', () => {
     assert.equal(checkConfig(env).findings.some((f) => f.key.startsWith('SMTP') || f.key === 'MAIL_FROM'), false);
   });
 });
+
+describe('内緒の値を包む鍵', () => {
+  const key = () => Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString('base64');
+
+  it('決めていなければ、本番では警告する（止めない）', () => {
+    assert.ok(keys(prod(), 'warn').includes('MISENARE_SECRET_KEYS'));
+    assert.equal(checkConfig(prod()).fatal, false);
+  });
+
+  it('長さや形が違えば止める', () => {
+    assert.ok(keys(prod({ MISENARE_SECRET_KEYS: 'k1:bXkta2V5' }), 'error').includes('MISENARE_SECRET_KEYS'));
+    assert.ok(keys(prod({ MISENARE_SECRET_KEYS: key() }), 'error').includes('MISENARE_SECRET_KEYS'));
+  });
+
+  it('名前が重なっていたら止める（どの鍵で包んだか分からなくなる）', () => {
+    const env = prod({ MISENARE_SECRET_KEYS: `k1:${key()},k1:${key()}` });
+    assert.ok(keys(env, 'error').includes('MISENARE_SECRET_KEYS'));
+  });
+
+  it('一覧に無い鍵を指していたら止める', () => {
+    const env = prod({ MISENARE_SECRET_KEYS: `k1:${key()}`, MISENARE_SECRET_KEY_ID: 'k9' });
+    assert.ok(keys(env, 'error').includes('MISENARE_SECRET_KEY_ID'));
+  });
+
+  it('鍵が複数あってどれで包むか決めていなければ、警告する', () => {
+    const env = prod({ MISENARE_SECRET_KEYS: `k1:${key()},k2:${key()}` });
+    assert.ok(keys(env, 'warn').includes('MISENARE_SECRET_KEY_ID'));
+  });
+
+  it('1本だけ決めていれば、何も言わない', () => {
+    const env = prod({ MISENARE_SECRET_KEYS: `k1:${key()}` });
+    assert.equal(checkConfig(env).findings.some((f) => f.key.startsWith('MISENARE_SECRET')), false);
+  });
+});

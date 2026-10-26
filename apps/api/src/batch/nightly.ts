@@ -148,10 +148,15 @@ async function candidatesFromPickedLogs(db: Db, tenantId: string, threshold: num
 async function candidatesFromProviders(db: Db, tenantId: string, providers: CandidateProvider[]): Promise<number> {
   if (providers.length === 0) return 0;
   const tags = await db.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE state = 'active'`);
+  // **外の仕組みが返した ID を、そのまま入れない。** 渡したタグの中のものだけを受ける。
+  // 行レベルセキュリティは tenant_id しか見ないので、他社のタグの ID を返されると
+  // 「自社の行から他社のタグを指す」関係ができてしまう。
+  const known = new Set(tags.map((t) => t.id));
   let created = 0;
   for (const p of providers) {
     for (const c of await p.propose(tags)) {
       if (c.fromTagId === c.toTagId) continue;
+      if (!known.has(c.fromTagId) || !known.has(c.toTagId)) continue;
       const rows = await db.query(
         `INSERT INTO tag_relations (tenant_id, kind, from_tag_id, to_tag_id, state, source, evidence)
          SELECT $1, $2, $3, $4, 'candidate', $5, $6

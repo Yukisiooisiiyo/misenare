@@ -16,6 +16,7 @@
 // 初回だけ、メールアドレスで既存の利用者を探して結びつける。
 
 import { maybeOne, one, type Database, type Db } from '../db/db.ts';
+import { secretBoxFromEnv, type SecretBox } from '../crypto/secretBox.ts';
 import { recordRequest } from './accessRequests.ts';
 import { assert, DomainError, type Actor } from './actor.ts';
 import { hashToken, issueToken } from './users.ts';
@@ -26,6 +27,24 @@ import { verifyIdToken, type IdTokenClaims } from '../auth/jwt.ts';
 export const STATE_TTL_MS = 10 * 60_000;
 
 type Raw = (sql: string, params?: readonly unknown[]) => Promise<unknown[]>;
+
+/**
+ * 内緒の鍵を包む箱。読むのも書くのもここを通す。
+ *
+ * **どの行のものかを検印に混ぜる**ので、他社の行に貼り替えても開けない。
+ * 行を決めるのは会社IDと設定ID（どちらも作ったあとは変わらない）。
+ */
+let box: SecretBox | null = null;
+function secretBox(): SecretBox {
+  box ??= secretBoxFromEnv();
+  return box;
+}
+
+/** テスト用：鍵の設定を読み直す */
+export function resetSecretBox(): void { box = null; }
+
+const secretAad = (tenantId: string, providerId: string): string =>
+  `sso_providers.client_secret:${tenantId}:${providerId}`;
 
 export interface SsoSite {
   /** 相手に伝える戻り先。相手側の設定と1文字でも違うと弾かれる */
@@ -173,7 +192,9 @@ export async function finishSso(
     const exchanged = await directory.exchange({
       issuer: provider.issuer,
       clientId: provider.client_id,
-      clientSecret: provider.client_secret,
+      clientSecret: provider.client_secret === null
+        ? null
+        : secretBox().open(provider.client_secret, secretAad(provider.tenant_id, provider.id)),
       code: input.code,
       codeVerifier: memo.code_verifier,
       redirectUri: site.redirectUri,
@@ -435,15 +456,24 @@ export async function addProvider(db: Db, actor: Actor, input: ProviderInput): P
     assert(input.defaultStoreId != null, 'invalid', '自動登録を使うなら、配属先の店舗を決めてください');
   }
 
+  // 内緒の鍵は、どの行のものかを検印に混ぜて包む。行の ID は作ってから決まるので、
+  // いちど空で作り、ID が分かってから包んで入れる（同じ取引の中なので外からは見えない）。
   const row = await one<{ id: string }>(
     db,
     `INSERT INTO sso_providers (tenant_id, issuer, client_id, client_secret, jit_enabled, default_store_id, default_trust)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+     VALUES ($1, $2, $3, NULL, $4, $5, $6) RETURNING id`,
     [
-      actor.tenantId, issuer, input.clientId.trim(), input.clientSecret?.trim() || null,
+      actor.tenantId, issuer, input.clientId.trim(),
       input.jitEnabled === true, input.defaultStoreId ?? null, input.defaultTrust ?? 'visitor',
     ],
   );
+  const secret = input.clientSecret?.trim() || null;
+  if (secret !== null) {
+    await db.query(
+      `UPDATE sso_providers SET client_secret = $2 WHERE id = $1`,
+      [row.id, secretBox().seal(secret, secretAad(actor.tenantId, row.id))],
+    );
+  }
   for (const domain of domains) {
     // ドメインは世界で1つの会社にしか割り当てられない（打ったアドレスから会社を決めるため）
     const taken = await maybeOne<{ tenant_id: string }>(

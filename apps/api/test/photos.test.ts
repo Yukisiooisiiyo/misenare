@@ -103,6 +103,16 @@ describe('写真', () => {
       const plan = await startPhotoUpload(q, storage, trusted, id, { contentType: 'image/jpeg', bytes: 10 });
       await assert.rejects(receivePhoto(q, storage, trusted, plan.photoId, new Uint8Array(MAX_PHOTO_BYTES + 1), 'image/jpeg'), /大きすぎます/);
       await assert.rejects(receivePhoto(q, storage, trusted, plan.photoId, JPEG, 'image/png'), /形式/);
+      // **申告だけを信じない。** 「JPEG です」と言って別のものを送れないようにする。
+      // 返すときに nosniff を付けているので HTML が動くことはないが、
+      // 守りを1枚に頼らない（返す側のヘッダーを1つ外した日に、そこが穴になる）。
+      const html = new TextEncoder().encode('<html><script>alert(1)</script></html>');
+      await assert.rejects(receivePhoto(q, storage, trusted, plan.photoId, html, 'image/jpeg'), /写真として読めません/);
+      // 中身が空に近いものも断る（先頭を見るだけの長さが無い）
+      await assert.rejects(receivePhoto(q, storage, trusted, plan.photoId, new Uint8Array([0xff]), 'image/jpeg'), /写真として読めません/);
+      // PNG の先頭を付けた中身を image/jpeg として送っても通らない
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+      await assert.rejects(receivePhoto(q, storage, trusted, plan.photoId, png, 'image/jpeg'), /写真として読めません/);
     });
   });
 

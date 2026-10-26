@@ -22,8 +22,35 @@ export const isStream = (v: PdfValue | undefined): v is PdfStream =>
 const WHITESPACE = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x20]);
 const DELIMITER = new Set([0x28, 0x29, 0x3c, 0x3e, 0x5b, 0x5d, 0x7b, 0x7d, 0x2f, 0x25]);
 
+/**
+ * 1つの流れ（stream）を展開したあとの上限。
+ *
+ * **ここが無いと、小さな PDF でサーバーを落とせる。** zlib は最大で 1000 倍ほどに
+ * 膨らむので、8MB の PDF に数 GB に展開される流れを1つ入れておけば、
+ * 取り込んだ瞬間に台の記憶が尽きる（zip の方では前から上限を入れていた）。
+ * 資料1ページぶんの文字は、どんなに多くても数十MBには収まらない。
+ */
+const MAX_STREAM_BYTES = 32 * 1024 * 1024;
+
+/**
+ * 1つの流れに重ねられる展開の数。
+ * PDF は展開の仕方を並べて書けるので、同じ展開を何十回も並べられる。
+ * ふつうは1つか2つ（FlateDecode と、画像なら DCTDecode）。
+ */
+const MAX_FILTERS = 8;
+
+/**
+ * 値の入れ子の深さ。
+ * 配列と辞書はお互いを呼ぶので、`[[[[[…]]]]]` と書かれると呼び出しが積み上がる。
+ * 本物の PDF で10を超えることはまずない。
+ */
+const MAX_DEPTH = 64;
+
 /** PDF の字句解析。1つの値（辞書・配列・数・名前・文字列…）を読み進める */
 export class Lexer {
+  /** いま読んでいる入れ子の深さ。深すぎる値は読まずに捨てる */
+  private depth = 0;
+
   constructor(readonly buf: Buffer, public pos = 0) {}
 
   atEnd(): boolean { return this.pos >= this.buf.length; }
@@ -58,9 +85,15 @@ export class Lexer {
 
     if (c === 0x2f) return this.readName();
     if (c === 0x28) return this.readLiteralString();
-    if (c === 0x5b) return this.readArray();
+    if (c === 0x5b) {
+      // 深すぎる入れ子は読まずに飛ばす（呼び出しが積み上がって止まるのを防ぐ）
+      if (this.depth >= MAX_DEPTH) { this.skipNested(0x5b, 0x5d); return null; }
+      return this.readArray();
+    }
     if (c === 0x3c) {
-      return this.buf[this.pos + 1] === 0x3c ? this.readDict() : this.readHexString();
+      if (this.buf[this.pos + 1] !== 0x3c) return this.readHexString();
+      if (this.depth >= MAX_DEPTH) { this.skipNested(0x3c, 0x3e); return null; }
+      return this.readDict();
     }
     if (c === 0x2b || c === 0x2d || c === 0x2e || (c >= 0x30 && c <= 0x39)) return this.readNumberOrRef();
     return undefined;
@@ -126,8 +159,28 @@ export class Lexer {
     return Buffer.from(hex, 'hex');
   }
 
+  /** 開き記号から対応する閉じ記号まで読み飛ばす。中身は見ない */
+  private skipNested(open: number, close: number): void {
+    let level = 0;
+    while (this.pos < this.buf.length) {
+      const c = this.buf[this.pos]!;
+      if (c === open) level++;
+      else if (c === close) { level--; if (level <= 0) { this.pos++; return; } }
+      this.pos++;
+    }
+  }
+
   private readArray(): PdfValue[] {
     this.pos++; // [
+    this.depth++;
+    try {
+      return this.readArrayBody();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private readArrayBody(): PdfValue[] {
     const out: PdfValue[] = [];
     for (;;) {
       this.skipSpace();
@@ -149,6 +202,15 @@ export class Lexer {
 
   readDict(): PdfDict {
     this.pos += 2; // <<
+    this.depth++;
+    try {
+      return this.readDictBody();
+    } finally {
+      this.depth--;
+    }
+  }
+
+  private readDictBody(): PdfDict {
     const dict: PdfDict = new Map();
     for (;;) {
       this.skipSpace();
@@ -208,15 +270,17 @@ export function decodeStream(stream: PdfStream, resolve: (v: PdfValue) => PdfVal
   const parmsList = Array.isArray(parmsValue) ? parmsValue : [parmsValue];
 
   let data = stream.raw;
-  for (const [i, f] of filters.entries()) {
+  // 展開の仕方を並べられるだけ並べた PDF（同じ展開を何十回も）で時間を使わせない
+  for (const [i, f] of filters.slice(0, MAX_FILTERS).entries()) {
     const name = isName(resolve(f)) ? (resolve(f) as PdfName).name : '';
     if (name === 'FlateDecode') {
+      // **上限を付けて展開する。** 付けないと、小さな PDF で台の記憶を使い切られる
       try {
-        data = inflateSync(data);
+        data = inflateSync(data, { maxOutputLength: MAX_STREAM_BYTES });
       } catch {
         // 末尾が欠けていることがあるので、読めるところまでで諦める
         try {
-          data = inflateSync(data, { finishFlush: 2 /* Z_SYNC_FLUSH */ });
+          data = inflateSync(data, { finishFlush: 2 /* Z_SYNC_FLUSH */, maxOutputLength: MAX_STREAM_BYTES });
         } catch {
           return Buffer.alloc(0);
         }

@@ -86,6 +86,34 @@ export function checkConfig(env: NodeJS.ProcessEnv = process.env): ConfigReport 
     add('info', 'TOKENIZER', 'Intl.Segmenter で分割します（kuromoji のほうが検索が当たります）');
   }
 
+  // 内緒の値を包む鍵。決めなければ、DB にそのままの形で入る
+  const keys = env.MISENARE_SECRET_KEYS;
+  if (!keys || keys.trim() === '') {
+    add(prod ? 'warn' : 'info', 'MISENARE_SECRET_KEYS',
+      '会社アカウントの内緒の鍵が、DB にそのままの形で入ります（バックアップが漏れると読まれます）');
+  } else {
+    // 形が違えば起動時に例外になるので、ここで先に見て、理由を出す
+    const names = new Set<string>();
+    for (const entry of keys.split(',')) {
+      const text = entry.trim();
+      if (text === '') continue;
+      const at = text.indexOf(':');
+      if (at <= 0) { add('error', 'MISENARE_SECRET_KEYS', `鍵の形が違います（名前:鍵 で並べてください）`); continue; }
+      const name = text.slice(0, at);
+      if (names.has(name)) add('error', 'MISENARE_SECRET_KEYS', `鍵の名前が重なっています: ${name}`);
+      names.add(name);
+      const length = Buffer.from(text.slice(at + 1), 'base64').length;
+      if (length !== 32) add('error', 'MISENARE_SECRET_KEYS', `鍵 ${name} の長さが違います（32バイトを base64 で。いまは ${length} バイト）`);
+    }
+    const chosen = env.MISENARE_SECRET_KEY_ID;
+    if (chosen !== undefined && !names.has(chosen)) {
+      add('error', 'MISENARE_SECRET_KEY_ID', `${chosen} が鍵の一覧にありません`);
+    }
+    if (names.size > 1 && chosen === undefined) {
+      add('warn', 'MISENARE_SECRET_KEY_ID', '鍵が複数あるのに、どれで包むか決めていません（並びの最後を使います）');
+    }
+  }
+
   // --- 入口（決めなければ、その入口が閉じているだけ） ---
   const rpId = env.WEBAUTHN_RP_ID;
   if (!rpId) {

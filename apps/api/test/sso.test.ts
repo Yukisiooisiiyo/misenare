@@ -7,9 +7,10 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import {
-  addProvider, checkConnection, emailDomain, finishSso, listProviders, startSso, sweepSsoStates,
-  verifyDomain, VERIFY_PREFIX,
+  addProvider, checkConnection, emailDomain, finishSso, listProviders, resetSecretBox, startSso,
+  sweepSsoStates, verifyDomain, VERIFY_PREFIX,
 } from '../src/domain/sso.ts';
+import { generateKey, isSealed } from '../src/crypto/secretBox.ts';
 import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
 import { freshDatabase, hq, manager, STORE_A, T, trusted } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -577,5 +578,71 @@ describe('ドメインの持ち主であることを確かめる', () => {
       await assert.rejects(verifyDomain(q, trusted, 'kdenki.example.co.jp', async () => []), /本部の管理者/);
     });
     await clean();
+  });
+});
+
+describe('内緒の鍵の置き方', () => {
+  async function clean() {
+    await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
+    });
+  }
+
+  it('**DB には包まれた形で入り、使うときに開かれる**', async () => {
+    process.env.MISENARE_SECRET_KEYS = `k1:${generateKey()}`;
+    resetSecretBox();
+    try {
+      const added = await setup();
+      // DB を直に見て、そのままの形で入っていないことを確かめる
+      const [row] = await db.withTenant(T, (q) => q.query<{ client_secret: string }>(
+        `SELECT client_secret FROM sso_providers WHERE id = $1`, [added.id]));
+      assert.ok(isSealed(row!.client_secret), '包まれていない');
+      assert.ok(!row!.client_secret.includes('とても内緒'), '中身が見えている');
+
+      // 使うときは開かれる（引換券の交換が通る＝開けている）
+      await db.withTenant(T, (q) => q.query(
+        `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+      const { finish } = await roundTrip();
+      const result = await finish();
+      assert.equal(result.userId, trusted.userId);
+      assert.ok(idp.lastAuthorization?.startsWith('Basic '), '内緒の鍵を送れていない');
+      const pair = Buffer.from(idp.lastAuthorization!.slice(6), 'base64').toString('utf8');
+      assert.ok(pair.includes(encodeURIComponent('とても内緒')), pair);
+    } finally {
+      await clean();
+      delete process.env.MISENARE_SECRET_KEYS;
+      resetSecretBox();
+    }
+  });
+
+  it('鍵を決めていなければ、そのままの形で入る（古い動きのまま）', async () => {
+    const added = await setup();
+    const [row] = await db.withTenant(T, (q) => q.query<{ client_secret: string }>(
+      `SELECT client_secret FROM sso_providers WHERE id = $1`, [added.id]));
+    assert.equal(isSealed(row!.client_secret), false);
+    await clean();
+  });
+
+  it('包んだあとに鍵を外すと、黙って壊れずに止まる', async () => {
+    process.env.MISENARE_SECRET_KEYS = `k1:${generateKey()}`;
+    resetSecretBox();
+    let added;
+    try {
+      added = await setup();
+    } finally {
+      delete process.env.MISENARE_SECRET_KEYS;
+      resetSecretBox();
+    }
+    try {
+      await db.withTenant(T, (q) => q.query(
+        `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+      const { finish } = await roundTrip();
+      // 「鍵が無い」とはっきり言う。黙って空の鍵で交換を試みない
+      await assert.rejects(finish(), /鍵がありません/);
+    } finally {
+      assert.ok(added);
+      await clean();
+    }
   });
 });

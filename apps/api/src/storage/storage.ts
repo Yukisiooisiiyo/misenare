@@ -67,9 +67,14 @@ export class S3Storage implements Storage {
 
   presignPut(key: string, contentType: string): Presigned {
     return {
-      url: presignS3(this.config, 'PUT', key, { expiresIn: S3Storage.EXPIRES_IN, now: this.now() }),
-      // Content-Type は署名に含めない（含めると端末側の送り方の違いで署名が合わなくなる）。
-      // S3 はこのヘッダーの値をそのまま保存する。
+      // **Content-Type を署名に焼き込む。** S3 は送られてきた値をそのまま覚えて、
+      // 読むときもそのまま返す。しかも S3 の答えには nosniff が付かないので、
+      // 署名に入れないと、端末が text/html で上げて会社のドメインの下に
+      // 好きな中身を置けることになる。写真の中身はサーバーを通らないので、
+      // こちらで先頭を見て確かめることもできない。ここで止めるしかない。
+      url: presignS3(this.config, 'PUT', key, {
+        expiresIn: S3Storage.EXPIRES_IN, now: this.now(), contentType,
+      }),
       headers: { 'content-type': contentType },
     };
   }
