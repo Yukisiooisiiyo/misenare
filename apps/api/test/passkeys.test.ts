@@ -71,8 +71,21 @@ describe('利用者の印', () => {
   it('会社IDと利用者IDをつなぎ、戻せる', () => {
     const handle = userHandle(T, trusted.userId);
     assert.deepEqual(parseUserHandle(handle), { tenantId: T, userId: trusted.userId });
-    assert.equal(parseUserHandle('でたらめ'), null);
-    assert.equal(parseUserHandle(`${T}.${trusted.userId}.余計`), null);
+    assert.equal(parseUserHandle(Buffer.from('でたらめ', 'utf8')), null);
+    assert.equal(parseUserHandle(Buffer.from(`${T}.${trusted.userId}.余計`, 'utf8')), null);
+  });
+
+  it('WebAuthn の上限（64バイト）に収まる', () => {
+    // 文字でつなぐと 73 バイトになり、端末が登録を断る。
+    // 本物のブラウザでしか出ない失敗だったので、ここで長さを固定しておく。
+    assert.equal(userHandle(T, trusted.userId).length, 32);
+    assert.ok(userHandle(T, trusted.userId).length <= 64);
+  });
+
+  it('文字でつないだ古い形も読める', () => {
+    // 作り直す前に登録した鍵が、入り直せなくなるのを避けるため
+    const old = Buffer.from(`${T}.${trusted.userId}`, 'utf8');
+    assert.deepEqual(parseUserHandle(old), { tenantId: T, userId: trusted.userId });
   });
 });
 
@@ -103,7 +116,7 @@ describe('パスキーの登録と、パスキーで入る', () => {
     const assertion = device.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
     const result = await loginWithPasskey(db, SITE, {
       ...assertion,
-      userHandle: base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8')),
+      userHandle: base64url.encode(userHandle(T, trusted.userId)),
       deviceName: '入り直した端末',
     });
     assert.equal(result.userId, trusted.userId);
@@ -120,14 +133,14 @@ describe('パスキーの登録と、パスキーで入る', () => {
     const { device } = await register();
     const options = await startLogin(raw, SITE);
     const assertion = device.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
-    const handle = base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8'));
+    const handle = base64url.encode(userHandle(T, trusted.userId));
     await loginWithPasskey(db, SITE, { ...assertion, userHandle: handle });
     await assert.rejects(loginWithPasskey(db, SITE, { ...assertion, userHandle: handle }), /合言葉が切れています/);
   });
 
   it('出どころが違う・種類が違う・署名が合わないものは通さない', async () => {
     const { device } = await register();
-    const handle = base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8'));
+    const handle = base64url.encode(userHandle(T, trusted.userId));
     const attempt = async (make: (challenge: string) => ReturnType<typeof device.get>) => {
       const options = await startLogin(raw, SITE);
       return loginWithPasskey(db, SITE, { ...make(options.challenge), userHandle: handle });
@@ -159,7 +172,7 @@ describe('パスキーの登録と、パスキーで入る', () => {
     const options = await startLogin(raw, SITE);
     const assertion = stranger.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
     await assert.rejects(
-      loginWithPasskey(db, SITE, { ...assertion, userHandle: base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8')) }),
+      loginWithPasskey(db, SITE, { ...assertion, userHandle: base64url.encode(userHandle(T, trusted.userId)) }),
       /登録されていません/,
     );
   });
@@ -169,14 +182,14 @@ describe('パスキーの登録と、パスキーで入る', () => {
     const options = await startLogin(raw, SITE);
     const assertion = device.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId });
     await assert.rejects(
-      loginWithPasskey(db, SITE, { ...assertion, userHandle: base64url.encode(Buffer.from(userHandle(T, manager.userId), 'utf8')) }),
+      loginWithPasskey(db, SITE, { ...assertion, userHandle: base64url.encode(userHandle(T, manager.userId)) }),
       /登録されていません/,
     );
   });
 
   it('回数が戻っていたら、複製の疑いとしてそのパスキーを止める', async () => {
     const { device, saved } = await register();
-    const handle = base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8'));
+    const handle = base64url.encode(userHandle(T, trusted.userId));
     const first = await startLogin(raw, SITE);
     await loginWithPasskey(db, SITE, {
       ...device.get({ challenge: first.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId, signCount: 50 }),
@@ -213,7 +226,7 @@ describe('パスキーの登録と、パスキーで入る', () => {
     await assert.rejects(
       loginWithPasskey(db, SITE, {
         ...device.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId }),
-        userHandle: base64url.encode(Buffer.from(userHandle(T, manager.userId), 'utf8')),
+        userHandle: base64url.encode(userHandle(T, manager.userId)),
       }),
       /無効化されています/,
     );
@@ -236,7 +249,7 @@ describe('パスキーの登録と、パスキーで入る', () => {
     await assert.rejects(
       loginWithPasskey(db, SITE, {
         ...device.get({ challenge: options.challenge, origin: SITE.origins[0]!, rpId: SITE.rpId }),
-        userHandle: base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8')),
+        userHandle: base64url.encode(userHandle(T, trusted.userId)),
       }),
       /合言葉が切れています/,
     );
@@ -276,7 +289,7 @@ describe('パスキーで入る（ログイン前の経路）', () => {
     return { status: res.status, body: text ? JSON.parse(text) : null };
   };
 
-  const handle = () => base64url.encode(Buffer.from(userHandle(T, trusted.userId), 'utf8'));
+  const handle = () => base64url.encode(userHandle(T, trusted.userId));
 
   it('ログインしていなくても、合言葉を受け取って入れる', async () => {
     const { device } = await register(trusted, 'ログインの試し');

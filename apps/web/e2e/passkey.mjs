@@ -7,6 +7,8 @@
 // どちらも「サーバーの試験は全部通るのに、実機では入れない」になる種類の穴なので、
 // Chrome の仮想認証器（CDP の WebAuthn ドメイン）で端から端まで動かす。
 //
+// 招待リンクは1回しか使えないので、**実行のたびに seed:demo を流し直す**。
+//
 //   DATABASE_URL=... npm run seed:demo > seed.txt
 //   WEBAUTHN_RP_ID=localhost WEBAUTHN_ORIGINS=http://localhost:8787 DATABASE_URL=... npm run dev:api
 //   node apps/web/e2e/passkey.mjs <seed.txt を置いたフォルダ>
@@ -24,7 +26,11 @@ const ctx = await browser.newContext({ ...devices['iPhone 13'], locale: 'ja-JP' 
 const page = await ctx.newPage();
 
 const errors = [];
-page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+// 外のサーバー（Google Fonts など）が落ちているときの読み込み失敗は、
+// このアプリの不具合ではないので失敗にしない。画面の文字が出るかどうかは
+// 下の手順で確かめている。
+const external = (text) => /Failed to load resource/.test(text) && /net::ERR_(TUNNEL|NAME|INTERNET|PROXY|CONNECTION_TIMED_OUT)/.test(text);
+page.on('console', (m) => { if (m.type() === 'error' && !external(m.text())) errors.push(m.text()); });
 page.on('pageerror', (e) => errors.push(String(e)));
 
 // Chrome に、指紋認証の付いた端末内蔵の認証器があるふりをさせる

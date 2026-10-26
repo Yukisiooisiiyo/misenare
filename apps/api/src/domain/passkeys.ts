@@ -42,13 +42,39 @@ export function siteConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SiteCon
   };
 }
 
-/** 利用者の印。会社IDと利用者IDをつないだもの */
-export function userHandle(tenantId: string, userId: string): string {
-  return `${tenantId}.${userId}`;
+/**
+ * 利用者の印。会社IDと利用者IDを **16バイトずつ並べた32バイト**。
+ *
+ * 文字のまま「<会社ID>.<利用者ID>」とつなぐと 73 バイトになり、
+ * WebAuthn の上限（64バイト）を超えて端末が登録を断る。
+ * にせ認証器では長さを見ていなかったので気づかず、本物のブラウザで
+ * 「User handle exceeds 64 bytes」で落ちた。UUID は元が16バイトなので、
+ * 数字に戻して並べれば半分以下で収まる。
+ */
+export function userHandle(tenantId: string, userId: string): Buffer {
+  return Buffer.concat([uuidToBytes(tenantId), uuidToBytes(userId)]);
 }
 
-export function parseUserHandle(handle: string): { tenantId: string; userId: string } | null {
-  const [tenantId, userId, ...rest] = handle.split('.');
+function uuidToBytes(uuid: string): Buffer {
+  if (!UUID.test(uuid)) throw new DomainError('invalid', `ID の形が違います: ${uuid}`);
+  return Buffer.from(uuid.replace(/-/g, ''), 'hex');
+}
+
+function bytesToUuid(bytes: Buffer): string {
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * 認証器が返してきた印を読む。
+ * 文字でつないだ古い形（<会社ID>.<利用者ID>）も受ける。作り直す前に
+ * 登録した鍵が、入り直せなくなるのを避けるため。
+ */
+export function parseUserHandle(handle: Buffer): { tenantId: string; userId: string } | null {
+  if (handle.length === 32) {
+    return { tenantId: bytesToUuid(handle.subarray(0, 16)), userId: bytesToUuid(handle.subarray(16)) };
+  }
+  const [tenantId, userId, ...rest] = handle.toString('utf8').split('.');
   if (rest.length > 0 || !tenantId || !userId || !UUID.test(tenantId) || !UUID.test(userId)) return null;
   return { tenantId, userId };
 }
@@ -117,7 +143,7 @@ export async function startRegistration(
   return {
     challenge,
     rp: { id: site.rpId, name: site.rpName },
-    user: { id: base64url.encode(Buffer.from(userHandle(actor.tenantId, actor.userId), 'utf8')), name: displayName, displayName },
+    user: { id: base64url.encode(userHandle(actor.tenantId, actor.userId)), name: displayName, displayName },
     // ES256 を第一に、RS256 と Ed25519 も受ける
     pubKeyCredParams: [
       { type: 'public-key', alg: -7 },
@@ -230,7 +256,7 @@ export async function loginWithPasskey(
   const challenge = readChallenge(clientDataJSON);
   await takeChallenge((sql, params) => database.raw(sql, params), challenge, 'login');
 
-  const handle = parseUserHandle(base64url.decode(input.userHandle).toString('utf8'));
+  const handle = parseUserHandle(base64url.decode(input.userHandle));
   if (!handle) throw new DomainError('invalid', 'パスキーの持ち主が分かりませんでした');
 
   // 複製の疑いで止めるときは、取引（トランザクション）の外で書く。

@@ -16,11 +16,17 @@ const toB64 = (buf: ArrayBuffer): string => {
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 };
 
-const fromB64 = (value: string): Uint8Array => {
+/**
+ * ブラウザの WebAuthn は BufferSource を受け取る。
+ * Uint8Array は「共有メモリの上かもしれない」型なので BufferSource に入らない。
+ * ArrayBuffer をこちらで用意して、それをそのまま返す。
+ */
+const fromB64 = (value: string): ArrayBuffer => {
   const s = atob(value.replace(/-/g, '+').replace(/_/g, '/'));
-  const out = new Uint8Array(s.length);
-  for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-  return out;
+  const buffer = new ArrayBuffer(s.length);
+  const view = new Uint8Array(buffer);
+  for (let i = 0; i < s.length; i++) view[i] = s.charCodeAt(i);
+  return buffer;
 };
 
 /** この端末でパスキーが使えるか。古い端末や、埋め込みブラウザでは使えない */
