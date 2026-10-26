@@ -92,7 +92,7 @@ describe('夜間バッチ', () => {
     assert.equal(suggestTags({ input: 'おおがた', dictionary: await localDict() }).candidates.length, 0,
       '確かめていない読みが検索に効いている');
 
-    const pending = await run((q) => listReadingProposals(q, trusted));
+    const pending = await run((q) => listReadingProposals(q, tokenizer, trusted));
     const target = pending.find((p) => p.name === '大型家電');
     assert.ok(target, `確認待ちに出ない: ${pending.map((p) => p.name).join(',')}`);
     assert.equal(target.proposed, 'オオガタカデン');
@@ -105,7 +105,7 @@ describe('夜間バッチ', () => {
     const withReading = Object.assign(Object.create(tokenizer), { reading: (w: string) => (w === 'キャンペーン' ? 'キャンペーン' : null) });
     await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: 'キャンペーンの案内', body: '今月末まで。', tagNames: ['#キャンペーン'] }));
     await runNightly(db, withReading);
-    const pending = await run((q) => listReadingProposals(q, trusted));
+    const pending = await run((q) => listReadingProposals(q, tokenizer, trusted));
     assert.ok(!pending.some((p) => p.name === 'キャンペーン'), '確かめるまでもない語が確認待ちに出ている');
     const row = await run((q) => q.query<{ readings: string[] }>(`SELECT readings FROM hashtags WHERE name = 'キャンペーン'`));
     assert.deepEqual(row[0]?.readings, ['キャンペーン']);
@@ -138,7 +138,7 @@ describe('読みの案を出す条件', () => {
   it('漢字1文字に割れた語は、案を出さずに空欄で確認に回す', async () => {
     await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '食洗機の設置', body: '据付は2人で。', tagNames: ['#食洗機'] }));
     await runNightly(db, splitting('ショクアライキ'));
-    const pending = await run((q) => listReadingProposals(q, trusted));
+    const pending = await run((q) => listReadingProposals(q, tokenizer, trusted));
     const target = pending.find((p) => p.name === '食洗機');
     assert.ok(target, '確認に回っていない');
     assert.equal(target.proposed, '', '信用できない読みを案として見せている');
@@ -147,7 +147,7 @@ describe('読みの案を出す条件', () => {
   it('辞書にそのまま載っている語は、案として見せる', async () => {
     await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '搬入の手順', body: '2人で。', tagNames: ['#搬入'] }));
     await runNightly(db, whole('ハンニュウ'));
-    const pending = await run((q) => listReadingProposals(q, trusted));
+    const pending = await run((q) => listReadingProposals(q, tokenizer, trusted));
     assert.equal(pending.find((p) => p.name === '搬入')?.proposed, 'ハンニュウ');
   });
 });
