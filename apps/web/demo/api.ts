@@ -5,7 +5,7 @@
 // 書いたものはこの画面を閉じると消える。
 
 import {
-  analyzeDocument, analyzeQuery, computeNpmi, DEFAULT_PARAMS, hiraToKata, normalizeTagName, pairKey,
+  analyzeDocument, analyzeQuery, computeNpmi, DEFAULT_PARAMS, hiraToKata, normalizeTagName, pairKey, readingCandidates,
   rank, SegmenterTokenizer, TagDictionary,
   type CandidateDoc, type CorpusStats, type Field, type TagRelation,
 } from '@misenare/search-core';
@@ -284,7 +284,8 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
       .filter((n) => !before.has(n))
       .map((n) => tags.find((t) => t.name === n))
       .filter((t): t is NonNullable<typeof t> => t != null && t.reading == null)
-      .map((t) => ({ id: t.id, name: t.name, proposed: '' }));
+      // 本物と同じで、漢字の読みの総当たりから候補を作る
+      .map((t) => ({ id: t.id, name: t.name, proposed: '', candidates: readingCandidates(t.name) }));
     return { id: created.id, version: 1, published: true, readingsNeeded } as T;
   }
   if (method === 'POST' && parts[0] === 'knowledge' && parts[2] === 'verify') {
@@ -419,7 +420,9 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     return (parts[2] === 'pending-products' ? { products: [], changes: [] } : []) as T;
   }
   if (method === 'GET' && rawPath.startsWith('/tag-readings')) {
-    return readingProposals as T;
+    return readingProposals.map((r) => ({
+      ...r, candidates: readingCandidates(r.name).filter((c) => c !== r.proposed),
+    })) as T;
   }
   if (method === 'POST' && parts[0] === 'tag-readings') {
     const raw = typeof body?.reading === 'string' ? body.reading : null;

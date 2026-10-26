@@ -293,3 +293,12 @@ button.tag { cursor: pointer; }
 /* 保存した直後の、読みのその場確認 */
 .reading-ask h1 { font-size: 20px; }
 .reading-ask .rows { margin: 16px 0; }
+
+/* 読みの候補。押すと入力欄に入るだけで、登録はしない */
+.reading-candidates { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+.reading-chip {
+  font-size: 14px; padding: 6px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  font-family: inherit; cursor: pointer;
+}
+.reading-chip:hover, .reading-chip:focus { border-color: var(--accent); }

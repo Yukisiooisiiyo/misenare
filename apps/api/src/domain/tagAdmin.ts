@@ -4,7 +4,7 @@
 //   関係の承認・却下 … trusted 以上（visitor の提案は候補として残る）
 //   タグの統合       … administrator（店長・本部）
 
-import { hiraToKata, normalizeTagName, normalizeText, type Tokenizer } from '@misenare/search-core';
+import { hiraToKata, normalizeTagName, normalizeText, readingCandidates, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -183,6 +183,8 @@ export interface ReadingProposal {
   proposed: string;
   /** このタグが付いているナレッジの数。多いものから確かめたい */
   useCount: number;
+  /** 漢字の読みの総当たりから作った候補。押すと入力欄に入り、そこから直せる */
+  candidates: string[];
 }
 
 /** 読みの案はカタカナと長音符だけ。ひらがなで来たらカタカナに直して受ける。 */
@@ -209,7 +211,13 @@ export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Pr
       LIMIT $1`,
     [limit],
   );
-  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed ?? '', useCount: r.use_count }));
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    proposed: r.reading_proposed ?? '',
+    useCount: r.use_count,
+    candidates: readingCandidates(r.name).filter((c) => c !== r.reading_proposed),
+  }));
 }
 
 /**

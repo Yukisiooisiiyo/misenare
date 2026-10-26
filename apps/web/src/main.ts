@@ -438,7 +438,7 @@ function renderWrite(existing: Knowledge | null): void {
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; tagField.focus(); return; }
     const payload = { title: title.value, body: body.value, tagNames: tags };
     try {
-      type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string }> };
+      type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing
         ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
         : await api<Saved>('POST', `/stores/${storeId()}/knowledge`, payload);

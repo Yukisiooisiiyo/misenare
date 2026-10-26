@@ -100,14 +100,14 @@ function relationText(r: Relation): HTMLElement {
   return h('span', { class: 'relation' }, from, h('span', { class: 'hint' }, KIND_LABEL[r.kind]), tagChip(r.to_tag, { quiet: true }));
 }
 
-interface ReadingProposal { id: string; name: string; proposed: string; useCount: number }
+interface ReadingProposal { id: string; name: string; proposed: string; useCount: number; candidates?: string[] }
 
 /**
  * 読みを1つ尋ねる行。確認待ちの一覧と、保存した直後のその場での確認で、同じ形を使う。
  * 案は空のことがある（機械が自信を持てなかった語）。そのときは空欄で打ってもらう。
  */
 export function readingRow(
-  tag: { id: string; name: string; proposed: string },
+  tag: { id: string; name: string; proposed: string; candidates?: string[] },
   onDone: () => void,
   extra?: Node | null,
 ): HTMLElement {
@@ -116,6 +116,14 @@ export function readingRow(
     placeholder: tag.proposed === '' ? 'カタカナで入力' : '',
     'aria-label': `#${tag.name} の読み`, autocomplete: 'off', spellcheck: 'false',
   });
+  // 候補は押すと入力欄に入るだけ。そのまま登録してもいいし、
+  // 一文字違いなら直してから登録できる。打ち直すより速い。
+  const candidates = (tag.candidates ?? []).slice(0, 5);
+  const chips = candidates.length === 0 ? null : h('span', { class: 'reading-candidates' },
+    ...candidates.map((c) => h('button', {
+      type: 'button', class: 'reading-chip',
+      onclick: () => { field.value = c; field.focus(); },
+    }, c)));
   const save = async (reading: string | null) => {
     await api('POST', `/tag-readings/${tag.id}`, { reading });
     toast(reading === null ? '読みなしで登録しました' : `#${tag.name} を「${reading}」で登録しました`);
@@ -124,9 +132,9 @@ export function readingRow(
   return h('li', { class: 'row reading-row' },
     h('span', { class: 'reading-head' },
       h('span', { class: 'tag tag-inline' }, `#${tag.name}`),
-      extra ?? null,
-      tag.proposed === '' ? h('span', { class: 'hint' }, '案なし') : null),
+      extra ?? null),
     field,
+    chips,
     h('span', { class: 'row-actions' },
       action('この読みで登録', 'primary small', () => save(field.value)),
       action('あとで', 'secondary small', () => { onDone(); return Promise.resolve(); })));
@@ -137,7 +145,9 @@ export function readingRow(
  * 一番よく知っているのは、いま打った人なので、ここで聞くのが一番当たる。
  * 飛ばしても「承認・管理 → タグの読み」に残るので、取りこぼさない。
  */
-export function askReadings(tags: Array<{ id: string; name: string; proposed: string }>, onFinish: () => void): HTMLElement {
+export function askReadings(
+  tags: Array<{ id: string; name: string; proposed: string; candidates?: string[] }>, onFinish: () => void,
+): HTMLElement {
   const remaining = new Set(tags.map((t) => t.id));
   const list = h('ul', { class: 'rows' });
   const done = (id: string) => {
@@ -152,7 +162,8 @@ export function askReadings(tags: Array<{ id: string; name: string; proposed: st
     h('h1', {}, '読みを教えてください'),
     h('p', { class: 'hint' },
       '新しいタグができました。読みを登録すると、かなでも引けるようになります'
-      + '（しょくせんき → #食洗機）。あとで登録してもかまいません。'),
+      + '（しょくせんき → #食洗機）。候補を押すと入力欄に入るので、'
+      + '違っていたら直してください。あとでもかまいません。'),
     list,
     h('button', { type: 'button', class: 'secondary', onclick: onFinish }, 'まとめてあとにする'));
 }
@@ -174,8 +185,7 @@ export function readingPanel(): HTMLElement {
     body.append(
       h('p', { class: 'hint' },
         '読みを登録すると、かなでも引けるようになります（れいぞうこ → #冷蔵庫）。'
-        + '案が入っているものは機械が出したものなので、違っていたら直してください。'
-        + '空いているものは、機械が自信を持てなかった語です。'),
+        + '候補を押すと入力欄に入ります。違っていたら、そのまま直して登録してください。'),
       ...countedList('確認待ち', rows, (r, remove) =>
         readingRow(r, remove, h('span', { class: 'hint' }, `${r.useCount}件`))),
     );

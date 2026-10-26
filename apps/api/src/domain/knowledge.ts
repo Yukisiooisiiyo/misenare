@@ -2,7 +2,7 @@
 // visitor の変更は承認待ちの版（pending）として積み、trusted の変更はその場で公開する。
 // どちらの場合も、編集のたびに版を1つ追加して残す。
 
-import type { Tokenizer } from '@misenare/search-core';
+import { readingCandidates, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
@@ -146,7 +146,14 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
 }
 
 /** 読みが決まっていないタグ。保存した直後にその場で尋ねるために使う。 */
-export interface ReadingNeeded { id: string; name: string; proposed: string }
+export interface ReadingNeeded {
+  id: string;
+  name: string;
+  /** 形態素解析器の案。信用できないときは空 */
+  proposed: string;
+  /** 漢字の読みの総当たりから作った候補。押すと入力欄に入り、そこから直せる */
+  candidates: string[];
+}
 
 async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<ReadingNeeded[]> {
   if (tagIds.length === 0) return [];
@@ -160,7 +167,13 @@ async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<Readi
       ORDER BY name`,
     [[...tagIds]],
   );
-  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed ?? '' }));
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    proposed: r.reading_proposed ?? '',
+    // 案と重なる候補は省く（同じものを2回見せない）
+    candidates: readingCandidates(r.name).filter((c) => c !== r.reading_proposed),
+  }));
 }
 
 export async function editKnowledge(
