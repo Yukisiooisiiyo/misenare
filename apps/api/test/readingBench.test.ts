@@ -89,7 +89,48 @@ function record(title: string, body: string): void {
   else { writeFileSync(REPORT, block); started = true; }
 }
 
+/**
+ * 「案として見せてよいか」を決める条件の候補。
+ * どれを採るかは勘で決めず、下の測定で各条件の正解率を出してから選ぶ。
+ */
+const RULES: Array<[name: string, ok: (g: { morphemes: number; loneKanji: number; loneKanjiFree: number }) => boolean]> = [
+  ['条件なし（全部出す）', () => true],
+  ['1形態素のみ', (g) => g.morphemes === 1],
+  ['単漢字に割れていない', (g) => g.loneKanji === 0],
+  ['単漢字の自立語を含まない', (g) => g.loneKanjiFree === 0],
+];
+
 describe('タグの読みの自動付与：精度の測定', { skip: kuromoji ? false : 'kuromoji が入っていません' }, () => {
+  it('どの条件なら案として見せてよいかを測る', () => {
+    const lines: string[] = ['条件ごとの、案として見せたときの正解率:', ''];
+    lines.push('| 条件 | 見せる語 | 正解 | 正解率 | 取りこぼす語 |');
+    lines.push('| --- | --- | --- | --- | --- |');
+    for (const [name, ok] of RULES) {
+      let shown = 0; let correct = 0; const dropped: string[] = [];
+      for (const [word, want] of ANSWERS) {
+        const g = kuromoji!.guessReading(word);
+        if (g == null) continue;
+        if (!ok(g)) { if (g.reading === want) dropped.push(word); continue; }
+        shown++;
+        if (g.reading === want) correct++;
+      }
+      const rate = shown === 0 ? 0 : (correct / shown) * 100;
+      lines.push(`| ${name} | ${shown} | ${correct} | ${rate.toFixed(1)}% | ${dropped.length}件 |`);
+    }
+    lines.push('');
+    lines.push('※「取りこぼす語」＝条件で弾いたが、実は読みが合っていた語。多いほど確認の手間が増える。');
+    lines.push('');
+    lines.push('語ごとの内訳（形態素数 / 単漢字 / 単漢字の自立語）:');
+    for (const [word, want] of ANSWERS) {
+      const g = kuromoji!.guessReading(word);
+      if (g == null) { lines.push(`  ${word}: 読みなし`); continue; }
+      const mark = g.reading === want ? '○' : '×';
+      lines.push(`  ${mark} ${word}: ${g.reading} (${g.morphemes}/${g.loneKanji}/${g.loneKanjiFree})`);
+    }
+    record('タグの読み：見せてよい条件', lines.join('\n'));
+    assert.ok(true);
+  });
+
   it('被覆率と正解率を測り、数字を残す', () => {
     const wrong: Array<[word: string, got: string, want: string]> = [];
     const missing: string[] = [];

@@ -18,6 +18,8 @@ import type { Tokenizer } from '@misenare/search-core';
 interface Morpheme {
   surface_form: string;
   pos: string;
+  /** 名詞の下位分類（接尾・非自立など） */
+  pos_detail_1?: string;
   basic_form: string;
   reading?: string;
   /** もとの文字列での位置（1始まり）。隣り合っているかを見るのに使う */
@@ -67,15 +69,47 @@ export class MorphologicalTokenizer implements Tokenizer {
 
   /** 語のカタカナの読み。辞書に無ければ null */
   reading(word: string): string | null {
+    return this.guessReading(word)?.reading ?? null;
+  }
+
+  /**
+   * 読みと、その読みをどれだけ信用してよいかの手がかり。
+   *
+   * 形態素解析器は、辞書にそのまま載っている語の読みはまず外さないが、
+   * **載っていない複合語を分解して読むと派手に外す**。
+   *   食洗機 → 食/洗/機 → ショクアライキ（正しくは ショクセンキ）
+   *   開梱   → 開/梱   → ヒラキコリ    （正しくは カイコン）
+   * そこで、分けた形になっているか・漢字1文字に割れたかを一緒に返し、
+   * 呼ぶ側が「案として見せてよいか」を決められるようにする。
+   */
+  guessReading(word: string): ReadingGuess | null {
     const morphemes = this.inner.tokenize(word);
     if (morphemes.length === 0) return null;
     const parts: string[] = [];
+    let loneKanji = 0;
+    let loneKanjiFree = 0;
     for (const m of morphemes) {
       if (!m.reading || m.reading === '*') return null;
       parts.push(m.reading);
+      if (isSingleKanji(m.surface_form)) {
+        loneKanji++;
+        // 接尾辞（〜機、〜書、〜費、〜料）は、単漢字でも読みが安定している
+        if (m.pos_detail_1 !== '接尾') loneKanjiFree++;
+      }
     }
-    return parts.join('');
+    return { reading: parts.join(''), morphemes: morphemes.length, loneKanji, loneKanjiFree };
   }
+}
+
+/** 読みと、その読みの確からしさの手がかり */
+export interface ReadingGuess {
+  reading: string;
+  /** 形態素の数。1 なら辞書にその語がそのまま載っている */
+  morphemes: number;
+  /** 漢字1文字に割れた形態素の数 */
+  loneKanji: number;
+  /** そのうち接尾辞でないもの。ここが危ない */
+  loneKanjiFree: number;
 }
 
 /**
