@@ -46,6 +46,8 @@ export interface HandoverHistoryItem {
 export interface Badges {
   notices: { unread: number; needsAck: number };
   handovers: { open: number; carriedOver: number };
+  /** 利用の申請。店長・本部だけ 0 より大きくなる */
+  accessRequests: { pending: number };
 }
 
 /** 本文の段落。改行をそのまま出す */

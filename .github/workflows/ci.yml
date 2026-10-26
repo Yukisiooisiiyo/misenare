@@ -215,11 +215,29 @@ jobs:
           set -o pipefail
           docker run --rm --network host -e DATABASE_URL=postgresql://misenare:misenare@localhost:5432/misenare \
             misenare:ci npx tsx apps/api/src/cli/migrate.ts 2>&1 | tee migrate.log
+      # イメージは NODE_ENV=production で動くので、本番と同じ形の設定を渡す。
+      # 渡さないと起動時の点検で止まる（それが点検の役目）。
+      - name: Refuse to start when the configuration is incomplete
+        run: |
+          # 点検が本当に止めるかを確かめる。ここが通ってしまうなら、点検が効いていない。
+          if docker run --rm --network host \
+              -e DATABASE_URL=postgresql://misenare:misenare@localhost:5432/misenare \
+              -e PORT=8788 misenare:ci > config-check.log 2>&1; then
+            echo "::error title=設定の点検::設定が足りないのに起動してしまった"
+            cat config-check.log
+            exit 1
+          fi
+          echo "--- 点検の出力 ---"
+          cat config-check.log
+          grep -q 'APP_URL' config-check.log || { echo "::error::足りない設定の名前が出ていない"; exit 1; }
       - name: Start the container and check it answers
         run: |
           docker run -d --name misenare --network host \
             -e DATABASE_URL=postgresql://misenare:misenare@localhost:5432/misenare \
-            -e PORT=8787 -e PHOTO_DIR=/tmp/photos misenare:ci
+            -e PORT=8787 -e PHOTO_DIR=/tmp/photos \
+            -e APP_URL=https://misenare.example.com \
+            -e METRICS_TOKEN=ci-token \
+            misenare:ci
           for i in $(seq 1 30); do
             if curl -fsS http://localhost:8787/health > /dev/null; then break; fi
             sleep 2

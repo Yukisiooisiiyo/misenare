@@ -485,7 +485,12 @@ interface AccessRequestRow {
  * 名前は相手の IdP が名乗ったものなので、**そのまま使わずに直せる形**で出す。
  * 既存の人と同じ名前なら、その場で知らせる（似せた名前での紛れを防ぐため）。
  */
-export function accessRequestPanel(stores: Array<{ id: string; name: string }>, currentStoreId: string): HTMLElement {
+export function accessRequestPanel(
+  stores: Array<{ id: string; name: string }>,
+  currentStoreId: string,
+  /** 決めたあとに数を取り直す（上の帯に出ている件数を合わせるため） */
+  onDecided: () => void = () => {},
+): HTMLElement {
   return panel('利用の申請', async (body) => {
     const rows = await api<AccessRequestRow[]>('GET', '/access-requests');
     body.append(...countedList('承認を待っている人', rows, (r, remove) => {
@@ -512,9 +517,115 @@ export function accessRequestPanel(stores: Array<{ id: string; name: string }>, 
             await api('POST', `/access-requests/${r.id}/approve`, { storeId: store.value, name: value });
             toast(`${value}さんを登録しました`);
             remove();
+            onDecided();
           }),
           confirmAction('断る', 'secondary small', `${r.email} の申請を断ります。`,
-            async () => { await api('POST', `/access-requests/${r.id}/reject`); toast('断りました'); remove(); })));
+            async () => {
+              await api('POST', `/access-requests/${r.id}/reject`);
+              toast('断りました');
+              remove();
+              onDecided();
+            })));
     }, 'h3'));
+  });
+}
+
+interface ProviderRow {
+  id: string;
+  issuer: string;
+  clientId: string;
+  hasSecret: boolean;
+  domains: string[];
+  jitEnabled: boolean;
+  defaultStoreId: string | null;
+  defaultTrust: 'visitor' | 'trusted';
+  disabled: boolean;
+}
+
+/**
+ * 会社のアカウント（SSO）の設定。本部の管理者だけ。
+ *
+ * 相手の情報システム部から渡されるのは、発行元（issuer）・client_id・
+ * 内緒の鍵の3つだけ。残りは相手が公開している設定から取るので、入力欄もこれだけにする。
+ * 項目が増えるほど往復が増えて、導入が止まる。
+ */
+export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLElement {
+  return panel('会社のアカウント（SSO）', async (body) => {
+    const list = h('div');
+    const problem = h('p', { class: 'error', role: 'alert', hidden: true });
+
+    const refresh = async (): Promise<void> => {
+      clear(list);
+      const rows = await api<ProviderRow[]>('GET', '/sso/providers');
+      list.append(...countedList('登録済み', rows.filter((r) => !r.disabled), (r, remove) =>
+        h('li', { class: 'row' },
+          h('span', {},
+            h('strong', {}, r.domains.join('、') || '（ドメインなし）'),
+            h('span', { class: 'staff-email' }, r.issuer),
+            h('span', { class: 'hint' },
+              `${r.hasSecret ? '内緒の鍵あり' : 'PKCE のみ'}・`
+              + (r.jitEnabled ? '初回に自動で作る' : '初回は申請にする'))),
+          h('span', { class: 'row-actions' },
+            confirmAction('止める', 'secondary small',
+              `${r.domains.join('、')} の人は、会社のアカウントで入れなくなります（登録済みの人は招待やパスキーで入れます）。`,
+              async () => { await api('DELETE', `/sso/providers/${r.id}`); toast('止めました'); remove(); }))), 'h3'));
+    };
+
+    const issuer = h('input', { type: 'url', placeholder: 'https://login.microsoftonline.com/.../v2.0',
+      'aria-label': '発行元（issuer）' });
+    const clientId = h('input', { type: 'text', placeholder: 'client_id', 'aria-label': 'client_id' });
+    const secret = h('input', { type: 'password', placeholder: '（PKCE だけで足りるなら空のまま）',
+      autocomplete: 'off', 'aria-label': '内緒の鍵（client_secret）' });
+    const domains = h('input', { type: 'text', placeholder: 'kdenki.example.co.jp',
+      'aria-label': '会社のメールアドレスのドメイン' });
+    const jit = h('input', { type: 'checkbox', id: 'sso-jit' });
+    const store = h('select', { 'aria-label': '自動で作るときの配属先' },
+      ...stores.map((s) => h('option', { value: s.id }, s.name)));
+
+    const add = action('この設定で登録する', 'primary', async () => {
+      problem.hidden = true;
+      try {
+        await api('POST', '/sso/providers', {
+          issuer: issuer.value.trim(),
+          clientId: clientId.value.trim(),
+          clientSecret: secret.value.trim() || null,
+          // 複数のドメインは、読点・カンマ・空白のどれで区切っても受ける
+          domains: domains.value.split(/[、,\s]+/).map((d) => d.trim()).filter((d) => d !== ''),
+          jitEnabled: jit.checked,
+          ...(jit.checked ? { defaultStoreId: store.value } : {}),
+        });
+        toast('登録しました');
+        issuer.value = ''; clientId.value = ''; secret.value = ''; domains.value = '';
+        await refresh();
+      } catch (e) {
+        problem.textContent = e instanceof Error ? e.message : String(e);
+        problem.hidden = false;
+      }
+    });
+
+    body.append(
+      h('p', { class: 'hint' },
+        '相手の情報システム部から受け取るのは、発行元（issuer）と client_id、必要なら内緒の鍵だけです。'
+        + '残りは相手が公開している設定から自動で読みます。'),
+      list,
+      h('h3', {}, '設定を足す'),
+      h('div', { class: 'sso-form' },
+        h('label', {}, '発行元（issuer）', issuer),
+        h('label', {}, 'client_id', clientId),
+        h('label', {}, '内緒の鍵（client_secret）', secret),
+        h('label', {}, '会社のメールアドレスのドメイン', domains),
+        h('p', { class: 'hint' }, 'このドメインのアドレスを打った人を、この設定に通します。複数なら読点で区切ってください。'),
+        h('label', { class: 'sso-jit', for: 'sso-jit' }, jit,
+          h('span', {}, '初めて入ってきた人を、申請を挟まず自動で登録する'),
+        ),
+        h('p', { class: 'hint' },
+          '入れないままが既定です。既定では申請になり、「利用の申請」で名前と配属先を決めて承認します。'
+          + '自動で作る場合は、下の店舗に配属され、権限は visitor（投稿は承認を通る）になります。'),
+        h('label', {}, '自動で作るときの配属先', store),
+      ),
+      add,
+      problem,
+    );
+    await refresh();
   });
 }

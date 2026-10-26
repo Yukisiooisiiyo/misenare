@@ -188,3 +188,17 @@ export async function rejectRequest(db: Db, actor: Actor, id: string): Promise<{
   if (!row) throw new DomainError('not_found', 'この申請は見つかりません（すでに決まっているかもしれません）');
   return { ok: true };
 }
+
+/**
+ * ホームに出す数。**店長・本部だけ**に返す（それ以外は 0）。
+ *
+ * 承認・管理を開かないと申請に気づけないと、申請した人がいつまでも待つことになる。
+ * 出勤してすぐ分かるところに出す。
+ */
+export async function requestBadge(db: Db, actor: Actor): Promise<{ pending: number }> {
+  if (actor.adminScope === 'none') return { pending: 0 };
+  const row = await one<{ count: number }>(
+    db, `SELECT count(*)::int AS count FROM access_requests WHERE status = 'pending'`,
+  );
+  return { pending: row.count };
+}

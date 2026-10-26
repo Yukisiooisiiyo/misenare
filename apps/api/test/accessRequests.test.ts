@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { OidcDirectory } from '../src/auth/oidc.ts';
-import { approveRequest, listRequests, rejectRequest } from '../src/domain/accessRequests.ts';
+import { approveRequest, listRequests, rejectRequest, requestBadge } from '../src/domain/accessRequests.ts';
 import { addProvider, finishSso, startSso } from '../src/domain/sso.ts';
 import { verifySession } from '../src/domain/users.ts';
 import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
@@ -155,6 +155,26 @@ describe('利用の申請', () => {
       await assert.rejects(approveRequest(q, manager, req!.id, { storeId: STORE_B }), /自分の店舗/);
       // 本部は店舗を選べる
       await approveRequest(q, hq, req!.id, { storeId: STORE_B });
+    });
+    await clean();
+  });
+
+  it('ホームに出す数は、店長・本部にだけ返す', async () => {
+    // 承認・管理を開かないと気づけないと、申請した人がいつまでも待つことになる。
+    // ただし、申請者のメールアドレスが絡む話なので、数を見せるのも管理者だけにする。
+    await setup();
+    await assert.rejects(knock(), /申請を出しました/);
+    await db.withTenant(T, async (q) => {
+      assert.deepEqual(await requestBadge(q, manager), { pending: 1 });
+      assert.deepEqual(await requestBadge(q, hq), { pending: 1 });
+      assert.deepEqual(await requestBadge(q, trusted), { pending: 0 }, 'trusted には見せない');
+      assert.deepEqual(await requestBadge(q, visitor), { pending: 0 });
+    });
+    // 決めたら数が減る
+    const [req] = await db.withTenant(T, (q) => listRequests(q, manager));
+    await db.withTenant(T, (q) => rejectRequest(q, manager, req!.id));
+    await db.withTenant(T, async (q) => {
+      assert.deepEqual(await requestBadge(q, manager), { pending: 0 });
     });
     await clean();
   });

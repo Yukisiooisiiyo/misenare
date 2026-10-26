@@ -89,7 +89,7 @@ import {
   type UserPatch,
 } from '../domain/users.ts';
 import { OidcDirectory } from '../auth/oidc.ts';
-import { approveRequest, listRequests, rejectRequest } from '../domain/accessRequests.ts';
+import { approveRequest, listRequests, rejectRequest, requestBadge } from '../domain/accessRequests.ts';
 import {
   addProvider, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   type SsoSite,
@@ -413,6 +413,9 @@ function routes(): Router<Ctx> {
   r.get('/stores/:storeId/badges', async (c, _req, p) => json({
     notices: await noticeBadge(c.db, c.actor, p.storeId!),
     handovers: await handoverBadge(c.db, c.actor, p.storeId!),
+    // 利用の申請は店舗に紐づかない（配属先は承認のときに決める）が、
+    // 気づく場所はホームが一番早いので、ここに混ぜて返す
+    accessRequests: await requestBadge(c.db, c.actor),
   }));
 
   // --- 既存マニュアルの取り込み ---------------------------------------------

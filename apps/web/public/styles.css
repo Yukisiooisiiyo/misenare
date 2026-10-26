@@ -356,3 +356,16 @@ button.tag { cursor: pointer; }
 .request-fields { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; }
 .request-fields .field { display: flex; flex-direction: column; gap: 2px; }
 .request-fields input, .request-fields select { font: inherit; padding: 6px 8px; min-width: 120px; }
+
+/* ホームの知らせが2行になることがあるので、縦に並べる */
+.home-alert a { display: block; }
+.home-alert a + a { margin-top: 6px; }
+
+/* 会社のアカウントの設定フォーム */
+.sso-form { display: flex; flex-direction: column; gap: 10px; margin: 8px 0 12px; }
+.sso-form label { display: flex; flex-direction: column; gap: 4px; font-size: 14px; font-weight: 700; }
+.sso-form input[type="url"], .sso-form input[type="text"], .sso-form input[type="password"], .sso-form select {
+  font: inherit; font-weight: 400; padding: 8px; width: 100%; box-sizing: border-box;
+}
+.sso-form .sso-jit { flex-direction: row; align-items: flex-start; gap: 8px; font-weight: 400; }
+.sso-form .sso-jit input { margin-top: 3px; }
