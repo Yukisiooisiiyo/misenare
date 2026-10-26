@@ -23,9 +23,6 @@ CREATE TABLE sso_providers (
   client_id          text NOT NULL,
   -- 内緒の鍵。PKCE だけで足りる設定（公開クライアント）なら NULL
   client_secret      text,
-  -- どのメールアドレスの人をこの設定に通すか（example.co.jp の形で小文字）。
-  -- 入口を選ばせずに、打ったアドレスから会社を決めるために使う
-  email_domains      text[] NOT NULL DEFAULT '{}',
   -- 登録済みでない人を、初回に自動で作ってよいか。既定は作らない（安全側）
   jit_enabled        boolean NOT NULL DEFAULT false,
   -- 自動で作るときの配属先と権限
@@ -36,6 +33,20 @@ CREATE TABLE sso_providers (
   UNIQUE (tenant_id, issuer, client_id)
 );
 CREATE INDEX sso_providers_by_tenant ON sso_providers (tenant_id);
+
+-- どのメールアドレスの人をどの設定に通すか（example.co.jp の形で小文字）。
+--
+-- **会社が決まる前に引く**ので、行レベルセキュリティを付けない。
+-- 入口で「どの会社ですか」と選ばせず、打ったアドレスから会社を決めるための表で、
+-- 中身はドメインと ID だけ。会社のデータは入らない。
+-- （パスキーの合言葉と同じ扱い。ログイン前に引く表は、ここに寄せる）
+CREATE TABLE sso_domains (
+  domain       text PRIMARY KEY,
+  tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+  provider_id  uuid NOT NULL REFERENCES sso_providers(id) ON DELETE CASCADE,
+  created_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX sso_domains_by_provider ON sso_domains (provider_id);
 
 -- 相手の IdP が返してきた「この人」と、こちらの利用者の結び付け。
 -- subject（sub）は相手が決める不変の印。メールアドレスは変わりうるので、こちらを鍵にする。

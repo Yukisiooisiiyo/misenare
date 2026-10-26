@@ -20,6 +20,19 @@ async function boot(): Promise<void> {
   // 招待のQRコードは /app/#invite=<token> を開く
   const invite = /^#invite=(.+)$/.exec(location.hash);
   if (invite) return acceptInvite(decodeURIComponent(invite[1]!));
+  // 会社アカウントから戻ってきたところ。#sso=<token>[&to=#/...]
+  const sso = /^#sso=([^&]+)(?:&to=(.+))?$/.exec(location.hash);
+  if (sso) {
+    session.token = decodeURIComponent(sso[1]!);
+    const to = sso[2] ? decodeURIComponent(sso[2]) : '#/home';
+    history.replaceState(null, '', `${location.pathname}${to.startsWith('#/') ? to : '#/home'}`);
+    return boot();
+  }
+  const ssoError = /^#sso-error=(.+)$/.exec(location.hash);
+  if (ssoError) {
+    history.replaceState(null, '', location.pathname);
+    return renderWelcome(decodeURIComponent(ssoError[1]!));
+  }
   if (!session.token) return renderWelcome();
   try {
     me = await api<Me>('GET', '/me');
@@ -97,6 +110,23 @@ function renderWelcome(error?: string): void {
     signIn.textContent = 'パスキーで入る';
   };
 
+  // 会社のアカウント（社員向け）。打ったアドレスのドメインから、相手の IdP を決める。
+  // 登録が無いドメインなら、その場で招待の案内に戻す。
+  const email = h('input', { id: 'sso-email', type: 'email', autocomplete: 'username',
+    placeholder: 'you@example.co.jp', inputmode: 'email' });
+  const company = action('会社のアカウントで入る', 'secondary', async () => {
+    problem.hidden = true;
+    const value = email.value.trim();
+    if (value === '') { problem.textContent = '会社のメールアドレスを入れてください。'; problem.hidden = false; return; }
+    try {
+      const r = await api<{ authorizeUrl: string }>('POST', '/auth/sso/start', { email: value });
+      location.href = r.authorizeUrl;
+    } catch (e) {
+      problem.textContent = e instanceof Error ? e.message : String(e);
+      problem.hidden = false;
+    }
+  });
+
   shell(null, h('section', { class: 'page welcome' },
     h('h1', { class: 'brand' }, 'ミセナレ'),
     h('p', { class: 'lead' }, '店のやり方を、接客の合間にすぐ探せます。'),
@@ -105,7 +135,11 @@ function renderWelcome(error?: string): void {
       signIn,
       h('p', { class: 'hint' }, 'この端末にパスキーを作ってある場合は、こちらから入れます。'),
     ) : null,
-    passkeySupported() ? h('p', { class: 'or' }, 'はじめての端末') : null,
+    h('p', { class: 'or' }, '会社のアカウントをお持ちの方'),
+    h('label', { for: 'sso-email' }, '会社のメールアドレス'),
+    email,
+    company,
+    h('p', { class: 'or' }, 'はじめての端末'),
     h('p', {}, '使い始めるには、店長が発行する招待のQRコードをスマホのカメラで読み取ってください。'),
     h('label', { for: 'invite' }, 'リンクやコードを受け取った場合'),
     input,

@@ -132,6 +132,12 @@ export const RULES = {
    * 1回ごとに chall を作って鍵を引くので、数を打たれると台が重くなる。
    */
   passkeyLogin: { limit: 20, windowMs: 10 * 60_000 },
+  /**
+   * 会社アカウントで入る：10分で20回まで。
+   * 入口（/auth/sso/start）は打たれたアドレスでドメインの登録を引くので、
+   * 数を打てば「どの会社が導入しているか」を外から数えられる。そこを鈍らせる。
+   */
+  ssoLogin: { limit: 20, windowMs: 10 * 60_000 },
 } satisfies Record<string, RateRule>;
 
 /** node:http のアダプタが付ける、接続元の IP のヘッダー（外から来た同名のヘッダーは上書きする） */
