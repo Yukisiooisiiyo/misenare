@@ -103,6 +103,61 @@ function relationText(r: Relation): HTMLElement {
 interface ReadingProposal { id: string; name: string; proposed: string; useCount: number }
 
 /**
+ * 読みを1つ尋ねる行。確認待ちの一覧と、保存した直後のその場での確認で、同じ形を使う。
+ * 案は空のことがある（機械が自信を持てなかった語）。そのときは空欄で打ってもらう。
+ */
+export function readingRow(
+  tag: { id: string; name: string; proposed: string },
+  onDone: () => void,
+  extra?: Node | null,
+): HTMLElement {
+  const field = h('input', {
+    type: 'text', value: tag.proposed, class: 'reading-field',
+    placeholder: tag.proposed === '' ? 'カタカナで入力' : '',
+    'aria-label': `#${tag.name} の読み`, autocomplete: 'off', spellcheck: 'false',
+  });
+  const save = async (reading: string | null) => {
+    await api('POST', `/tag-readings/${tag.id}`, { reading });
+    toast(reading === null ? '読みなしで登録しました' : `#${tag.name} を「${reading}」で登録しました`);
+    onDone();
+  };
+  return h('li', { class: 'row reading-row' },
+    h('span', { class: 'reading-head' },
+      h('span', { class: 'tag tag-inline' }, `#${tag.name}`),
+      extra ?? null,
+      tag.proposed === '' ? h('span', { class: 'hint' }, '案なし') : null),
+    field,
+    h('span', { class: 'row-actions' },
+      action('この読みで登録', 'primary small', () => save(field.value)),
+      action('あとで', 'secondary small', () => { onDone(); return Promise.resolve(); })));
+}
+
+/**
+ * 保存した直後に、新しく出来たタグの読みをその場で尋ねる。
+ * 一番よく知っているのは、いま打った人なので、ここで聞くのが一番当たる。
+ * 飛ばしても「承認・管理 → タグの読み」に残るので、取りこぼさない。
+ */
+export function askReadings(tags: Array<{ id: string; name: string; proposed: string }>, onFinish: () => void): HTMLElement {
+  const remaining = new Set(tags.map((t) => t.id));
+  const list = h('ul', { class: 'rows' });
+  const done = (id: string) => {
+    remaining.delete(id);
+    if (remaining.size === 0) onFinish();
+  };
+  for (const t of tags) {
+    const row = readingRow(t, () => { row.remove(); done(t.id); });
+    list.append(row);
+  }
+  return h('section', { class: 'page reading-ask' },
+    h('h1', {}, '読みを教えてください'),
+    h('p', { class: 'hint' },
+      '新しいタグができました。読みを登録すると、かなでも引けるようになります'
+      + '（しょくせんき → #食洗機）。あとで登録してもかまいません。'),
+    list,
+    h('button', { type: 'button', class: 'secondary', onclick: onFinish }, 'まとめてあとにする'));
+}
+
+/**
  * タグの読みの確認。
  *
  * 機械が出した読みは外すことがあるので、そのままでは検索に効かせない。
@@ -119,26 +174,10 @@ export function readingPanel(): HTMLElement {
     body.append(
       h('p', { class: 'hint' },
         '読みを登録すると、かなでも引けるようになります（れいぞうこ → #冷蔵庫）。'
-        + '機械が出した案なので、違っていたら直してください。'),
-      ...countedList('確認待ち', rows, (r, remove) => {
-        const field = h('input', {
-          type: 'text', value: r.proposed, class: 'reading-field',
-          'aria-label': `#${r.name} の読み`, autocomplete: 'off', spellcheck: 'false',
-        });
-        const save = async (reading: string | null) => {
-          await api('POST', `/tag-readings/${r.id}`, { reading });
-          toast(reading === null ? '読みなしで登録しました' : `#${r.name} を「${reading}」で登録しました`);
-          remove();
-        };
-        return h('li', { class: 'row reading-row' },
-          h('span', { class: 'reading-head' },
-            h('span', { class: 'tag tag-inline' }, `#${r.name}`),
-            h('span', { class: 'hint' }, `${r.useCount}件`)),
-          field,
-          h('span', { class: 'row-actions' },
-            action('この読みで登録', 'primary small', () => save(field.value)),
-            action('読みなし', 'secondary small', () => save(null))));
-      }),
+        + '案が入っているものは機械が出したものなので、違っていたら直してください。'
+        + '空いているものは、機械が自信を持てなかった語です。'),
+      ...countedList('確認待ち', rows, (r, remove) =>
+        readingRow(r, remove, h('span', { class: 'hint' }, `${r.useCount}件`))),
     );
   });
 }

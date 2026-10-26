@@ -1,5 +1,16 @@
 // 単語分割。本番では kuromoji.js や Lindera に差し替えられるよう、インターフェースで受ける。
 
+/** 読みと、その読みをどれだけ信用してよいかの手がかり */
+export interface ReadingGuess {
+  reading: string;
+  /** 形態素の数。1 なら辞書にその語がそのまま載っている */
+  morphemes: number;
+  /** 漢字1文字に割れた形態素の数 */
+  loneKanji: number;
+  /** そのうち接尾辞でないもの。ここが多いと読みを外しやすい */
+  loneKanjiFree: number;
+}
+
 export interface Tokenizer {
   /** 正規化済みの文字列を単語に区切る。助詞などの除外はこの後で行う。 */
   segment(normalized: string): string[];
@@ -9,6 +20,8 @@ export interface Tokenizer {
    * Intl.Segmenter では読みが取れないので実装しない。
    */
   reading?(word: string): string | null;
+  /** 読みと確からしさ。返せる実装（kuromoji）だけが持つ */
+  guessReading?(word: string): ReadingGuess | null;
 }
 
 /**

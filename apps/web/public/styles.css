@@ -289,3 +289,7 @@ button.tag { cursor: pointer; }
   color: var(--text); font-family: inherit;
 }
 .reading-field:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 保存した直後の、読みのその場確認 */
+.reading-ask h1 { font-size: 20px; }
+.reading-ask .rows { margin: 16px 0; }

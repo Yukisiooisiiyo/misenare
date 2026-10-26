@@ -125,12 +125,14 @@ describe('タグの読みの確認', () => {
       assert.equal(before.tags.find((t) => t.name === '冷蔵庫')?.reading, null, '確かめる前に読みが効いている');
 
       const pending = await listReadingProposals(q, manager);
-      assert.deepEqual(pending.map((p) => [p.name, p.proposed]), [['冷蔵庫', 'レイゾウコ']]);
+      assert.deepEqual(pending.filter((p) => p.name === '冷蔵庫').map((p) => [p.name, p.proposed]),
+        [['冷蔵庫', 'レイゾウコ']]);
 
       await confirmReading(q, manager, id, 'レイゾウコ');
       const after = await exportDictionary(q, manager, STORE_A);
       assert.equal(after.tags.find((t) => t.name === '冷蔵庫')?.reading, 'レイゾウコ');
-      assert.deepEqual(await listReadingProposals(q, manager), [], '確かめたものは確認待ちに残らない');
+      assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === '冷蔵庫'),
+        '確かめたものが確認待ちに残っている');
     });
   });
 
@@ -155,7 +157,8 @@ describe('タグの読みの確認', () => {
         `SELECT reading, reading_checked_at IS NOT NULL AS checked FROM hashtags WHERE id = $1`, [id]);
       assert.equal(row.reading, null);
       assert.equal(row.checked, true);
-      assert.deepEqual(await listReadingProposals(q, manager), []);
+      assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === 'リ券'),
+        '「読みなし」で確定した語が確認待ちに残っている');
     });
   });
 

@@ -63,6 +63,14 @@ export interface TenantReport {
  * なるので、間違ったまま効かせると検索に嘘が混ざる。人が確かめて初めて
  * reading に入る（承認・管理 → タグの読み）。
  *
+ * **信用できない案は置かない。** 測定（apps/api/test/readingBench.test.ts）で
+ * 外したのは、辞書に無い複合語を漢字1文字に割って読んだものだけだった。
+ *   食洗機 → 食/洗/機 → ショクアライキ
+ *   開梱   → 開/梱   → ヒラキコリ
+ * 「漢字1文字の自立語に割れていない」で絞ると、測定では誤りが消え、
+ * 正しい読みも落とさなかった。当たらない語では黙り、空欄で確認に回す。
+ * 間違った案を見せるのは、何も見せないより悪い。
+ *
  * すでに人が見たもの（reading_checked_at が入っている）には、もう案を出さない。
  * 「読みなし」と決めた語に毎晩出し直すのは、確認する人への嫌がらせになる。
  */
@@ -77,14 +85,18 @@ async function fillReadings(db: Db, tokenizer: Tokenizer): Promise<number> {
   );
   let filled = 0;
   for (const t of tags) {
-    const r = tokenizer.reading(t.name);
+    const guess = tokenizer.guessReading?.(t.name);
+    const r = guess ? guess.reading : tokenizer.reading(t.name);
     if (!r) continue;
     // 読みが見出しと同じ（カタカナ語）なら、確かめるまでもないので確定してよい
     if (r === t.name) {
       await db.query(`UPDATE hashtags SET reading = $2, reading_checked_at = now() WHERE id = $1`, [t.id, r]);
-    } else {
-      await db.query(`UPDATE hashtags SET reading_proposed = $2 WHERE id = $1`, [t.id, r]);
+      filled++;
+      continue;
     }
+    // 漢字1文字の自立語に割れている＝辞書に無い複合語。読みを外しやすいので案にしない。
+    if (guess && guess.loneKanjiFree > 0) continue;
+    await db.query(`UPDATE hashtags SET reading_proposed = $2 WHERE id = $1`, [t.id, r]);
     filled++;
   }
   return filled;

@@ -122,3 +122,32 @@ describe('夜間バッチ', () => {
     assert.equal((await run((q) => listStale(q, trusted, STORE_A))).length, 0);
   });
 });
+
+describe('読みの案を出す条件', () => {
+  /** 漢字1文字に割れる（＝辞書に無い複合語）のを真似たトークナイザー */
+  const splitting = (reading: string) => Object.assign(Object.create(tokenizer), {
+    reading: () => reading,
+    guessReading: () => ({ reading, morphemes: 3, loneKanji: 3, loneKanjiFree: 3 }),
+  });
+  /** 辞書にそのまま載っている語を真似たもの */
+  const whole = (reading: string) => Object.assign(Object.create(tokenizer), {
+    reading: () => reading,
+    guessReading: () => ({ reading, morphemes: 1, loneKanji: 0, loneKanjiFree: 0 }),
+  });
+
+  it('漢字1文字に割れた語は、案を出さずに空欄で確認に回す', async () => {
+    await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '食洗機の設置', body: '据付は2人で。', tagNames: ['#食洗機'] }));
+    await runNightly(db, splitting('ショクアライキ'));
+    const pending = await run((q) => listReadingProposals(q, trusted));
+    const target = pending.find((p) => p.name === '食洗機');
+    assert.ok(target, '確認に回っていない');
+    assert.equal(target.proposed, '', '信用できない読みを案として見せている');
+  });
+
+  it('辞書にそのまま載っている語は、案として見せる', async () => {
+    await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '搬入の手順', body: '2人で。', tagNames: ['#搬入'] }));
+    await runNightly(db, whole('ハンニュウ'));
+    const pending = await run((q) => listReadingProposals(q, trusted));
+    assert.equal(pending.find((p) => p.name === '搬入')?.proposed, 'ハンニュウ');
+  });
+});

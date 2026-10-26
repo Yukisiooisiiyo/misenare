@@ -5,7 +5,7 @@
 // 書いたものはこの画面を閉じると消える。
 
 import {
-  analyzeDocument, analyzeQuery, computeNpmi, DEFAULT_PARAMS, normalizeTagName, pairKey,
+  analyzeDocument, analyzeQuery, computeNpmi, DEFAULT_PARAMS, hiraToKata, normalizeTagName, pairKey,
   rank, SegmenterTokenizer, TagDictionary,
   type CandidateDoc, type CorpusStats, type Field, type TagRelation,
 } from '@misenare/search-core';
@@ -275,9 +275,17 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
       verifiedAt: new Date().toISOString(),
       verifiedBy: ME.name,
     };
+    const before = new Set(tags.map((t) => t.name));
     for (const name of created.tags) ensureTag(name);
     knowledge.push(created);
-    return { id: created.id, version: 1, published: true } as T;
+    // 本物と同じで、新しく出来たタグのうち読みが決まっていないものを返す。
+    // お試し版には形態素解析器が無いので、案は常に空（＝自信が持てない語の扱い）。
+    const readingsNeeded = created.tags
+      .filter((n) => !before.has(n))
+      .map((n) => tags.find((t) => t.name === n))
+      .filter((t): t is NonNullable<typeof t> => t != null && t.reading == null)
+      .map((t) => ({ id: t.id, name: t.name, proposed: '' }));
+    return { id: created.id, version: 1, published: true, readingsNeeded } as T;
   }
   if (method === 'POST' && parts[0] === 'knowledge' && parts[2] === 'verify') {
     const k = knowledge.find((x) => x.id === parts[1]);
@@ -414,15 +422,14 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
     return readingProposals as T;
   }
   if (method === 'POST' && parts[0] === 'tag-readings') {
+    const raw = typeof body?.reading === 'string' ? body.reading : null;
+    // 本物と同じで、ひらがなで入れてもカタカナに直す
+    const reading = raw === null || raw.trim() === '' ? null : hiraToKata(raw.trim());
     const i = readingProposals.findIndex((r) => r.id === parts[1]);
-    if (i >= 0) {
-      const name = readingProposals[i]!.name;
-      readingProposals.splice(i, 1);
-      const reading = typeof body?.reading === 'string' ? body.reading : null;
-      // 本物と同じで、確かめた読みだけがタグに入る
-      const tag = tags.find((t) => t.name === name);
-      if (tag) tag.reading = reading;
-    }
+    if (i >= 0) readingProposals.splice(i, 1);
+    // 確かめた読みだけがタグに入る
+    const tag = tags.find((t) => t.id === parts[1]);
+    if (tag) tag.reading = reading;
     return { ok: true } as T;
   }
   if (method === 'GET' && rawPath.startsWith('/tag-relations')) {

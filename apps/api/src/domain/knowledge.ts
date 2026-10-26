@@ -139,7 +139,28 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
     title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [], expiresAt: input.expiresAt ?? null,
   });
   if (isTrusted(actor)) await publish(db, tokenizer, actor, k.id, 1);
-  return { id: k.id, version: 1, published: isTrusted(actor) };
+  // 新しく作ったタグのうち、まだ読みが決まっていないものを返す。
+  // 画面はこれを見て、その場で読みを尋ねる（一番よく知っているのは、いま打った人）。
+  const readingsNeeded = await pendingReadings(db, tagIds);
+  return { id: k.id, version: 1, published: isTrusted(actor), readingsNeeded };
+}
+
+/** 読みが決まっていないタグ。保存した直後にその場で尋ねるために使う。 */
+export interface ReadingNeeded { id: string; name: string; proposed: string }
+
+async function pendingReadings(db: Db, tagIds: readonly string[]): Promise<ReadingNeeded[]> {
+  if (tagIds.length === 0) return [];
+  const rows = await db.query<{ id: string; name: string; reading_proposed: string | null }>(
+    `SELECT id, name, reading_proposed
+       FROM hashtags
+      WHERE id = ANY($1::uuid[])
+        AND state = 'active'
+        AND reading IS NULL
+        AND reading_checked_at IS NULL
+      ORDER BY name`,
+    [[...tagIds]],
+  );
+  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed ?? '' }));
 }
 
 export async function editKnowledge(

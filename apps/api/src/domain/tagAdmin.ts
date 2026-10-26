@@ -175,7 +175,11 @@ export async function mergeTags(db: Db, tokenizer: Tokenizer, actor: Actor, from
 export interface ReadingProposal {
   id: string;
   name: string;
-  /** 機械が出した案 */
+  /**
+   * 機械が出した案。**空のことがある。**
+   * 信用できない読みは案にしないので、その語はここが空で来る。
+   * 間違った案を見せるのは、何も見せないより悪い。
+   */
   proposed: string;
   /** このタグが付いているナレッジの数。多いものから確かめたい */
   useCount: number;
@@ -195,15 +199,17 @@ export function validateReading(reading: string): void {
 /** 確認待ちの読み。使われている数が多い順に出す（直す価値が大きい順） */
 export async function listReadingProposals(db: Db, actor: Actor, limit = 50): Promise<ReadingProposal[]> {
   assert(isTrusted(actor), 'forbidden', 'タグの読みを確かめられるのは trusted 以上です');
-  const rows = await db.query<{ id: string; name: string; reading_proposed: string; use_count: number }>(
+  // 案の有無にかかわらず、読みが決まっていないタグを出す。
+  // 案があるものを先に（直すだけで済むので手が早い）、次に使われている数の多い順。
+  const rows = await db.query<{ id: string; name: string; reading_proposed: string | null; use_count: number }>(
     `SELECT id, name, reading_proposed, use_count
        FROM hashtags
-      WHERE state = 'active' AND reading_proposed IS NOT NULL AND reading_checked_at IS NULL
-      ORDER BY use_count DESC, name
+      WHERE state = 'active' AND reading IS NULL AND reading_checked_at IS NULL
+      ORDER BY (reading_proposed IS NULL), use_count DESC, name
       LIMIT $1`,
     [limit],
   );
-  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed, useCount: r.use_count }));
+  return rows.map((r) => ({ id: r.id, name: r.name, proposed: r.reading_proposed ?? '', useCount: r.use_count }));
 }
 
 /**
