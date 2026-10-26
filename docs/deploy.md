@@ -222,3 +222,33 @@ docker run --rm -e DATABASE_URL=… misenare:latest npx tsx apps/api/src/batch/n
   写真を貼っただけの PDF（スキャン）は読めません。
 - **写真の自動削除**。ナレッジを消せば写真も消えますが、古い写真の整理は手作業です。
 - **画面からの監視**。`/metrics` と Webhook はありますが、ダッシュボードは用意していません（Grafana などを別に立ててください）。
+
+---
+
+## 8. 外から借りているデータ（出典とライセンス）
+
+タグの読みの候補（「承認・管理 → タグの読み」や、タグを作ったときに出る候補）は、
+**KANJIDIC2** の漢字1字ごとの読みをもとに作っています。
+
+| | |
+| --- | --- |
+| 出典 | KANJIDIC2 — 電子辞書研究開発グループ (EDRDG) / James William Breen 氏 |
+| 入手元 | https://www.edrdg.org/kanjidic/kanjidic2.xml.gz |
+| ライセンス | Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0) |
+| 取り込んだもの | `packages/search-core/src/kanjiReadings.generated.ts`（機械生成・手で直さない） |
+| 作る台本 | `tools/gen-kanji-readings.mjs` |
+| 取り直し | `.github/workflows/kanji-readings.yml`（毎月1日） |
+
+守らないといけないことが3つあります。**商売に使うことへの制限はありません**が、
+次は満たし続ける必要があります。
+
+1. **出典を示す。** 画面の下（`apps/web/public/index.html` の `.credits`）と、
+   生成ファイルの冒頭に書いてあります。消さないでください。
+2. **生成ファイルは CC BY-SA 4.0 で配る。** 同じ条件で配ることが条件（ShareAlike）なので、
+   派生物を1ファイルに閉じ込めてあります。**この条件はそのファイルにだけ及び、
+   ミセナレ本体のソースを公開する義務はありません。**
+3. **定期的に更新する。** 月1回の取り直しがそれです。止めないでください。
+
+出典を替えたいときは `tools/gen-kanji-readings.mjs` だけを差し替えます（出力の形は変えない）。
+たとえば常用漢字表は内閣告示なのでパブリックドメインですが、常用外（梱包の「梱」など）が
+落ちるので、売場の言葉には足りません。いまは JIS X 0208 の漢字を採っています。

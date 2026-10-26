@@ -18,6 +18,9 @@ const options = {
   format: 'esm',
   target: ['es2022', 'safari16'],
   minify: !process.argv.includes('--watch'),
+  // 既定では日本語が \uXXXX に展開され、1文字6バイトになる。
+  // UTF-8 のまま出せば3バイト。画面の文字がほとんど日本語なので、ここが一番効く。
+  charset: 'utf8',
   sourcemap: true,
   legalComments: 'none',
 };

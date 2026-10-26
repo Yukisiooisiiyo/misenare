@@ -125,14 +125,14 @@ describe('タグの読みの確認', () => {
       const before = await exportDictionary(q, manager, STORE_A);
       assert.deepEqual(before.tags.find((t) => t.name === '冷蔵庫')?.readings, [], '確かめる前に読みが効いている');
 
-      const pending = await listReadingProposals(q, manager);
+      const pending = await listReadingProposals(q, tokenizer, manager);
       assert.deepEqual(pending.filter((p) => p.name === '冷蔵庫').map((p) => [p.name, p.proposed]),
         [['冷蔵庫', 'レイゾウコ']]);
 
       await confirmReading(q, manager, id, ['レイゾウコ']);
       const after = await exportDictionary(q, manager, STORE_A);
       assert.deepEqual(after.tags.find((t) => t.name === '冷蔵庫')?.readings, ['レイゾウコ']);
-      assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === '冷蔵庫'),
+      assert.ok(!(await listReadingProposals(q, tokenizer, manager)).some((p) => p.name === '冷蔵庫'),
         '確かめたものが確認待ちに残っている');
     });
   });
@@ -158,7 +158,7 @@ describe('タグの読みの確認', () => {
         `SELECT readings, reading_checked_at IS NOT NULL AS checked FROM hashtags WHERE id = $1`, [id]);
       assert.deepEqual(row.readings, []);
       assert.equal(row.checked, true);
-      assert.ok(!(await listReadingProposals(q, manager)).some((p) => p.name === 'リ券'),
+      assert.ok(!(await listReadingProposals(q, tokenizer, manager)).some((p) => p.name === 'リ券'),
         '「読みなし」で確定した語が確認待ちに残っている');
     });
   });
@@ -217,7 +217,7 @@ describe('タグの読みの確認', () => {
 
   it('visitor は読みを確かめられない', async () => {
     await db.withTenant(T, async (q) => {
-      await assert.rejects(listReadingProposals(q, visitor), /trusted 以上/);
+      await assert.rejects(listReadingProposals(q, tokenizer, visitor), /trusted 以上/);
     });
   });
 });

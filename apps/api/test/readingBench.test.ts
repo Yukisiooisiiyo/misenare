@@ -15,6 +15,7 @@
 import assert from 'node:assert/strict';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
+import { readingCandidates, suggestReading } from '@misenare/search-core';
 import { createMorphologicalTokenizer } from '../src/search/kuromojiTokenizer.ts';
 
 const kuromoji = await createMorphologicalTokenizer().catch(() => null);
@@ -198,5 +199,124 @@ describe('タグの読みの自動付与：精度の測定', { skip: kuromoji ? 
     record('タグの読み：揺れる語', report);
     // 合否には使わない。人が見て判断するための記録。
     assert.ok(true);
+  });
+});
+
+/**
+ * 人が選ぶための候補を出す経路（readingCandidates）の測定。
+ *
+ * 上の測定（形態素解析器）とは**測る中身が違う**。
+ * 上は「黙って案として見せてよいか」なので 1位が当たる率を見る。
+ * ここは「人が5件から選ぶ」ので **正解が候補に入っている率**（再現率）を見る。
+ * 選ぶのは人なので、1位が当たっていなくても、入っていれば用が足りる。
+ *
+ * この経路は辞書を引かない。漢字1字ごとの読み（KANJIDIC2）を総当たりし、
+ * 複合語の規則（音訓の揃い・連用形・連濁）で並べているだけなので、
+ * kuromoji が無くても動く。だからここは CI でなくても測れる。
+ */
+describe('タグの読みの候補：人が選べるかの測定', () => {
+  it('正解が5件の候補に入る率を測り、数字を残す', () => {
+    const missed: string[] = [];
+    const notFirst: string[] = [];
+    let first = 0; let within = 0; let silent = 0;
+    let worst = 0; let worstWord = '';
+
+    for (const [word, want] of ANSWERS) {
+      const t0 = performance.now();
+      const got = readingCandidates(word, 5);
+      const ms = performance.now() - t0;
+      if (ms > worst) { worst = ms; worstWord = word; }
+      if (got.length === 0) { silent++; missed.push(`${word}（候補を出さない）`); continue; }
+      const at = got.indexOf(want);
+      if (at === 0) { first++; within++; continue; }
+      if (at > 0) { within++; notFirst.push(`${word}: ${at + 1}位`); continue; }
+      missed.push(`${word}→ ${got.slice(0, 3).join('／')}（正しくは ${want}）`);
+    }
+
+    const total = ANSWERS.length;
+    const report = [
+      `語数 ${total}`,
+      `正解が候補5件に入った ${within}（再現率 ${((within / total) * 100).toFixed(1)}%）`,
+      `うち1位 ${first}（${((first / total) * 100).toFixed(1)}%）`,
+      `候補を出さなかった語 ${silent}（表に無い漢字が混ざる語。入力欄だけ見せる）`,
+      `いちばん遅い語 ${worstWord} ${worst.toFixed(0)}ms`,
+      '',
+      ...(missed.length > 0 ? ['候補に入らなかった語:', ...missed.map((m) => `  ${m}`), ''] : []),
+      ...(notFirst.length > 0 ? ['1位ではないが候補に入った語:', ...notFirst.map((m) => `  ${m}`)] : []),
+    ].join('\n');
+    record('タグの読みの候補：再現率', report);
+
+    // 人が5件から選ぶ前提なので、見る線は再現率。
+    // 1位の率は参考（下がっても、押す位置が1つ下がるだけ）。
+    assert.ok(within / total >= 0.9, `再現率が下がった: ${((within / total) * 100).toFixed(1)}%`);
+    // 1語あたりの計算時間。タグを作る瞬間に1回走るので、体感に出ない範囲に収める。
+    assert.ok(worst < 400, `候補を作るのが遅い（${worstWord} ${worst.toFixed(0)}ms）`);
+  });
+
+  it('読みが揺れる語でも、候補のどこかに両方の形を出す', () => {
+    // 下取は シタドリ とも シタトリ とも打たれる。どちらが正しいかを決めず、
+    // 両方を候補に残す。利用者は押して、入力欄で直せる。
+    const c = readingCandidates('下取', 5);
+    assert.ok(c.includes('シタドリ'), c.join('／'));
+    assert.ok(c.includes('シタトリ'), `濁らない形も残す: ${c.join('／')}`);
+  });
+
+  it('正解を決めていない語で、候補の出方を残す', () => {
+    const rows = AMBIGUOUS.map((w) => {
+      const c = readingCandidates(w, 5);
+      return `  ${w}: ${c.length === 0 ? '（候補を出さない）' : c.join('／')}`;
+    });
+    record('タグの読みの候補：揺れる語', ['正解表に入れていない語の、候補の出方:', ...rows].join('\n'));
+    assert.ok(true);
+  });
+});
+
+/**
+ * 利用者が実際に見る画面で測る。
+ *
+ * 上の2つは経路ごとの数字だが、タグを作った直後の確認画面には**両方が同時に出る**。
+ *   入力欄 … 形態素解析器の案（信用できないときは空）
+ *   その下 … 漢字の読みの総当たりから作った候補（押すと入力欄に入る）
+ * どちらかに正解があれば、打たずに済む。だから見るべき数字はその**合わせ技**。
+ *
+ * 2つの経路は外す語が違う（辞書に載っている複合語と、載っていない複合語）。
+ * 片方だけを見ていると、この補い合いが数字に出ない。
+ */
+describe('タグの読み：画面に出るもの全部での測定', { skip: kuromoji ? false : 'kuromoji が入っていません' }, () => {
+  it('入力欄か候補のどこかに正解がある率を測る', () => {
+    const rows: string[] = [];
+    let box = 0; let chips = 0; let either = 0;
+    const missed: string[] = [];
+
+    for (const [word, want] of ANSWERS) {
+      const s = suggestReading(kuromoji!, word);
+      // settled（カタカナ語）は尋ねずに登録される。確認の手間はゼロ。
+      const proposed = s.kind === 'silent' ? '' : s.reading;
+      const candidates = readingCandidates(word, 5).filter((c) => c !== proposed);
+      const inBox = proposed === want;
+      const inChips = candidates.includes(want);
+      if (inBox) box++;
+      if (inChips) chips++;
+      if (inBox || inChips) either++;
+      else { missed.push(`${word}（正しくは ${want}）`); }
+      rows.push(`  ${inBox ? '欄' : inChips ? '候' : '×'} ${word}: 欄=${proposed || '（空）'} 候=${candidates.join('／')}`);
+    }
+
+    const total = ANSWERS.length;
+    const report = [
+      `語数 ${total}`,
+      `入力欄に正解が入っていた ${box}（${((box / total) * 100).toFixed(1)}%）… そのまま登録できる`,
+      `候補に正解があった ${chips}（${((chips / total) * 100).toFixed(1)}%）… 1回押せば入る`,
+      `**どちらかにあった ${either}（${((either / total) * 100).toFixed(1)}%）**… 打たずに済む`,
+      '',
+      ...(missed.length > 0 ? ['どちらにも無かった語（人が打つ）:', ...missed.map((m) => `  ${m}`), ''] : []),
+      '語ごとの内訳（欄＝入力欄が正解／候＝候補に正解）:',
+      ...rows,
+    ].join('\n');
+    record('タグの読み：画面に出るもの全部', report);
+
+    // 2つの経路は外す語が違うので、合わせれば取りこぼしはごく少ないはず。
+    // ここが下がったら、片方の経路が壊れたか、両方が同じ語で外し始めた合図。
+    assert.ok(either / total >= 0.97, `打たずに済む率が下がった: ${((either / total) * 100).toFixed(1)}%`);
   });
 });

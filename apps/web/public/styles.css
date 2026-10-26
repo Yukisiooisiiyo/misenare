@@ -317,3 +317,10 @@ button.tag { cursor: pointer; }
   align-self: flex-start; font-size: 14px; padding: 4px 0;
   border: 0; background: none; color: var(--accent); font-family: inherit; cursor: pointer;
 }
+
+/* 出典表示。常に画面の下に置くが、作業の邪魔にならない大きさにする。 */
+.credits {
+  max-width: 720px; margin: 32px auto; padding: 0 16px 24px;
+  color: var(--ink-soft); font-size: 12px; line-height: 1.8; text-align: center;
+}
+.credits a { color: inherit; text-decoration: underline; }
