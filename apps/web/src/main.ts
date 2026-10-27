@@ -493,7 +493,7 @@ async function renderKnowledge(id: string): Promise<void> {
   shell('search', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
-    k.pendingVersions.length > 0 && k.status === 'published' ? h('p', { class: 'pending' }, '修正案が承認を待っています。') : null,
+    pendingEditsBlock(k),
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
@@ -512,6 +512,35 @@ function staleLabel(): string {
   if (days === 180) return '半年以上';
   if (days % 30 === 0) return `${days / 30}か月以上`;
   return `${days}日以上`;
+}
+
+/**
+ * 承認待ちの修正案を、**誰の案かまで出す**。中身は「見る」で開く。
+ *
+ * 隠していると、同じところを2人が別々に直して、承認のときに片方が黙って消える。
+ * 先に相手の案を読めれば、それを踏まえて書けるし、待つこともできる。
+ */
+function pendingEditsBlock(k: Knowledge): HTMLElement | null {
+  if (k.status !== 'published' || k.pendingEdits.length === 0) return null;
+  const box = h('div', { class: 'pending' });
+  box.append(h('p', {}, '修正案が承認を待っています。承認されるまで、下の本文は変わりません。'));
+  for (const p of k.pendingEdits) {
+    const who = p.mine ? 'あなた' : `${p.editedBy ?? '退職した人'}さん`;
+    const shown = h('div', { class: 'body' });
+    const btn = action('見る', 'secondary small', async () => {
+      if (shown.childElementCount > 0) { shown.replaceChildren(); btn.textContent = '見る'; return; }
+      const vs = await api<Array<{ version: number; title: string; body: string }>>('GET', `/knowledge/${k.id}/versions`);
+      const v = vs.find((x) => x.version === p.version);
+      shown.replaceChildren(...(v
+        ? [h('h3', {}, v.title), ...v.body.split(/\n{2,}/).map((t) => h('p', {}, t))]
+        : [h('p', {}, '見つかりませんでした')]));
+      btn.textContent = '閉じる';
+    });
+    box.append(h('p', {}, `${who}の修正案（${relativeDate(p.editedAt)}）`, btn), shown);
+  }
+  box.append(h('p', { class: 'hint' },
+    '同じところを直すときは、先にこれを読んでください。別々に直すと、どちらかが消えます。'));
+  return box;
 }
 
 /**

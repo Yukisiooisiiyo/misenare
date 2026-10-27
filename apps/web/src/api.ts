@@ -103,7 +103,7 @@ export interface Knowledge {
   approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
-  pendingVersions: number[];
+  pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
 }
 
 export interface Dictionary {

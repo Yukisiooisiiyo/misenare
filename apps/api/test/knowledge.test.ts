@@ -98,7 +98,9 @@ describe('編集と版', () => {
     }));
     assert.equal(r.published, false);
     assert.equal((await run((q) => search(q, tokenizer, trusted, STORE_A, '階段'))).hits.length, 0);
-    assert.deepEqual((await run((q) => getKnowledge(q, trusted, id))).pendingVersions, [3]);
+    const pend = (await run((q) => getKnowledge(q, trusted, id))).pendingEdits;
+    assert.deepEqual(pend.map((p) => p.version), [3]);
+    assert.equal(pend[0]!.editedBy, '新人バイト');
     await run((q) => approveVersion(q, tokenizer, manager, id, 3));
     assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '階段'))), [id]);
   });
@@ -125,11 +127,16 @@ describe('編集と版', () => {
     assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#搬入'))), [id]);
   });
 
-  it('承認待ち・却下の案は、本人と承認者以外には版の一覧で見えない', async () => {
-    const forStranger = await run((q) => listVersions(q, { ...visitor, userId: '40000000-0000-0000-0000-000000000002', trustLevel: 'visitor' }, id));
-    assert.ok(forStranger.every((v) => v.state === 'published' || v.state === 'superseded'));
+  // 承認待ちは**全員に見せる**。隠すと、同じところを2人が別々に直して、
+  // 承認のときに片方が黙って消える（approvals.test.ts の「2人が同時に直したとき」）。
+  // 却下された案だけは、書いた本人と承認できる人に限る。
+  it('承認待ちの案は全員が読めるが、却下された案は本人と承認者だけ', async () => {
+    const stranger = { ...visitor, userId: '40000000-0000-0000-0000-000000000002', trustLevel: 'visitor' as const };
+    const forStranger = await run((q) => listVersions(q, stranger, id));
+    assert.ok(forStranger.some((v) => v.state === 'pending'), '承認待ちは他人にも見える');
+    assert.ok(forStranger.every((v) => v.state !== 'rejected'), '却下された案は見えない');
     const forOwner = await run((q) => listVersions(q, visitor, id));
-    assert.ok(forOwner.some((v) => v.state === 'pending' || v.state === 'rejected'));
+    assert.ok(forOwner.some((v) => v.state === 'rejected'), '書いた本人には見える');
   });
 
   it('承認待ち・却下の案には「戻す」で公開できない', async () => {

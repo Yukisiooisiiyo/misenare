@@ -179,3 +179,89 @@ describe('承認待ちの知らせ（連絡事項に出す）', () => {
     assert.equal(await approvalNotice(trusted), undefined);
   });
 });
+
+describe('同じナレッジを2人が同時に直したとき', () => {
+  // これが無いと **片方の修正が黙って消える**。
+  //   A が公開中の v1 を直して v2（承認待ち）
+  //   B も公開中の v1 を直して v3（承認待ち）… B の案に A の修正は入っていない
+  //   v3 を通すと publish() が「自分より古い承認待ち」を閉じ、A の修正は消える
+  //   逆の順に通すと、v3 が A の修正を上書きする
+
+  /** もう一人の新人。同じ店舗の visitor */
+  const visitor2 = {
+    userId: '40000000-0000-0000-0000-00000000000a', tenantId: T,
+    storeIds: [STORE_A], trustLevel: 'visitor' as const, adminScope: 'none' as const,
+  };
+
+  async function twoProposals() {
+    await clean();
+    await run(async (q) => {
+      await q.query(`DELETE FROM memberships WHERE user_id = $1`, [visitor2.userId]);
+      await q.query(`DELETE FROM users WHERE id = $1`, [visitor2.userId]);
+      await q.query(`INSERT INTO users (id, tenant_id, name, trust_level) VALUES ($1, $2, 'もう一人の新人', 'visitor')`, [visitor2.userId, T]);
+      await q.query(`INSERT INTO memberships (tenant_id, user_id, store_id) VALUES ($1, $2, $3)`, [T, visitor2.userId, STORE_A]);
+    });
+    // 公開中の v1
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, {
+      storeId: STORE_A, title: '搬入の手順', body: '玄関の幅を測る。', tagNames: ['#搬入'],
+    }));
+    // 2人が、同じ v1 を見て別々に直す
+    const a = await run((q) => editKnowledge(q, tokenizer, visitor, k.id, {
+      title: '搬入の手順', body: '玄関の幅を測る。エレベーターの寸法も測る。', tagNames: ['#搬入'],
+    }));
+    const b = await run((q) => editKnowledge(q, tokenizer, visitor2, k.id, {
+      title: '搬入の手順', body: '玄関の幅を測る。階段の場合は2名で運ぶ。', tagNames: ['#搬入'],
+    }));
+    return { k, a, b };
+  }
+
+  it('お互いの案が見える（誰の案かも分かる）', async () => {
+    const { k } = await twoProposals();
+    // 書いた本人から見ても、相手の案が見える
+    const view = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.equal(view.pendingEdits.length, 2);
+    assert.deepEqual(view.pendingEdits.map((p) => p.editedBy).sort(), ['もう一人の新人', '新人バイト']);
+    assert.deepEqual(view.pendingEdits.map((p) => p.mine), [true, false]);
+  });
+
+  it('相手の案の中身も読める（読めないとマージできない）', async () => {
+    const { k, b } = await twoProposals();
+    const versions = await run((q) => listVersions(q, visitor, k.id));
+    const other = versions.find((v) => v.version === b.version);
+    assert.ok(other, '相手の案が一覧に出ること');
+    assert.match(other.body, /階段の場合は2名/);
+  });
+
+  it('先に片方を通すと、もう片方は通せなくなる（上書きを止める）', async () => {
+    const { k, a, b } = await twoProposals();
+    const first = await run((q) => approveVersion(q, tokenizer, trusted, k.id, a.version));
+    assert.deepEqual(first.closed, [], 'より古い承認待ちは無い');
+
+    // b は v1 を土台に書かれている。いまの本文（a の内容）を知らないので通さない
+    const { DomainError } = await import('../src/domain/actor.ts');
+    await assert.rejects(
+      run((q) => approveVersion(q, tokenizer, trusted, k.id, b.version)),
+      (e: unknown) => e instanceof DomainError && e.code === 'conflict',
+    );
+
+    // a の修正は残っている
+    const view = await run((q) => getKnowledge(q, trusted, k.id));
+    assert.match(view.body, /エレベーターの寸法/);
+  });
+
+  it('新しいほうを通したときは、閉じた案を承認者に返す（黙って消さない）', async () => {
+    const { k, a, b } = await twoProposals();
+    const r = await run((q) => approveVersion(q, tokenizer, trusted, k.id, b.version));
+    assert.deepEqual(r.closed, [{ version: a.version, editedBy: '新人バイト' }]);
+  });
+
+  it('却下された案は、書いた本人と承認できる人にしか見えない', async () => {
+    const { k, a } = await twoProposals();
+    const { rejectVersion } = await import('../src/domain/knowledge.ts');
+    await run((q) => rejectVersion(q, trusted, k.id, a.version));
+    const seenByOther = await run((q) => listVersions(q, visitor2, k.id));
+    assert.equal(seenByOther.some((v) => v.version === a.version), false);
+    const seenByAuthor = await run((q) => listVersions(q, visitor, k.id));
+    assert.equal(seenByAuthor.some((v) => v.version === a.version), true);
+  });
+});

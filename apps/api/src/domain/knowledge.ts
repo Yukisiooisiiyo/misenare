@@ -38,8 +38,12 @@ export interface KnowledgeView {
   approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
-  /** 公開中の版より新しい承認待ちの版 */
-  pendingVersions: number[];
+  /**
+   * 承認待ちの修正案。**誰の案かを全員に見せる。**
+   * 見えないと、同じところを2人が別々に直して、片方が黙って消える。
+   * 中身は「見る」で開く（listVersions）。検索には出ない。
+   */
+  pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
 }
 
 interface KnowledgeRow {
@@ -110,11 +114,13 @@ async function insertVersion(
   id: string,
   version: number,
   v: { title: string; body: string; tagIds: string[]; areaIds: string[]; expiresAt: string | null },
+  /** どの版を直したものか。公開中の版を見て直すので、そのときの current_version */
+  baseVersion: number | null = null,
 ) {
   await db.query(
-    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, expires_at, state, edited_by)
-     VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::uuid[], $8::timestamptz, 'pending', $9)`,
-    [actor.tenantId, id, version, v.title, v.body, v.tagIds, v.areaIds, v.expiresAt, actor.userId],
+    `INSERT INTO knowledge_versions (tenant_id, knowledge_id, version, title, body, tag_ids, area_ids, expires_at, state, edited_by, base_version)
+     VALUES ($1, $2, $3, $4, $5, $6::uuid[], $7::uuid[], $8::timestamptz, 'pending', $9, $10)`,
+    [actor.tenantId, id, version, v.title, v.body, v.tagIds, v.areaIds, v.expiresAt, actor.userId, baseVersion],
   );
 }
 
@@ -223,7 +229,7 @@ export async function editKnowledge(
   await insertVersion(db, actor, id, version, {
     title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [],
     expiresAt: input.expiresAt !== undefined ? input.expiresAt : k.expires_at,
-  });
+  }, k.current_version);
   const published = isTrusted(actor);
   if (published) await publish(db, tokenizer, actor, id, version);
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
@@ -233,18 +239,32 @@ export async function editKnowledge(
 export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number) {
   const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '承認する権限がありません');
-  const v = await maybeOne<{ state: string }>(
+  const v = await maybeOne<{ state: string; base_version: number | null }>(
     db,
-    `SELECT state FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
+    `SELECT state, base_version FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
     [id, version],
   );
   assert(v !== undefined, 'not_found', '版が見つかりません');
   assert(v.state === 'pending', 'conflict', 'この版は承認待ちではありません');
   // 承認待ちの間に新しい版が公開されていたら、古い修正案で上書きしない
   assert(k.current_version === null || version > k.current_version, 'conflict', 'より新しい版が公開済みです。修正案を作り直してください');
+  // **土台が古い案は通さない。** 承認待ちの間に別の案が公開されていると、
+  // この案はその修正を知らないまま書かれているので、通すと相手の修正が消える
+  assert(
+    v.base_version === null || v.base_version === k.current_version,
+    'conflict',
+    'この修正案は、いま公開されている本文より前のものを直したものです。いまの本文を見て作り直してください。',
+  );
+  // これから閉じられる他の案。**黙って消さず、承認した人に伝える**
+  const closing = await db.query<{ version: number; editor: string | null }>(
+    `SELECT v.version, u.name AS editor
+       FROM knowledge_versions v LEFT JOIN users u ON u.id = v.edited_by
+      WHERE v.knowledge_id = $1 AND v.state = 'pending' AND v.version < $2`,
+    [id, version],
+  );
   await publish(db, tokenizer, actor, id, version);
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
-  return { id, version };
+  return { id, version, closed: closing.map((c) => ({ version: c.version, editedBy: c.editor })) };
 }
 
 export async function rejectVersion(db: Db, actor: Actor, id: string, version: number) {
@@ -314,12 +334,15 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
       WHERE k.id = $1`,
     [id],
   );
-  // 承認待ちの版は、承認できる人には全部、それ以外の人には自分の案だけを見せる
-  const pending = await db.query<{ version: number }>(
-    `SELECT version FROM knowledge_versions
-      WHERE knowledge_id = $1 AND state = 'pending' AND ($2 OR edited_by = $3)
-      ORDER BY version`,
-    [id, canModerate(actor, k.store_id), actor.userId],
+  // 承認待ちの版は**全員に見せる**。
+  // 隠すと、同じところを2人が別々に直して、承認のときに片方が黙って消える。
+  // 見えていれば、2人目は相手の案を読んでから書ける（あるいは待てる）。
+  const pending = await db.query<{ version: number; editor: string | null; edited_at: string; mine: boolean }>(
+    `SELECT v.version, u.name AS editor, v.edited_at::text AS edited_at, (v.edited_by = $2) AS mine
+       FROM knowledge_versions v LEFT JOIN users u ON u.id = v.edited_by
+      WHERE v.knowledge_id = $1 AND v.state = 'pending'
+      ORDER BY v.version`,
+    [id, actor.userId],
   );
   return {
     id,
@@ -336,7 +359,7 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     approvedAt: v.decided_at,
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
-    pendingVersions: pending.map((p) => p.version),
+    pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
   };
 }
 
@@ -355,7 +378,9 @@ export async function listVersions(db: Db, actor: Actor, id: string) {
        JOIN users u ON u.id = v.edited_by
        LEFT JOIN users du ON du.id = v.decided_by
       WHERE v.knowledge_id = $1
-        AND (v.state IN ('published', 'superseded') OR $2 OR v.edited_by = $3)
+        -- 承認待ちも見せる（同じところを直そうとしている人が、相手の案を読めるように）。
+        -- 却下された案だけは、書いた本人と承認できる人に限る
+        AND (v.state <> 'rejected' OR $2 OR v.edited_by = $3)
       ORDER BY v.version DESC`,
     [id, canModerate(actor, k.store_id), actor.userId],
   );
