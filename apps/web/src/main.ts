@@ -523,6 +523,10 @@ function freshnessDetail(k: Knowledge, onVerify?: () => Promise<void>): HTMLElem
   return h('div', { class: 'fresh-detail' },
     h('p', {}, `最終更新：${relativeDate(k.updatedAt)}${k.updatedBy ? `（${k.updatedBy}さん）` : ''}`),
     f.verified ? h('p', {}, `内容の確認：${relativeDate(k.verifiedAt)}${k.verifiedBy ? `（${k.verifiedBy}さん）` : ''}`) : null,
+    // 誰が通したかを出す。承認した人が内容に責任を持つ。
+    // 最初に書いた人も出す：同じ人の下書きが何度も直されるなら、その人に教え直したほうが早い
+    k.approvedBy ? h('p', {}, `承認：${relativeDate(k.approvedAt)}（${k.approvedBy}さん）`) : null,
+    k.createdBy && k.createdBy !== k.updatedBy ? h('p', {}, `最初に書いた人：${k.createdBy}さん`) : null,
     f.stale ? h('p', { class: 'fresh-warn' }, `${staleLabel()}、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。`) : null,
     // 古いものほど押してほしいので、古いときだけ目立たせる
     ...(onVerify ? [action(f.stale ? '今も正しい（確認日を更新）' : '今も正しい', f.stale ? 'primary' : 'secondary small', onVerify)] : []),

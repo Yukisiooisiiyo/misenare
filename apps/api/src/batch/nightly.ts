@@ -19,6 +19,7 @@ import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
 import { sweepChallenges } from '../domain/passkeys.ts';
 import { digestMail, markNotified, pendingDigest, shouldNotify } from '../domain/accessRequests.ts';
+import { approvalMail, markApprovalsNotified, pendingApprovals, shouldNotifyApprovals } from '../domain/approvals.ts';
 import { mailerFromEnv, type Mailer } from '../mail/mailer.ts';
 import { sweepSsoStates } from '../domain/sso.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
@@ -232,7 +233,28 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
             console.error(`tenant ${tenantId}: 利用の申請の知らせを送れませんでした`, err);
           }
         }
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, notifiedRequests };
+        // 承認待ちの知らせ。店舗ごとに、承認できる人（trusted 以上）へ1人ずつ送る。
+        // 1通に全員を並べると、互いのアドレスが見えてしまう。
+        let notifiedApprovals = 0;
+        for (const digest of await pendingApprovals(db)) {
+          if (!shouldNotifyApprovals(digest)) continue;
+          const mail = approvalMail(digest, options.appUrl ?? process.env.APP_URL ?? 'http://localhost:8787');
+          let sentAny = false;
+          for (const to of digest.to) {
+            try {
+              if (await (options.mailer ?? mailerFromEnv()).send({ to: [to], ...mail })) sentAny = true;
+            } catch (err) {
+              // 1人に送れなくても、残りには送る（次の晩にやり直す）
+              console.error(`tenant ${tenantId}: 承認待ちの知らせを送れませんでした`, err);
+            }
+          }
+          // 1人でも送れたら印を付ける。付けないと、送れた人には毎晩届く
+          if (sentAny) {
+            await markApprovalsNotified(db, digest.storeId);
+            notifiedApprovals += 1;
+          }
+        }
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, notifiedRequests, notifiedApprovals };
       });
       reports.push(report);
     } catch (err) {

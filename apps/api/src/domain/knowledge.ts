@@ -30,6 +30,11 @@ export interface KnowledgeView {
   /** 内容が最後に変わった日時（表示中の版の編集日時） */
   updatedAt: string;
   updatedBy: string | null;
+  /** 最初にこのナレッジを作った人。間違いが続くなら、その人に教え直す必要がある */
+  createdBy: string | null;
+  /** 表示中の版を承認した人。**承認した人が内容に責任を持つ**ので、名前を出す */
+  approvedBy: string | null;
+  approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
   /** 公開中の版より新しい承認待ちの版 */
@@ -275,10 +280,12 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
   // 公開中の版。未公開なら最新の案（投稿者本人と承認者だけが見られる）
-  const v = await maybeOne<{ version: number; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null }>(
+  const v = await maybeOne<{ version: number; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null }>(
     db,
     `SELECT version, title, body, tag_ids, edited_by, edited_at::text AS edited_at,
-            (SELECT name FROM users WHERE id = edited_by) AS editor
+            (SELECT name FROM users WHERE id = edited_by) AS editor,
+            (SELECT name FROM users WHERE id = decided_by) AS approver,
+            decided_at::text AS decided_at
        FROM knowledge_versions
       WHERE knowledge_id = $1 AND (version = $2 OR $2::int IS NULL)
       ORDER BY version DESC LIMIT 1`,
@@ -292,9 +299,13 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     `SELECT name FROM hashtags WHERE id = ANY($1::uuid[]) ORDER BY array_position($1::uuid[], id)`,
     [v.tag_ids],
   );
-  const meta = await one<{ verified_at: string | null; verified_by: string | null }>(
+  const meta = await one<{ verified_at: string | null; verified_by: string | null; created_by: string | null }>(
     db,
-    `SELECT k.verified_at::text AS verified_at, u.name AS verified_by FROM knowledge k LEFT JOIN users u ON u.id = k.verified_by WHERE k.id = $1`,
+    `SELECT k.verified_at::text AS verified_at, u.name AS verified_by, cu.name AS created_by
+       FROM knowledge k
+       LEFT JOIN users u  ON u.id  = k.verified_by
+       LEFT JOIN users cu ON cu.id = k.created_by
+      WHERE k.id = $1`,
     [id],
   );
   // 承認待ちの版は、承認できる人には全部、それ以外の人には自分の案だけを見せる
@@ -314,6 +325,9 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     tags: tags.map((t) => t.name),
     updatedAt: v.edited_at,
     updatedBy: v.editor,
+    createdBy: meta.created_by,
+    approvedBy: v.approver,
+    approvedAt: v.decided_at,
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
     pendingVersions: pending.map((p) => p.version),
@@ -327,9 +341,13 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
 export async function listVersions(db: Db, actor: Actor, id: string) {
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
-  return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string }>(
-    `SELECT v.version, v.state, v.title, v.body, v.edited_at, u.name AS edited_by
-       FROM knowledge_versions v JOIN users u ON u.id = v.edited_by
+  return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string; decided_by: string | null; decided_at: string | null }>(
+    // 承認・却下した人も出す。承認した人がその内容に責任を持つため、誰が通したかを残す
+    `SELECT v.version, v.state, v.title, v.body, v.edited_at, u.name AS edited_by,
+            du.name AS decided_by, v.decided_at
+       FROM knowledge_versions v
+       JOIN users u ON u.id = v.edited_by
+       LEFT JOIN users du ON du.id = v.decided_by
       WHERE v.knowledge_id = $1
         AND (v.state IN ('published', 'superseded') OR $2 OR v.edited_by = $3)
       ORDER BY v.version DESC`,

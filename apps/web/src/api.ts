@@ -96,6 +96,11 @@ export interface Knowledge {
   tags: string[];
   updatedAt: string;
   updatedBy: string | null;
+  /** 最初に書いた人 */
+  createdBy: string | null;
+  /** いま出ている版を承認した人 */
+  approvedBy: string | null;
+  approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
   pendingVersions: number[];
