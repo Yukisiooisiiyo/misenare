@@ -7,6 +7,7 @@ import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
 import { assertStore } from './scope.ts';
+import { syncApprovalNotice } from './notices.ts';
 import { activateTags, resolveTags } from './tags.ts';
 
 export interface KnowledgeInput {
@@ -147,6 +148,8 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
   // 新しく作ったタグのうち、まだ読みが決まっていないものを返す。
   // 画面はこれを見て、その場で読みを尋ねる（一番よく知っているのは、いま打った人）。
   const readingsNeeded = await pendingReadings(db, tokenizer, tagIds);
+  // 承認待ちの件数を連絡事項に反映する（承認できる人にだけ出る）
+  await syncApprovalNotice(db, actor.tenantId, input.storeId);
   return { id: k.id, version: 1, published: isTrusted(actor), readingsNeeded };
 }
 
@@ -223,6 +226,7 @@ export async function editKnowledge(
   });
   const published = isTrusted(actor);
   if (published) await publish(db, tokenizer, actor, id, version);
+  await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version, published };
 }
 
@@ -239,6 +243,7 @@ export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor,
   // 承認待ちの間に新しい版が公開されていたら、古い修正案で上書きしない
   assert(k.current_version === null || version > k.current_version, 'conflict', 'より新しい版が公開済みです。修正案を作り直してください');
   await publish(db, tokenizer, actor, id, version);
+  await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version };
 }
 
@@ -252,6 +257,7 @@ export async function rejectVersion(db: Db, actor: Actor, id: string, version: n
   );
   assert(rows.length === 1, 'conflict', 'この版は承認待ちではありません');
   // 一度も公開されていないナレッジの唯一の案を却下した場合、pending のタグも辞書に入らないまま残る
+  await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version };
 }
 

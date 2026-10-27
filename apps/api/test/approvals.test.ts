@@ -8,15 +8,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import type { Db } from '../src/db/db.ts';
-import {
-  APPROVAL_REMINDER_DAYS,
-  approvalMail,
-  markApprovalsNotified,
-  MAX_RECIPIENTS,
-  pendingApprovals,
-  shouldNotifyApprovals,
-  type ApprovalDigest,
-} from '../src/domain/approvals.ts';
+import { listNotices, markRead, noticeBadge, updateNotice } from '../src/domain/notices.ts';
 import { approveVersion, createKnowledge, editKnowledge, getKnowledge, listVersions } from '../src/domain/knowledge.ts';
 import { freshDatabase, hq, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -29,19 +21,13 @@ after(async () => { await db.close(); });
 async function clean() {
   await run(async (q) => {
     await q.query(`DELETE FROM knowledge`);
-    await q.query(`UPDATE users SET email = NULL`);
-    await q.query(`UPDATE stores SET approvals_notified_at = NULL`);
-    await q.query(`UPDATE tenants SET approvals_notified_at = NULL`);
+    await q.query(`DELETE FROM notices`);
   });
 }
 
-/** その人にメールアドレスを持たせる（宛先に入る条件） */
-async function withEmail(userId: string, email: string) {
-  await run((q) => q.query(`UPDATE users SET email = $2 WHERE id = $1`, [userId, email]));
-}
-
-const digestFor = (list: ApprovalDigest[], storeId: string | null) =>
-  list.find((d) => d.storeId === storeId);
+/** 承認待ちの知らせ（ミセナレが自動で出す1件）。無ければ undefined */
+const approvalNotice = async (who: typeof trusted) =>
+  (await run((q) => listNotices(q, who, STORE_A))).find((n) => n.title.includes('承認待ち'));
 
 describe('誰が承認したかを残す', () => {
   it('承認すると、その版に承認者と承認日時が付く', async () => {
@@ -86,124 +72,110 @@ describe('誰が承認したかを残す', () => {
   });
 });
 
-describe('承認待ちの知らせ', () => {
-  it('承認待ちが無ければ、知らせることも無い', async () => {
-    await clean();
-    assert.deepEqual(await run((q) => pendingApprovals(q)), []);
-  });
+describe('承認待ちの知らせ（連絡事項に出す）', () => {
+  // メールではなく連絡事項に出す。**招待QRで入った人にメールアドレスは無い**ので、
+  // 承認するベテランの大半にはメールが届かない。毎日開くアプリの中が唯一確実な場所。
 
-  it('その店舗の trusted 以上だけが宛先になる', async () => {
+  it('承認待ちができると、連絡事項に出る', async () => {
     await clean();
-    await withEmail(trusted.userId, 'veteran@example.com');
-    await withEmail(manager.userId, 'tencho@example.com');
-    await withEmail(visitor.userId, 'shinjin@example.com');       // visitor は承認できない
-    await withEmail(storeBStaff.userId, 'otherstore@example.com'); // 別の店舗
+    assert.equal(await approvalNotice(trusted), undefined, '最初は無い');
+
     await run((q) => createKnowledge(q, tokenizer, visitor, {
       storeId: STORE_A, title: '年末年始の営業', body: '1日だけ休み。', tagNames: ['#営業'],
     }));
 
-    const d = digestFor(await run((q) => pendingApprovals(q)), STORE_A);
-    assert.ok(d);
-    assert.deepEqual([...d.to].sort(), ['tencho@example.com', 'veteran@example.com']);
-    assert.equal(d.pending, 1);
-    assert.equal(d.samples[0]!.title, '年末年始の営業');
-    assert.equal(d.samples[0]!.editedBy, '新人バイト');
+    const n = await approvalNotice(trusted);
+    assert.ok(n, '知らせが出ること');
+    assert.match(n.title, /1件/);
+    assert.match(n.body, /年末年始の営業/);
+    assert.equal(n.createdBy, null, 'ミセナレが自動で出したもの');
   });
 
-  // **いまの作りでは、全店共通ナレッジに承認待ちは生まれない。**
-  // 全店共通を作るのも直すのも本部だけ（knowledge.ts）で、本部は常に trusted 扱いなので
-  // その場で公開されてしまう。つまり全店共通は「本部が作って配る」形のままで、
-  // 現場から上げる経路が無い。approvals.ts の storeId === null の枝は、
-  // そこに経路を足したときのために置いてある。ここではその現状を固定しておく。
-  it('いまは全店共通に承認待ちが生まれない（現場から上げる経路が無い）', async () => {
+  it('承認できない人には出ない', async () => {
     await clean();
-    await withEmail(hq.userId, 'honbu@example.com');
-    const k = await run((q) => createKnowledge(q, tokenizer, hq, {
-      storeId: null, title: '全社の接客方針', body: '最初に名乗る。', tagNames: ['#接客'],
+    await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '返品の扱い', body: '開封済みは受けない。', tagNames: ['#返品'],
     }));
-    await run((q) => editKnowledge(q, tokenizer, hq, k.id, {
-      title: '全社の接客方針', body: '最初に名乗り、用件を聞く。', tagNames: ['#接客'],
-    }));
-    assert.deepEqual(await run((q) => pendingApprovals(q)), [], '本部の編集は即時公開される');
+    assert.ok(await approvalNotice(trusted), 'ベテランには出る');
+    assert.equal(await approvalNotice(visitor), undefined, '新人には出ない');
 
-    // 現場の人は全店共通を直せない（＝提案もできない）
+    // 未読の数にも入らない
+    const badge = await run((q) => noticeBadge(q, visitor, STORE_A));
+    assert.equal(badge.unread, 0);
+  });
+
+  it('増えるたびに知らせが増えず、1件の件数が書き換わる', async () => {
+    await clean();
+    for (const t of ['一件目', '二件目', '三件目']) {
+      await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: t, body: '本文。', tagNames: ['#x'] }));
+    }
+    const all = await run((q) => listNotices(q, trusted, STORE_A));
+    assert.equal(all.filter((n) => n.title.includes('承認待ち')).length, 1, '知らせは1件だけ');
+    assert.match(all.find((n) => n.title.includes('承認待ち'))!.title, /3件/);
+  });
+
+  it('全部承認されると、知らせは消える', async () => {
+    await clean();
+    const k = await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '消えるはず', body: '本文。', tagNames: ['#x'],
+    }));
+    assert.ok(await approvalNotice(trusted));
+    await run((q) => approveVersion(q, tokenizer, trusted, k.id, 1));
+    assert.equal(await approvalNotice(trusted), undefined);
+  });
+
+  it('却下でも消える', async () => {
+    await clean();
+    const { rejectVersion } = await import('../src/domain/knowledge.ts');
+    const k = await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '却下されるはず', body: '本文。', tagNames: ['#x'],
+    }));
+    await run((q) => rejectVersion(q, trusted, k.id, 1));
+    assert.equal(await approvalNotice(trusted), undefined);
+  });
+
+  it('増えたときは未読に戻るが、減ったときは戻らない', async () => {
+    await clean();
+    const first = await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '一件目', body: '本文。', tagNames: ['#x'],
+    }));
+    const n1 = (await approvalNotice(trusted))!;
+    await run((q) => markRead(q, trusted, n1.id));
+    assert.equal((await approvalNotice(trusted))!.readAt !== null, true, '読んだ印が付く');
+
+    // 増えた → もう一度気づいてほしいので未読に戻す
+    await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '二件目', body: '本文。', tagNames: ['#y'],
+    }));
+    assert.equal((await approvalNotice(trusted))!.readAt, null, '未読に戻る');
+
+    await run((q) => markRead(q, trusted, n1.id));
+    // 減った → 承認のたびに全員へ赤い印が付くのは煩いので、戻さない
+    await run((q) => approveVersion(q, tokenizer, trusted, first.id, 1));
+    const after = (await approvalNotice(trusted))!;
+    assert.match(after.title, /1件/);
+    assert.ok(after.readAt, '読んだ印は残る');
+  });
+
+  it('自動で出した知らせは、人が直せない', async () => {
+    await clean();
+    await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '直せないはず', body: '本文。', tagNames: ['#x'],
+    }));
+    const n = (await approvalNotice(trusted))!;
     const { DomainError } = await import('../src/domain/actor.ts');
     await assert.rejects(
-      run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: 'x', body: 'y', tagNames: ['#接客'] })),
+      run((q) => updateNotice(q, manager, n.id, { title: '書き換え', body: '本文' })),
       (e: unknown) => e instanceof DomainError && e.code === 'forbidden',
     );
   });
 
-  it('同じ件数のまま毎晩は送らない。新しいものが来たときと、週1回だけ', async () => {
+  it('別の店舗の承認待ちは、こちらの知らせに出ない', async () => {
     await clean();
-    await withEmail(trusted.userId, 'veteran@example.com');
-    await run((q) => createKnowledge(q, tokenizer, visitor, {
-      storeId: STORE_A, title: '返品の扱い', body: '開封済みは受けない。', tagNames: ['#返品'],
+    await run((q) => createKnowledge(q, tokenizer, storeBStaff, {
+      storeId: STORE_B, title: '駅前店の下書き', body: '本文。', tagNames: ['#x'],
     }));
-
-    const first = digestFor(await run((q) => pendingApprovals(q)), STORE_A)!;
-    assert.equal(first.hasNew, true);
-    assert.equal(shouldNotifyApprovals(first), true, '初回は送る');
-
-    await run((q) => markApprovalsNotified(q, STORE_A));
-
-    const second = digestFor(await run((q) => pendingApprovals(q)), STORE_A)!;
-    assert.equal(second.hasNew, false, '新しい下書きは来ていない');
-    assert.equal(shouldNotifyApprovals(second), false, '翌晩は送らない');
-
-    // 1週間放っておかれたら、もう一度だけ念を押す
-    const later = Date.now() + (APPROVAL_REMINDER_DAYS + 1) * 24 * 60 * 60_000;
-    assert.equal(shouldNotifyApprovals(second, later), true);
-  });
-
-  it('知らせたあとに新しい下書きが来たら、また送る', async () => {
-    await clean();
-    await withEmail(trusted.userId, 'veteran@example.com');
-    await run((q) => createKnowledge(q, tokenizer, visitor, {
-      storeId: STORE_A, title: '一件目', body: '本文。', tagNames: ['#一'],
-    }));
-    await run((q) => markApprovalsNotified(q, STORE_A));
-    assert.equal(shouldNotifyApprovals(digestFor(await run((q) => pendingApprovals(q)), STORE_A)!), false);
-
-    await run((q) => createKnowledge(q, tokenizer, visitor, {
-      storeId: STORE_A, title: '二件目', body: '本文。', tagNames: ['#二'],
-    }));
-    const d = digestFor(await run((q) => pendingApprovals(q)), STORE_A)!;
-    assert.equal(d.hasNew, true);
-    assert.equal(d.pending, 2);
-    assert.equal(shouldNotifyApprovals(d), true);
-  });
-
-  it('メールアドレスを持つ人が1人もいなければ送らない', async () => {
-    await clean();
-    await run((q) => createKnowledge(q, tokenizer, visitor, {
-      storeId: STORE_A, title: '宛先なし', body: '本文。', tagNames: ['#なし'],
-    }));
-    const d = digestFor(await run((q) => pendingApprovals(q)), STORE_A)!;
-    assert.deepEqual(d.to, []);
-    assert.equal(shouldNotifyApprovals(d), false);
-  });
-
-  it('宛先が多すぎる店舗には送らない（画面の一覧に任せる）', () => {
-    const many: ApprovalDigest = {
-      storeId: STORE_A, storeName: '本店',
-      to: Array.from({ length: MAX_RECIPIENTS }, (_, i) => `v${i}@example.com`),
-      pending: 3, samples: [], notifiedAt: null, hasNew: true, tooMany: true,
-    };
-    assert.equal(shouldNotifyApprovals(many), false);
-  });
-
-  it('文面に件数と題名が入り、本文は入らない', () => {
-    const mail = approvalMail({
-      storeId: STORE_A, storeName: '高石店', to: ['v@example.com'],
-      pending: 7,
-      samples: [{ title: '延長保証の付け方', editedBy: '新人バイト' }],
-      notifiedAt: null, hasNew: true, tooMany: false,
-    }, 'https://app.example.com');
-    assert.match(mail.subject, /7件/);
-    assert.match(mail.text, /高石店/);
-    assert.match(mail.text, /延長保証の付け方（新人バイトさん）/);
-    assert.match(mail.text, /ほか 6 件/);
-    assert.match(mail.text, /https:\/\/app\.example\.com/);
+    // storeBStaff は trusted なので即時公開。visitor がいないので、代わりに直接確かめる
+    assert.equal(await approvalNotice(trusted), undefined);
   });
 });

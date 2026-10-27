@@ -67,7 +67,7 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
         h('h3', {}, n.title)),
       ...paragraphs(n.body),
       h('p', { class: 'hint' },
-        `${n.createdBy ?? ''}さん・${relativeDate(n.createdAt)}`
+        n.createdBy ? `${n.createdBy}さん・${relativeDate(n.createdAt)}` : `ミセナレから・${relativeDate(n.createdAt)}`
         + (n.endsAt ? `・${relativeDate(n.endsAt)}まで` : '')
         + (canSeeReaders && n.pendingAcks !== undefined ? `・未確認 ${n.pendingAcks}人` : '')),
       ...(n.requiresAck
@@ -155,7 +155,7 @@ function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HT
     h('span', { class: 'handover-body' },
       item.carriedOver ? h('span', { class: 'notice-badge' }, '持ち越し') : null,
       item.body),
-    h('span', { class: 'hint' }, `${item.createdBy ?? ''}さん・${relativeDate(item.createdAt)}`),
+    h('span', { class: 'hint' }, item.createdBy ? `${item.createdBy}さん・${relativeDate(item.createdAt)}` : `ミセナレから・${relativeDate(item.createdAt)}`),
     h('span', { class: 'row-actions' },
       action('片付いた', 'secondary small', async () => {
         await api('POST', `/handovers/${item.id}/done`);

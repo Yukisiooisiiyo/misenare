@@ -53,6 +53,7 @@ interface NoticeRow {
   read_at: string | null;
   acked_at: string | null;
   pending_acks: number | null;
+  audience?: 'all' | 'trusted';
 }
 
 function view(row: NoticeRow, withCounts: boolean): NoticeView {
@@ -104,14 +105,16 @@ export async function listNotices(db: Db, actor: Actor, storeId: string, include
                     WHERE nr.notice_id = n.id AND nr.user_id = m.user_id AND nr.acked_at IS NOT NULL)
             ) END AS pending_acks
        FROM notices n
-       JOIN users u ON u.id = n.created_by
+       LEFT JOIN users u ON u.id = n.created_by
        LEFT JOIN notice_reads r ON r.notice_id = n.id AND r.user_id = $2
       WHERE (n.store_id = $1 OR n.store_id IS NULL)
         AND n.starts_at <= now()
         AND ($3 OR n.ends_at IS NULL OR n.ends_at > now())
+        -- 承認できない人に承認待ちの知らせを見せても、できることが無い
+        AND (n.audience = 'all' OR $4)
       ORDER BY (n.priority = 'important') DESC, n.starts_at DESC
       LIMIT 200`,
-    [storeId, actor.userId, includeEnded],
+    [storeId, actor.userId, includeEnded, isTrusted(actor)],
   );
   return rows.map((r) => view(r, isTrusted(actor)));
 }
@@ -122,14 +125,16 @@ export async function getNotice(db: Db, actor: Actor, id: string): Promise<Notic
     `SELECT n.id, n.store_id, n.title, n.body, n.priority, n.requires_ack,
             n.starts_at::text AS starts_at, n.ends_at::text AS ends_at,
             u.name AS author, n.created_at::text AS created_at,
-            r.read_at::text AS read_at, r.acked_at::text AS acked_at, NULL::int AS pending_acks
-       FROM notices n JOIN users u ON u.id = n.created_by
+            r.read_at::text AS read_at, r.acked_at::text AS acked_at, NULL::int AS pending_acks,
+            n.audience
+       FROM notices n LEFT JOIN users u ON u.id = n.created_by
        LEFT JOIN notice_reads r ON r.notice_id = n.id AND r.user_id = $2
       WHERE n.id = $1`,
     [id, actor.userId],
   );
   assert(row !== undefined, 'not_found', '連絡事項が見つかりません');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は見られません');
+  assert(row.audience === 'all' || isTrusted(actor), 'forbidden', 'この連絡事項は見られません');
   return view(row, false);
 }
 
@@ -157,10 +162,12 @@ export async function createNotice(db: Db, actor: Actor, storeId: string | null,
 
 /** 出した人と administrator だけが直せる */
 async function assertCanEdit(db: Db, actor: Actor, id: string): Promise<{ store_id: string | null }> {
-  const row = await maybeOne<{ store_id: string | null; created_by: string }>(
-    db, `SELECT store_id, created_by FROM notices WHERE id = $1`, [id],
+  const row = await maybeOne<{ store_id: string | null; created_by: string | null; kind: string }>(
+    db, `SELECT store_id, created_by, kind FROM notices WHERE id = $1`, [id],
   );
   assert(row !== undefined, 'not_found', '連絡事項が見つかりません');
+  // ミセナレが自動で出した知らせは人が直せない（直しても次の投稿で書き換わる）
+  assert(row.kind === 'manual', 'forbidden', 'この連絡事項はミセナレが自動で出しています');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は直せません');
   assert(row.created_by === actor.userId || actor.adminScope !== 'none', 'forbidden', '出した人か administrator だけが直せます');
   return row;
@@ -247,8 +254,85 @@ export async function noticeBadge(db: Db, actor: Actor, storeId: string): Promis
        FROM notices n
        LEFT JOIN notice_reads r ON r.notice_id = n.id AND r.user_id = $2
       WHERE (n.store_id = $1 OR n.store_id IS NULL)
-        AND n.starts_at <= now() AND (n.ends_at IS NULL OR n.ends_at > now())`,
-    [storeId, actor.userId],
+        AND n.starts_at <= now() AND (n.ends_at IS NULL OR n.ends_at > now())
+        AND (n.audience = 'all' OR $3)`,
+    [storeId, actor.userId, isTrusted(actor)],
   );
   return { unread: Number(row.unread), needsAck: Number(row.needs_ack) };
+}
+
+// --- 承認待ちの知らせ（ミセナレが自動で出す） ---------------------------------
+
+/** 知らせに題名を出す件数。全部並べると長くなり、下書きの題名がずらりと残る */
+const APPROVAL_SAMPLES = 3;
+
+/**
+ * 承認待ちの件数を、連絡事項に反映する。
+ *
+ * **メールではなく連絡事項にした理由：現場の人はメールアドレスを持っていない。**
+ * 招待QRで入った人に email は入らず（domain/users.ts）、入るのは会社アカウント（SSO）で
+ * 入った人だけ。承認するベテランの大半はQRで入るので、メールでは届かない。
+ * 毎日開くアプリの中に出すのが、唯一確実に届く場所。
+ *
+ * 投稿のたびに知らせを増やすと、連絡事項が承認依頼で埋まって本来の連絡が沈む。
+ * だから**店舗につき1件**を置いて件数を書き換える。承認待ちが無くなれば消す。
+ *
+ * 件数が増えたときだけ既読を消して、未読に戻す。
+ * 減ったとき（誰かが承認したとき）に未読へ戻すと、承認するたび全員に赤い印が付く。
+ */
+export async function syncApprovalNotice(db: Db, tenantId: string, storeId: string | null): Promise<void> {
+  const [count] = await db.query<{ n: number; titles: string[] | null }>(
+    `SELECT count(*)::int AS n,
+            (array_agg(v.title ORDER BY v.edited_at DESC))[1:${APPROVAL_SAMPLES}] AS titles
+       FROM knowledge_versions v
+       JOIN knowledge k ON k.id = v.knowledge_id
+      WHERE v.state = 'pending' AND k.store_id IS NOT DISTINCT FROM $1`,
+    [storeId],
+  );
+  const pending = Number(count?.n ?? 0);
+
+  if (pending === 0) {
+    await db.query(
+      `DELETE FROM notices WHERE kind = 'approvals' AND store_id IS NOT DISTINCT FROM $1`,
+      [storeId],
+    );
+    return;
+  }
+
+  const titles = count?.titles ?? [];
+  const title = `承認待ちが${pending}件あります`;
+  const body = [
+    ...titles.map((t) => `・${t}`),
+    ...(pending > titles.length ? [`ほか ${pending - titles.length} 件`] : []),
+    '',
+    '「承認・管理 → 承認待ち」で、内容を見て公開してください。',
+    '承認するまで、この下書きは検索に出ません。',
+    '',
+    '間違いを見つけたときは、却下するだけでなく書いた人に伝えてください。',
+    'そのほうが、次から精度が上がります。',
+  ].join('\n');
+
+  // いま出ている知らせ。題名から前の件数を読む（題名はすぐ下で組み立てているので形は決まっている）
+  const [existing] = await db.query<{ id: string; title: string }>(
+    `SELECT id, title FROM notices WHERE kind = 'approvals' AND store_id IS NOT DISTINCT FROM $1`,
+    [storeId],
+  );
+  if (existing === undefined) {
+    await db.query(
+      `INSERT INTO notices (tenant_id, store_id, title, body, priority, requires_ack, kind, audience, created_by, updated_by)
+       VALUES ($1, $2, $3, $4, 'normal', false, 'approvals', 'trusted', NULL, NULL)`,
+      [tenantId, storeId, title, body],
+    );
+    return;
+  }
+  const before = Number(/(\d+)/.exec(existing.title)?.[1] ?? 0);
+  await db.query(
+    `UPDATE notices SET title = $2, body = $3, updated_at = now() WHERE id = $1`,
+    [existing.id, title, body],
+  );
+  // 増えたときだけ未読に戻す。減ったとき（誰かが承認したとき）に戻すと、
+  // 承認するたびに全員へ赤い印が付く
+  if (pending > before) {
+    await db.query(`DELETE FROM notice_reads WHERE notice_id = $1`, [existing.id]);
+  }
 }
