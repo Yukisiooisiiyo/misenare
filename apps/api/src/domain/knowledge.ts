@@ -18,6 +18,13 @@ export interface KnowledgeInput {
   tagNames: string[];
   areaIds?: string[];
   expiresAt?: string | null;
+  /**
+   * 画面が見ていた版（KnowledgeView.version）。
+   * 送ってきたときは、いまの公開版と同じでなければ受け付けない。
+   * 2人の trusted が同じ本文を開いて直すと、後から送った方が前の人の修正を黙って消すため。
+   * 送ってこない（古い端末）ときは止めない。
+   */
+  baseVersion?: number | null;
 }
 
 export interface KnowledgeView {
@@ -222,6 +229,13 @@ export async function editKnowledge(
   const k = await load(db, id, true);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは編集できません');
   if (k.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジは本部のみ編集できます');
+  if (input.baseVersion !== undefined && input.baseVersion !== null) {
+    assert(
+      input.baseVersion === k.current_version,
+      'conflict',
+      'あなたが開いたあとに、別の人がこのナレッジを直しています。いまの本文を見てから作り直してください。',
+    );
+  }
   await assertAreas(db, k.store_id, input.areaIds);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const version = await nextVersion(db, id);
@@ -297,9 +311,17 @@ export async function revertToVersion(db: Db, tokenizer: Tokenizer, actor: Actor
   const next = await nextVersion(db, id);
   await insertVersion(db, actor, id, next, {
     title: old.title, body: old.body, tagIds: old.tag_ids, areaIds: old.area_ids, expiresAt: old.expires_at,
-  });
+  }, k.current_version);
+  // 戻すと、いま承認待ちの案は閉じられる。approveVersion と同じく、閉じた案を返して黙って消さない
+  const closing = await db.query<{ version: number; editor: string | null }>(
+    `SELECT v.version, u.name AS editor
+       FROM knowledge_versions v LEFT JOIN users u ON u.id = v.edited_by
+      WHERE v.knowledge_id = $1 AND v.state = 'pending' AND v.version < $2`,
+    [id, next],
+  );
   await publish(db, tokenizer, actor, id, next);
-  return { id, version: next };
+  await syncApprovalNotice(db, actor.tenantId, k.store_id);
+  return { id, version: next, closed: closing.map((c) => ({ version: c.version, editedBy: c.editor })) };
 }
 
 export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<KnowledgeView> {

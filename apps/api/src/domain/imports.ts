@@ -4,6 +4,8 @@
 // 取り込んだ人が trusted でも自動では公開しない（資料をそのまま入れると、古い記述まで検索に出てしまうため）。
 
 import { ImportError } from '../import/error.ts';
+import { syncApprovalNotice } from './notices.ts';
+import type { Storage } from '../storage/storage.ts';
 import { assert, canModerate, DomainError, type Actor } from './actor.ts';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assertStore } from './scope.ts';
@@ -74,6 +76,8 @@ export async function importManual(
     );
     if (preview.length < 5) preview.push({ id: k.id, title: d.title, source: d.source });
   }
+  // 下書きは承認待ちなので、「承認待ちが N 件」の知らせを合わせる
+  await syncApprovalNotice(db, actor.tenantId, storeId);
 
   return { importId: imported.id, fileName, drafts: drafts.length, warnings, preview };
 }
@@ -95,10 +99,18 @@ export async function listImports(db: Db, actor: Actor, storeId: string) {
 }
 
 /** 取り込んだ下書きのうち、まだ承認されていないものをまとめて取り下げる */
-export async function discardImport(db: Db, actor: Actor, importId: string): Promise<{ discarded: number }> {
+export async function discardImport(db: Db, actor: Actor, importId: string, storage?: Storage): Promise<{ discarded: number }> {
   const row = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM imports WHERE id = $1`, [importId]);
   assert(row !== undefined, 'not_found', '取り込みが見つかりません');
   assert(canModerate(actor, row.store_id), 'forbidden', '取り下げる権限がありません');
+  // 行は外部キーで消えるが、保存先の写真の実体は消えないので、先に集めて消す
+  const photos = storage
+    ? await db.query<{ storage_key: string }>(
+      `SELECT p.storage_key FROM knowledge_photos p JOIN knowledge k ON k.id = p.knowledge_id
+        WHERE k.import_id = $1 AND k.current_version IS NULL`,
+      [importId],
+    )
+    : [];
   const deleted = await db.query<{ id: string }>(
     `DELETE FROM knowledge k
       WHERE k.import_id = $1 AND k.current_version IS NULL
@@ -106,5 +118,7 @@ export async function discardImport(db: Db, actor: Actor, importId: string): Pro
       RETURNING k.id`,
     [importId],
   );
+  await syncApprovalNotice(db, actor.tenantId, row.store_id);
+  for (const p of photos) await storage!.remove(p.storage_key).catch(() => undefined); // 消せなくても取り下げは成立させる
   return { discarded: deleted.length };
 }

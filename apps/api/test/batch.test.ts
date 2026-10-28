@@ -121,6 +121,17 @@ describe('夜間バッチ', () => {
     await run((q) => verifyKnowledge(q, trusted, oldId));
     assert.equal((await run((q) => listStale(q, trusted, STORE_A))).length, 0);
   });
+
+  it('別の1本が動いている間は始めない。置き去りの鍵は奪う', async () => {
+    // 別の1本が鍵を持っている
+    await db.raw(`INSERT INTO batch_locks (name, locked_at) VALUES ('nightly', now())`);
+    assert.deepEqual(await runNightly(db, tokenizer), [], '動いている最中に2本目が始まった');
+    // 6時間以上前の鍵は、落ちたまま置き去りにされたものとして奪ってよい
+    await db.raw(`UPDATE batch_locks SET locked_at = now() - interval '7 hours'`);
+    assert.ok((await runNightly(db, tokenizer)).length > 0, '置き去りの鍵を奪えていない');
+    // 終わったら鍵は返されている
+    assert.equal((await db.raw(`SELECT 1 FROM batch_locks`)).length, 0);
+  });
 });
 
 describe('読みの案を出す条件', () => {

@@ -237,7 +237,9 @@ async function applyPatch(db: Db, actor: Actor, storeId: string, productId: stri
   }
   if (patch.tagNames !== undefined) {
     const tagIds = await resolveTags(db, actor, patch.tagNames);
-    await activateTags(db, tagIds);
+    // タグを辞書に入れる（active にする）のは、商品そのものが公開されているときだけ
+    const state = await one<{ state: string }>(db, `SELECT state FROM products WHERE id = $1`, [productId]);
+    if (state.state === 'active') await activateTags(db, tagIds);
     await setTags(db, actor, productId, tagIds);
     const after = await db.query<{ name: string }>(`SELECT name FROM hashtags WHERE id = ANY($1::uuid[]) ORDER BY name`, [tagIds]);
     const afterNames = after.map((a) => a.name);
@@ -251,8 +253,15 @@ async function applyPatch(db: Db, actor: Actor, storeId: string, productId: stri
 export async function updateProduct(db: Db, actor: Actor, storeId: string, productId: string, patch: ProductPatch) {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗では編集できません');
   await assertStore(db, storeId);
-  const p = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [productId]);
+  const p = await maybeOne<{ state: string; origin_store_id: string | null }>(
+    db, `SELECT state, origin_store_id FROM products WHERE id = $1`, [productId],
+  );
   assert(p !== undefined, 'not_found', '商品が見つかりません');
+  // 承認待ちの商品は、登録した店舗の承認者だけが直せる。他店舗の trusted が書き換えて、
+  // ついでに pending のタグを辞書に入れてしまう（承認を飛ばす）形を塞ぐ
+  if (p.state !== 'active') {
+    assert(canModerate(actor, p.origin_store_id), 'conflict', '承認待ちの商品は、登録した店舗の承認者だけが直せます');
+  }
   if (isTrusted(actor)) {
     await applyPatch(db, actor, storeId, productId, patch, actor.userId);
     return { productId, published: true as const };
@@ -370,6 +379,8 @@ export async function productHistory(db: Db, actor: Actor, storeId: string, prod
 export async function deleteProduct(db: Db, actor: Actor, storeId: string, productId: string) {
   if (actor.adminScope !== 'tenant') {
     assert(canAdminister(actor, storeId), 'forbidden', '商品を削除できるのは administrator のみです');
+    const exists = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [productId]);
+    assert(exists !== undefined, 'not_found', '商品が見つかりません'); // 無いと履歴の INSERT が外部キーで 500 になる
     await db.query(`DELETE FROM store_products WHERE store_id = $1 AND product_id = $2`, [storeId, productId]);
     await history(db, actor, productId, storeId, 'store_removed', null, null);
     return { removed: 'store' as const };

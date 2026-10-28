@@ -99,6 +99,26 @@ async function assertCanRead(db: Db, actor: Actor, knowledgeId: string): Promise
   return k;
 }
 
+/**
+ * 写真を足せるか。本文を直せる人と同じにする：
+ *   全店共通 … 本部だけ
+ *   店舗     … その店舗の trusted 以上。visitor は自分の案（承認待ちの版）がある間だけ
+ * 「読める＝足せる」にすると、駅前店の visitor が本部のナレッジに好きな画像を付けられ、承認も通らずに全員に見える
+ */
+async function assertCanAttach(db: Db, actor: Actor, knowledgeId: string): Promise<{ store_id: string | null }> {
+  const k = await assertCanRead(db, actor, knowledgeId);
+  if (k.store_id === null) {
+    assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジに写真を足せるのは本部のみです');
+    return k;
+  }
+  if (canModerate(actor, k.store_id)) return k;
+  const mine = await maybeOne(
+    db, `SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending'`, [knowledgeId, actor.userId],
+  );
+  assert(mine !== undefined, 'forbidden', '写真を足せるのは trusted 以上か、修正案を出している本人です');
+  return k;
+}
+
 async function loadPhoto(db: Db, photoId: string): Promise<PhotoRow> {
   const row = await maybeOne<PhotoRow>(
     db,
@@ -127,7 +147,7 @@ export async function startPhotoUpload(
   db: Db, storage: Storage, actor: Actor, knowledgeId: string,
   input: { contentType: string; bytes: number },
 ): Promise<UploadPlan> {
-  await assertCanRead(db, actor, knowledgeId);
+  await assertCanAttach(db, actor, knowledgeId);
   assert((ALLOWED_TYPES as readonly string[]).includes(input.contentType), 'invalid', '写真は JPEG・PNG・WebP で送ってください');
   assert(Number.isInteger(input.bytes) && input.bytes > 0 && input.bytes <= MAX_PHOTO_BYTES, 'invalid', '写真が大きすぎます');
   // 送りかけ（uploading）も数える。でないと枠だけ無限に作れる（掃除されるまでの24時間）

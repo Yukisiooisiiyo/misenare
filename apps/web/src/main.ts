@@ -473,7 +473,11 @@ async function renderKnowledge(id: string): Promise<void> {
   } catch (e) {
     return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
-  const photos = photoSection(k.id, true);
+  // 写真を足せるのは本文を直せる人と同じ：全店共通は本部、店舗は trusted 以上か、修正案を出している本人
+  const canAttach = k.storeId === null
+    ? me?.adminScope === 'tenant'
+    : isTrusted() || k.pendingEdits.some((p) => p.mine);
+  const photos = photoSection(k.id, canAttach);
   // 確認できるのは trusted 以上。押したところだけを描き直す（写真や読んでいた位置を保つため）
   const canVerify = isTrusted() && k.status === 'published';
   const freshBox = h('div');
@@ -623,7 +627,8 @@ function renderWrite(existing: Knowledge | null): void {
     message.hidden = true;
     if (tagField.value.trim()) addTag(tagField.value);
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; tagField.focus(); return; }
-    const payload = { title: title.value, body: body.value, tagNames: tags };
+    // 開いたときの版を添える。開いたあとに別の人が直していたら、サーバーが止めて教えてくれる
+    const payload = { title: title.value, body: body.value, tagNames: tags, ...(existing ? { baseVersion: existing.version } : {}) };
     try {
       type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing

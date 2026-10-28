@@ -170,12 +170,16 @@ function knowledgeBody(v: unknown): Omit<KnowledgeInput, 'storeId'> {
   if (b.expiresAt !== undefined && b.expiresAt !== null && !isDateTime(b.expiresAt)) {
     throw new HttpError(400, 'expiresAt は日時の文字列か null にしてください');
   }
+  if (b.baseVersion !== undefined && b.baseVersion !== null && !(Number.isInteger(b.baseVersion) && (b.baseVersion as number) >= 1)) {
+    throw new HttpError(400, 'baseVersion は 1 以上の整数か null にしてください');
+  }
   return {
     title: b.title,
     body: b.body,
     tagNames: b.tagNames,
     ...(b.areaIds !== undefined ? { areaIds: b.areaIds as string[] } : {}),
     ...(b.expiresAt !== undefined ? { expiresAt: toIso(b.expiresAt as string | null) } : {}),
+    ...(b.baseVersion !== undefined ? { baseVersion: b.baseVersion as number | null } : {}),
   };
 }
 
@@ -471,7 +475,7 @@ function routes(): Router<Ctx> {
     return json(await importManual(c.db, c.actor, p.storeId!, name, body), 201);
   });
   r.get('/stores/:storeId/imports', async (c, _req, p) => json(await listImports(c.db, c.actor, p.storeId!)));
-  r.post('/imports/:importId/discard', async (c, _req, p) => json(await discardImport(c.db, c.actor, p.importId!)));
+  r.post('/imports/:importId/discard', async (c, _req, p) => json(await discardImport(c.db, c.actor, p.importId!, c.storage)));
 
   // --- タグ辞書の管理 -------------------------------------------------------
   r.get('/tag-relations', async (c, req) => {
