@@ -9,6 +9,7 @@
 // 見出しは文字の大きさで見分ける。ページの中でいちばん多い大きさを本文とみなし、
 // それより目立って大きい行を見出しとして扱う（Word の見出しスタイルと同じ役割）。
 
+import { ImportError } from './error.ts';
 import {
   isDict, isName, isStream, Lexer,
   type PdfDict, type PdfDocument, type PdfValue,
@@ -70,10 +71,17 @@ interface FontDecoder {
 }
 
 /** ToUnicode の CMap を読む（bfchar / bfrange） */
+/** 1ページの内容ストリームを繋いだ大きさの上限。文字だけのページがこれを超えることはない */
+const MAX_PAGE_CONTENT_BYTES = 64 * 1024 * 1024;
+
+/** CMap が持てる符号の数。2バイト符号の全域（65536）の数倍あれば足りる。範囲を何万行も並べられても、ここで止まる */
+const MAX_CMAP_ENTRIES = 65536 * 4;
+
 function parseToUnicode(data: Buffer): { map: Map<number, string>; twoByte: boolean } {
   const map = new Map<number, string>();
   const text = data.toString('latin1');
   let twoByte = false;
+  let budget = MAX_CMAP_ENTRIES;
 
   const codespace = /begincodespacerange([\s\S]*?)endcodespacerange/g;
   let m: RegExpExecArray | null;
@@ -108,6 +116,7 @@ function parseToUnicode(data: Buffer): { map: Map<number, string>; twoByte: bool
       if (r[1]!.length >= 4) twoByte = true;
       const startHex = r[3]!;
       for (let code = low; code <= high && code - low < 65536; code++) {
+        if (--budget < 0) return { map, twoByte };
         const value = BigInt(`0x${startHex || '0'}`) + BigInt(code - low);
         const hex = value.toString(16).padStart(startHex.length || 4, '0');
         map.set(code, utf16(hex));
@@ -275,9 +284,14 @@ interface Run { text: string; x: number; y: number; size: number }
 function readPage(doc: PdfDocument, page: PdfDict, warn: (message: string) => void, pageNumber: number): PdfLine[] {
   const contents = doc.resolve(page.get('Contents') ?? null);
   const parts: Buffer[] = [];
+  let total = 0;
   for (const item of Array.isArray(contents) ? contents : [contents]) {
     const data = doc.stream(item);
-    if (data && data.length > 0) parts.push(data, Buffer.from('\n'));
+    if (!data || data.length === 0) continue;
+    // 同じ流れを何度も並べられると、展開は1回でも繋ぐときに何倍にもなる。1ページの中身で上限を置く
+    total += data.length;
+    if (total > MAX_PAGE_CONTENT_BYTES) throw new ImportError('資料が大きすぎます（1ページの中身が上限を超えました）');
+    parts.push(data, Buffer.from('\n'));
   }
   if (parts.length === 0) return [];
   const content = Buffer.concat(parts);

@@ -82,7 +82,8 @@ async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, p
   const linkedHits = await describeHits(db, linked.map((l) => ({ id: l.id, score: 0, matchedTerms: [] })));
 
   const dictionary = await loadDictionary(db);
-  const queryText = [...product.tags.map((t) => `#${t}`), product.name, product.maker ?? ''].join(' ');
+  // search() と同じ上限。保存された文字列がそのまま解析に流れるので、ここでも切る
+  const queryText = [...product.tags.map((t) => `#${t}`), product.name, product.maker ?? ''].join(' ').slice(0, 200);
   const { groups } = analyzeQuery(queryText, { tokenizer, dictionary });
   const ranked = await rankByGroups(db, storeId, groups, {
     limit: Math.max(0, limit - linkedHits.length),
@@ -157,11 +158,36 @@ async function assertArea(db: Db, storeId: string, areaId: string | null | undef
   assert(a !== undefined, 'invalid', 'この店舗の売場ではありません');
 }
 
+/** 文字数の上限。メーカー名は商品名と同じ、売場メモは本文並み。
+ *  メーカー名はバーコードを読むたびに検索語として形態素解析に流れるので、長さを放置できない */
+const MAX_NAME = 100;
+const MAX_MAKER = 100;
+const MAX_NOTE = 1000;
+const MAX_TAGS = 20;
+/** 1人が同時に抱えられる承認待ちの変更依頼。承認時に弾かれる依頼を山ほど積まれないため */
+const MAX_PENDING_CHANGES = 50;
+
+/** 名前・メーカー・メモ・タグの長さと件数を見る（登録・編集・依頼の保存で共通） */
+function validatePatch(patch: ProductPatch): void {
+  if (patch.name !== undefined) {
+    assert(patch.name.trim().length > 0 && patch.name.length <= MAX_NAME, 'invalid', `商品名を1〜${MAX_NAME}文字で入力してください`);
+  }
+  if (patch.maker !== undefined && patch.maker !== null) {
+    assert(patch.maker.length <= MAX_MAKER, 'invalid', `メーカー名は${MAX_MAKER}文字以内にしてください`);
+  }
+  if (patch.note !== undefined && patch.note !== null) {
+    assert(patch.note.length <= MAX_NOTE, 'invalid', `売場のメモは${MAX_NOTE}文字以内にしてください`);
+  }
+  if (patch.tagNames !== undefined) {
+    assert(patch.tagNames.length <= MAX_TAGS, 'invalid', `タグは${MAX_TAGS}個までにしてください`);
+  }
+}
+
 /** 初めて読まれた JAN を登録する。 */
 export async function registerProduct(db: Db, actor: Actor, storeId: string, input: ProductInput) {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗では登録できません');
   assert(isValidJan(input.janCode), 'invalid', 'JANコードが正しくありません');
-  assert(input.name.trim().length > 0 && input.name.length <= 100, 'invalid', '商品名を1〜100文字で入力してください');
+  validatePatch(input);
   await assertStore(db, storeId);
   const exists = await maybeOne(db, `SELECT 1 FROM products WHERE jan_code = $1`, [input.janCode]);
   assert(exists === undefined, 'conflict', 'この商品はすでに登録されています');
@@ -191,9 +217,9 @@ export interface ProductPatch {
 
 /** 編集を実際に反映する（trusted の編集と、visitor の編集の承認で共通） */
 async function applyPatch(db: Db, actor: Actor, storeId: string, productId: string, patch: ProductPatch, editedBy: string) {
+  validatePatch(patch);
   const before = await card(db, productId, storeId);
   if (patch.name !== undefined && patch.name.trim() !== before.name) {
-    assert(patch.name.trim().length > 0 && patch.name.length <= 100, 'invalid', '商品名を1〜100文字で入力してください');
     await db.query(`UPDATE products SET name = $2 WHERE id = $1`, [productId, patch.name.trim()]);
     await history(db, actor, productId, null, 'name', before.name, patch.name.trim(), editedBy);
   }
@@ -231,6 +257,12 @@ export async function updateProduct(db: Db, actor: Actor, storeId: string, produ
     await applyPatch(db, actor, storeId, productId, patch, actor.userId);
     return { productId, published: true as const };
   }
+  // 依頼として積む前に、承認時と同じ検査をする（通らない依頼を積ませない）
+  validatePatch(patch);
+  const waiting = await one<{ count: number }>(
+    db, `SELECT count(*)::int AS count FROM change_requests WHERE requested_by = $1 AND state = 'pending'`, [actor.userId],
+  );
+  assert(waiting.count < MAX_PENDING_CHANGES, 'conflict', '承認待ちの依頼が多すぎます。先に承認されるのを待ってください');
   const req = await one<{ id: string }>(
     db,
     `INSERT INTO change_requests (tenant_id, store_id, entity_type, entity_id, payload, requested_by)

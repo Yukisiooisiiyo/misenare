@@ -83,7 +83,7 @@ export interface PresignOptions {
 }
 
 /** S3 の署名付きURLを作る */
-export function presignS3(config: S3Config, method: 'GET' | 'PUT' | 'DELETE', key: string, opts: PresignOptions): string {
+export function presignS3(config: S3Config, method: 'GET' | 'PUT' | 'DELETE' | 'HEAD', key: string, opts: PresignOptions): string {
   const { date, dateTime } = stamps(opts.now);
   const { host, origin, pathPrefix } = hostOf(config);
   const scope = `${date}/${config.region}/${SERVICE}/aws4_request`;

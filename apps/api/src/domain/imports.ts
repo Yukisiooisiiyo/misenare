@@ -3,6 +3,7 @@
 // 取り込むと、承認待ちの下書きがまとめてできる。公開するかどうかは、承認画面で1件ずつ人が決める。
 // 取り込んだ人が trusted でも自動では公開しない（資料をそのまま入れると、古い記述まで検索に出てしまうため）。
 
+import { ImportError } from '../import/error.ts';
 import { assert, canModerate, DomainError, type Actor } from './actor.ts';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assertStore } from './scope.ts';
@@ -39,7 +40,9 @@ export async function importManual(
     drafts = parsed.drafts;
     warnings = parsed.warnings;
   } catch (err) {
-    throw new DomainError('invalid', err instanceof Error ? err.message : String(err));
+    // 自分で書いた案内だけ返す。内部の例外文（Buffer の範囲外など）は 400 にしつつ文面は固定にする
+    if (err instanceof ImportError) throw new DomainError('invalid', err.message);
+    throw new DomainError('invalid', '資料を読めませんでした。ファイルが壊れていないか確かめてください。');
   }
   // 読めなかった理由が分かっていれば、それをそのまま伝える
   assert(

@@ -3,6 +3,7 @@
 // PDF は「番号 世代 obj … endobj」の集まりで、参照（12 0 R）でつながっている。
 // 索引（xref）を読まずに、ファイル全体から obj を拾って表を作る。壊れかけの PDF でも読めることが多い。
 
+import { ImportError } from './error.ts';
 import { inflateSync } from 'node:zlib';
 
 export type PdfName = { name: string };
@@ -45,6 +46,14 @@ const MAX_FILTERS = 8;
  * 本物の PDF で10を超えることはまずない。
  */
 const MAX_DEPTH = 64;
+
+/**
+ * 文書全体で展開してよい量。
+ * 1つの流れは MAX_STREAM_BYTES で止まるが、同じ流れを何度も参照されると
+ * （`/Contents [5 0 R 5 0 R …]`）参照のたびに展開して足し合わせることになり、
+ * 33KB の PDF で数 GB になった。文書で1つの財布にして、同じ流れは1回だけ展開する。
+ */
+const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 
 /** PDF の字句解析。1つの値（辞書・配列・数・名前・文字列…）を読み進める */
 export class Lexer {
@@ -311,6 +320,9 @@ function undoPredictor(data: Buffer, parms: PdfDict, resolve: (v: PdfValue) => P
   const columns = Number(resolve(parms.get('Columns') ?? 1)) || 1;
   const bpp = Math.ceil((colors * bpc) / 8);
   const rowLength = Math.ceil((colors * bpc * columns) / 8);
+  // 行の長さは PDF 側の値で決まる。展開後のデータより長い行は意味が無く、
+  // 巨大な Columns を書かれると Buffer.alloc で記憶を取り尽くす。外れた値なら予測器を無視する
+  if (!Number.isFinite(rowLength) || rowLength <= 0 || rowLength > data.length || columns > 1_000_000) return data;
   const out: Buffer[] = [];
   let previous = Buffer.alloc(rowLength);
   for (let p = 0; p + 1 + rowLength <= data.length + rowLength; p += rowLength + 1) {
@@ -371,7 +383,8 @@ export interface PdfDocument {
 /** ファイル全体から obj を拾って表にする */
 export function readDocument(buf: Buffer): PdfDocument {
   const objects = new Map<number, PdfValue>();
-  const header = /(\d+)\s+(\d+)\s+obj\b/g;
+  // 数字の途中から始めない（長い数字の並びで O(n²) にならないように）。桁数も PDF に出てくる範囲で止める
+  const header = /(?<![0-9])(\d{1,10})\s+(\d{1,5})\s+obj\b/g;
   let match: RegExpExecArray | null;
   const text = buf.toString('latin1');
 
@@ -409,6 +422,9 @@ export function readDocument(buf: Buffer): PdfDocument {
     objects.set(number, value);
   }
 
+  // 展開した流れの覚え（参照番号ごと）と、文書全体で展開した量
+  const decoded = new Map<number, Buffer | null>();
+  let decodedBytes = 0;
   const doc: PdfDocument = {
     objects,
     resolve(value) {
@@ -418,8 +434,16 @@ export function readDocument(buf: Buffer): PdfDocument {
       return v;
     },
     stream(value) {
+      const key = isRef(value) ? value.ref : null;
+      if (key !== null && decoded.has(key)) return decoded.get(key)!;
       const v = doc.resolve(value);
-      return isStream(v) ? decodeStream(v, (x) => doc.resolve(x)) : null;
+      const data = isStream(v) ? decodeStream(v, (x) => doc.resolve(x)) : null;
+      if (data) {
+        decodedBytes += data.length;
+        if (decodedBytes > MAX_DOCUMENT_BYTES) throw new ImportError('資料が大きすぎます（展開後の量が上限を超えました）');
+      }
+      if (key !== null) decoded.set(key, data);
+      return data;
     },
   };
 

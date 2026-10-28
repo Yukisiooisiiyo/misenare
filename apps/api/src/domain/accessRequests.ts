@@ -228,9 +228,10 @@ export const REMINDER_DAYS = 7;
  * **新しい申請が来たとき**と、**週に1回の念押し**だけにする。
  */
 export async function pendingDigest(db: Db): Promise<PendingDigest> {
-  const tenant = await one<{ notify_email: string | null; requests_notified_at: string | null }>(
-    db, `SELECT notify_email, requests_notified_at::text AS requests_notified_at FROM tenants LIMIT 1`,
-  );
+  // tenant_settings は行レベルセキュリティで自社の1行しか見えない。無ければ未設定として扱う
+  const tenant = (await maybeOne<{ notify_email: string | null; requests_notified_at: string | null }>(
+    db, `SELECT notify_email, requests_notified_at::text AS requests_notified_at FROM tenant_settings`,
+  )) ?? { notify_email: null, requests_notified_at: null };
   const rows = await db.query<{ email: string; claimed_name: string | null; requested_at: string }>(
     `SELECT email, claimed_name, requested_at::text AS requested_at
        FROM access_requests WHERE status = 'pending' ORDER BY requested_at DESC`,
@@ -256,7 +257,11 @@ export function shouldNotify(digest: PendingDigest, now = Date.now()): boolean {
 }
 
 export async function markNotified(db: Db): Promise<void> {
-  await db.query(`UPDATE tenants SET requests_notified_at = now()`);
+  await db.query(
+    `INSERT INTO tenant_settings (tenant_id, requests_notified_at)
+     VALUES (current_setting('app.tenant_id')::uuid, now())
+     ON CONFLICT (tenant_id) DO UPDATE SET requests_notified_at = now()`,
+  );
 }
 
 /**
@@ -299,8 +304,8 @@ export interface NotifySettings {
 
 export async function getNotifySettings(db: Db, actor: Actor, mailConfigured: boolean): Promise<NotifySettings> {
   assert(actor.adminScope === 'tenant', 'forbidden', '知らせの送り先を触れるのは本部の管理者だけです');
-  const row = await one<{ notify_email: string | null }>(db, `SELECT notify_email FROM tenants LIMIT 1`);
-  return { notifyEmail: row.notify_email, mailConfigured };
+  const row = await maybeOne<{ notify_email: string | null }>(db, `SELECT notify_email FROM tenant_settings`);
+  return { notifyEmail: row?.notify_email ?? null, mailConfigured };
 }
 
 /**
@@ -316,6 +321,10 @@ export async function setNotifyEmail(db: Db, actor: Actor, value: string | null)
     assert(looksLikeEmail(email), 'invalid', 'メールアドレスの形が違います');
     assert(email.length <= 200, 'invalid', 'メールアドレスが長すぎます');
   }
-  await db.query(`UPDATE tenants SET notify_email = $1`, [email === '' ? null : email]);
+  await db.query(
+    `INSERT INTO tenant_settings (tenant_id, notify_email) VALUES ($1, $2)
+     ON CONFLICT (tenant_id) DO UPDATE SET notify_email = EXCLUDED.notify_email`,
+    [actor.tenantId, email === '' ? null : email],
+  );
   return { notifyEmail: email === '' ? null : email, mailConfigured: true };
 }

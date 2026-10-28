@@ -856,14 +856,24 @@ function inviteForm(): HTMLElement {
 function printQr(who: string, svg: string): void {
   const w = window.open('', '_blank', 'width=480,height=640');
   if (!w) { toast('印刷用の画面を開けませんでした。ブラウザの設定を確かめてください。'); return; }
-  w.document.write(
-    `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${who}さんの招待</title>`
-    + '<style>body{font-family:system-ui,sans-serif;text-align:center;padding:24px}'
-    + 'svg{width:min(80vw,320px);height:auto}p{font-size:14px;color:#333}</style></head><body>'
-    + `<h1>${who}さん</h1>${svg}`
-    + '<p>スマホのカメラで読み取ってください（1回限り・72時間有効）</p></body></html>',
-  );
-  w.document.close();
+  // 名前は HTML に埋めず、DOM として組み立てる（文字列連結だと名前に書いたタグがそのまま動く）
+  const d = w.document;
+  d.open();
+  d.write('<!doctype html><html lang="ja"><head><meta charset="utf-8"></head><body></body></html>');
+  d.close();
+  const title = d.createElement('title');
+  title.textContent = `${who}さんの招待`;
+  const style = d.createElement('style');
+  style.textContent = 'body{font-family:system-ui,sans-serif;text-align:center;padding:24px}'
+    + 'svg{width:min(80vw,320px);height:auto}p{font-size:14px;color:#333}';
+  d.head.append(title, style);
+  const h1 = d.createElement('h1');
+  h1.textContent = `${who}さん`;
+  const qr = d.createElement('div');
+  qr.innerHTML = svg; // 自分で作った SVG（packages/qr）。利用者の入力は <title> でエスケープ済み
+  const p = d.createElement('p');
+  p.textContent = 'スマホのカメラで読み取ってください（1回限り・72時間有効）';
+  d.body.append(h1, qr, p);
   w.focus();
   w.print();
 }

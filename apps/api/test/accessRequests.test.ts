@@ -7,12 +7,12 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { OidcDirectory } from '../src/auth/oidc.ts';
-import { approveRequest, listRequests, rejectRequest, requestBadge, setNotifyEmail } from '../src/domain/accessRequests.ts';
+import { approveRequest, getNotifySettings, listRequests, pendingDigest, rejectRequest, requestBadge, setNotifyEmail } from '../src/domain/accessRequests.ts';
 import { runNightly } from '../src/batch/nightly.ts';
 import { addProvider, finishSso, startSso } from '../src/domain/sso.ts';
 import { verifySession } from '../src/domain/users.ts';
 import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
-import { freshDatabase, hq, manager, STORE_A, STORE_B, T, tokenizer, trusted, visitor } from './helpers.ts';
+import { freshDatabase, hq, manager, OTHER_T, otherTenant, STORE_A, STORE_B, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -34,7 +34,7 @@ async function clean() {
       [trusted.userId, manager.userId, hq.userId, visitor.userId]);
     await q.query(`DELETE FROM users WHERE email IS NOT NULL`);
     await q.query(`UPDATE users SET email = NULL`);
-    await q.query(`UPDATE tenants SET notify_email = NULL, requests_notified_at = NULL`);
+    await q.query(`DELETE FROM tenant_settings`);
   });
 }
 
@@ -273,7 +273,7 @@ describe('本部への知らせ', () => {
     await runNightly(db, tokenizer, { mailer: box.mailer });
     assert.equal(box.sent.length, 1);
     // 8日前に知らせたことにする
-    await db.withTenant(T, (q) => q.query(`UPDATE tenants SET requests_notified_at = now() - interval '8 days'`));
+    await db.withTenant(T, (q) => q.query(`UPDATE tenant_settings SET requests_notified_at = now() - interval '8 days'`));
     await runNightly(db, tokenizer, { mailer: box.mailer });
     assert.equal(box.sent.length, 2, '放置された申請の念押しが出ていない');
     await clean();
@@ -317,6 +317,22 @@ describe('本部への知らせ', () => {
       const off = await setNotifyEmail(q, hq, '');
       assert.equal(off.notifyEmail, null);
     });
+    await clean();
+  });
+
+  it('送り先は自社にだけ効く。他社の送り先を書き換えず、他社の申請が自社の宛先に来ない', async () => {
+    await setup();
+    await db.withTenant(T, (q) => setNotifyEmail(q, hq, 'joho-system@kdenki.example.co.jp'));
+    // 他社から見ると未設定のまま
+    const other = await db.withTenant(OTHER_T, (q) => getNotifySettings(q, otherTenant, true));
+    assert.equal(other.notifyEmail, null);
+    const otherDigest = await db.withTenant(OTHER_T, (q) => pendingDigest(q));
+    assert.equal(otherDigest.to, null, '他社の宛先が自社の知らせの送り先になっている');
+    // 他社が自分の送り先を決めても、自社の設定は変わらない
+    await db.withTenant(OTHER_T, (q) => setNotifyEmail(q, otherTenant, 'hq@other.example.com'));
+    const mine = await db.withTenant(T, (q) => getNotifySettings(q, hq, true));
+    assert.equal(mine.notifyEmail, 'joho-system@kdenki.example.co.jp');
+    await db.withTenant(OTHER_T, (q) => q.query(`DELETE FROM tenant_settings`));
     await clean();
   });
 });

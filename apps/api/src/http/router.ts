@@ -45,7 +45,14 @@ export class Router<C> {
       pathMatched = true;
       if (r.method !== method) continue;
       const params: Params = {};
-      r.keys.forEach((k, i) => { params[k] = decodeURIComponent(m[i + 1]!); });
+      r.keys.forEach((k, i) => {
+        try {
+          params[k] = decodeURIComponent(m[i + 1]!);
+        } catch {
+          // 壊れた %（%E0%A4%A など）。URIError のまま外へ出すと 500 になるので 400 に
+          throw new HttpError(400, 'パスが正しくありません');
+        }
+      });
       return { handler: r.handler, params, path: r.path };
     }
     return pathMatched ? 'method_not_allowed' : undefined;

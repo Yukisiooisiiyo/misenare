@@ -4,7 +4,7 @@
 //   ローカル … API が中身を受け取って、ディレクトリに書く
 //   S3      … API は署名付きURLだけを返し、中身は端末から直接 S3 に上がる（API を通らない）
 
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { presignS3, type S3Config } from './s3.ts';
 
@@ -25,6 +25,8 @@ export interface Storage {
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
   /** 中身を読む（署名付きURLを使わない保存先向け） */
   get(key: string): Promise<Uint8Array>;
+  /** 中身が届いているか。「送り終わった」の申告だけを信じないために使う */
+  exists(key: string): Promise<boolean>;
   remove(key: string): Promise<void>;
 }
 
@@ -51,6 +53,14 @@ export class LocalStorage implements Storage {
 
   async get(key: string): Promise<Uint8Array> {
     return new Uint8Array(await readFile(this.pathOf(key)));
+  }
+
+  async exists(key: string): Promise<boolean> {
+    try {
+      return (await stat(this.pathOf(key))).isFile();
+    } catch {
+      return false;
+    }
   }
 
   async remove(key: string): Promise<void> {
@@ -85,6 +95,13 @@ export class S3Storage implements Storage {
 
   async put(): Promise<void> { throw new Error('S3 へは端末から直接送ります'); }
   async get(): Promise<Uint8Array> { throw new Error('S3 からは署名付きURLで読みます'); }
+
+  async exists(key: string): Promise<boolean> {
+    const res = await fetch(presignS3(this.config, 'HEAD', key, { expiresIn: 60, now: this.now() }), { method: 'HEAD' });
+    if (res.ok) return true;
+    if (res.status === 404 || res.status === 403) return false; // 無いキーへの HEAD は権限次第で 403 になる
+    throw new Error(`S3 の確認に失敗しました（${res.status}）`);
+  }
 
   async remove(key: string): Promise<void> {
     const res = await fetch(presignS3(this.config, 'DELETE', key, { expiresIn: 60, now: this.now() }), { method: 'DELETE' });

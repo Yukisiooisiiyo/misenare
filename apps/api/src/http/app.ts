@@ -121,6 +121,29 @@ const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found:
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const NON_UUID_PARAMS = new Set(['jan', 'version', 'logId']);
 const MAX_DEVICE_NAME = 60;
+/** 1件に付けられるタグの数。タグごとに辞書の行と読みの候補が増えるので、件数で止める */
+const MAX_TAGS = 20;
+/** 1件に結びつけられる売場の数 */
+const MAX_AREAS = 50;
+
+/** 日時の文字列として受け取れるか（Date.parse だけでは '2024-13-45' のような形も通ってしまい、DB のキャストで 500 になる） */
+function isDateTime(v: unknown): v is string {
+  if (typeof v !== 'string' || v.length > 40) return false;
+  const t = Date.parse(v);
+  return !Number.isNaN(t) && Math.abs(t) < 8.64e15;
+}
+
+/** YYYY-MM-DD として実在する日付か */
+function isDateOnly(v: unknown): v is string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+/** 日時を ISO 8601 に揃える（DB に入れる形を1つにするため） */
+function toIso(v: string | null): string | null {
+  return v === null ? null : new Date(v).toISOString();
+}
 
 /** パスの ID がUUIDの形か確かめる（形が違うと DB 側で 500 になるため、先に 400 で返す） */
 function checkParams(params: Record<string, string>): void {
@@ -138,10 +161,12 @@ function knowledgeBody(v: unknown): Omit<KnowledgeInput, 'storeId'> {
   if (typeof b.title !== 'string' || typeof b.body !== 'string' || !isStringArray(b.tagNames)) {
     throw new HttpError(400, 'title・body（文字列）と tagNames（文字列の配列）が必要です');
   }
+  if (b.tagNames.length > MAX_TAGS) throw new HttpError(400, `タグは${MAX_TAGS}個までにしてください`);
   if (b.areaIds !== undefined && !(isStringArray(b.areaIds) && b.areaIds.every((x) => UUID.test(x)))) {
     throw new HttpError(400, 'areaIds が正しくありません');
   }
-  if (b.expiresAt !== undefined && b.expiresAt !== null && (typeof b.expiresAt !== 'string' || Number.isNaN(Date.parse(b.expiresAt)))) {
+  if (Array.isArray(b.areaIds) && b.areaIds.length > MAX_AREAS) throw new HttpError(400, `売場は${MAX_AREAS}か所までにしてください`);
+  if (b.expiresAt !== undefined && b.expiresAt !== null && !isDateTime(b.expiresAt)) {
     throw new HttpError(400, 'expiresAt は日時の文字列か null にしてください');
   }
   return {
@@ -149,7 +174,7 @@ function knowledgeBody(v: unknown): Omit<KnowledgeInput, 'storeId'> {
     body: b.body,
     tagNames: b.tagNames,
     ...(b.areaIds !== undefined ? { areaIds: b.areaIds as string[] } : {}),
-    ...(b.expiresAt !== undefined ? { expiresAt: b.expiresAt as string | null } : {}),
+    ...(b.expiresAt !== undefined ? { expiresAt: toIso(b.expiresAt as string | null) } : {}),
   };
 }
 
@@ -164,6 +189,7 @@ function productPatchBody(v: unknown): ProductPatch {
     throw new HttpError(400, 'areaId が正しくありません');
   }
   if (b.tagNames !== undefined && !isStringArray(b.tagNames)) throw new HttpError(400, 'tagNames は文字列の配列にしてください');
+  if (Array.isArray(b.tagNames) && b.tagNames.length > MAX_TAGS) throw new HttpError(400, `タグは${MAX_TAGS}個までにしてください`);
   // 知らない項目は捨てる（承認待ちの依頼として保存されるため）
   const patch: ProductPatch = {};
   if (b.name !== undefined) patch.name = b.name as string;
@@ -225,7 +251,7 @@ function noticeBody(v: unknown): NoticeInput {
   if (b.requiresAck !== undefined && typeof b.requiresAck !== 'boolean') throw new HttpError(400, 'requiresAck は true か false です');
   for (const key of ['startsAt', 'endsAt']) {
     const v2 = b[key];
-    if (v2 !== undefined && v2 !== null && (typeof v2 !== 'string' || Number.isNaN(Date.parse(v2)))) {
+    if (v2 !== undefined && v2 !== null && !isDateTime(v2)) {
       throw new HttpError(400, `${key} は日時の文字列か null にしてください`);
     }
   }
@@ -234,8 +260,8 @@ function noticeBody(v: unknown): NoticeInput {
     body: b.body,
     ...(b.priority !== undefined ? { priority: b.priority as NoticeInput['priority'] } : {}),
     ...(b.requiresAck !== undefined ? { requiresAck: b.requiresAck as boolean } : {}),
-    ...(b.startsAt !== undefined ? { startsAt: b.startsAt as string | null } : {}),
-    ...(b.endsAt !== undefined ? { endsAt: b.endsAt as string | null } : {}),
+    ...(b.startsAt !== undefined ? { startsAt: toIso(b.startsAt as string | null) } : {}),
+    ...(b.endsAt !== undefined ? { endsAt: toIso(b.endsAt as string | null) } : {}),
   };
 }
 
@@ -409,7 +435,7 @@ function routes(): Router<Ctx> {
   r.post('/stores/:storeId/handovers', async (c, req, p) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.body !== 'string') throw new HttpError(400, 'body（文字列）が必要です');
-    if (b.forDate !== undefined && typeof b.forDate !== 'string') throw new HttpError(400, 'forDate は日付の文字列です');
+    if (b.forDate !== undefined && !isDateOnly(b.forDate)) throw new HttpError(400, 'forDate は YYYY-MM-DD の形の実在する日付にしてください');
     return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined), 201);
   });
   r.get('/stores/:storeId/handovers/history', async (c, req, p) => {
@@ -522,6 +548,8 @@ function routes(): Router<Ctx> {
     json(await disableProvider(c.db, c.actor, p.providerId!)));
   // ドメインの持ち主であることを確かめる。DNS を引くので回数を止める
   r.post('/sso/domains/verify', async (c, req) => {
+    // 回数を数える前に本部の管理者であることを見る。でないと同じ回線の誰かが本部の枠を使い切れる
+    if (c.actor.adminScope !== 'tenant') throw new HttpError(403, '本部の管理者だけができます');
     if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
       throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
     }
@@ -531,6 +559,7 @@ function routes(): Router<Ctx> {
   });
   // つなぎを確かめる。外に取りに行くので、本部の管理者だけ・回数も止める
   r.post('/sso/check', async (c, req) => {
+    if (c.actor.adminScope !== 'tenant') throw new HttpError(403, '本部の管理者だけができます');
     if (!(await c.limit(req, 'sso-check', RULES.ssoLogin))) {
       throw new HttpError(429, '回数が多すぎます。しばらくしてからお試しください');
     }
@@ -543,7 +572,7 @@ function routes(): Router<Ctx> {
   r.get('/access-requests', async (c) => json(await listRequests(c.db, c.actor)));
   r.post('/access-requests/:requestId/approve', async (c, req, p) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
-    if (typeof b.storeId !== 'string') throw new HttpError(400, '配属する店舗が必要です');
+    if (typeof b.storeId !== 'string' || !UUID.test(b.storeId)) throw new HttpError(400, '配属する店舗が必要です');
     return json(await approveRequest(c.db, c.actor, p.requestId!, {
       storeId: b.storeId,
       ...(typeof b.name === 'string' ? { name: b.name } : {}),
@@ -706,9 +735,10 @@ export function createApp(deps: AppDeps) {
         const back = result.returnTo === null ? '' : `&to=${encodeURIComponent(result.returnTo)}`;
         return appRedirect(`sso=${encodeURIComponent(result.sessionToken)}${back}`);
       } catch (err) {
-        const message = err instanceof DomainError ? err.message
-          : err instanceof Error ? err.message : String(err);
-        logger.warn('sso callback failed', { requestId: id, error: message });
+        const detail = err instanceof Error ? err.message : String(err);
+        logger.warn('sso callback failed', { requestId: id, error: detail });
+        // 画面に出すのは自分で書いた案内だけ。内部の例外文（SQL の断片など）は記録にだけ残す
+        const message = err instanceof DomainError ? err.message : '会社のアカウントでのログインに失敗しました。もう一度お試しください';
         return appRedirect(`sso-error=${encodeURIComponent(message.slice(0, 200))}`);
       }
     }
@@ -718,11 +748,15 @@ export function createApp(deps: AppDeps) {
     if (matched === 'method_not_allowed') throw new HttpError(405, 'Method Not Allowed');
     checkParams(matched.params);
 
-    // 無効なトークンでのアクセスが続く接続元からは、認証そのものを止める（トークンの総当たり対策）
+    // 無効なトークンでのアクセスが続く接続元からは、無効なトークンを止める。
+    // 止めるのは「無効なもの」だけで、正しいトークンの人は通す。
+    // 店舗のスマホは同じ回線（同じ接続元 IP）から来るので、誰かの古い端末が
+    // 切れたトークンで鳴き続けただけで店舗全員が締め出されてはいけない。
     const failKey = clientKey(req, 'authfail');
-    if (await limiter.blocked(failKey, RULES.failedAuth)) return tooMany();
+    const blocked = await limiter.blocked(failKey, RULES.failedAuth);
     const identity = await deps.auth.identify(req);
     if (!identity) {
+      if (blocked) return tooMany();
       if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
       throw new HttpError(401, 'ログインしてください');
     }
@@ -746,7 +780,12 @@ export function createApp(deps: AppDeps) {
     const id = requestId(req);
     const startedAt = Date.now();
     // 数え取りのラベルは経路の型だけにする（ID を入れると種類が増え続けるため）
-    const route = router.match(req.method, url.pathname);
+    let route: ReturnType<typeof router.match>;
+    try {
+      route = router.match(req.method, url.pathname);
+    } catch {
+      route = undefined; // 壊れた % などで経路を読めない。下で 400 にする
+    }
     const label = typeof route === 'object' ? route.path : url.pathname === '/health' || url.pathname === '/ready' || url.pathname === '/metrics' ? url.pathname : 'その他';
 
     let response: Response;
@@ -775,6 +814,9 @@ export function createApp(deps: AppDeps) {
     }
     const headers = new Headers(response.headers);
     headers.set('x-request-id', id);
+    // 認証付きの応答を中継や端末に残させない（写真の中身など、自分で決めている経路は尊重する）
+    if (!headers.has('cache-control')) headers.set('cache-control', 'no-store');
+    headers.set('x-content-type-options', 'nosniff');
     return new Response(response.body, { status: response.status, headers });
   };
 }

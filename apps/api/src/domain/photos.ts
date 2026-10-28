@@ -18,6 +18,8 @@ export const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 export const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 /** 1つのナレッジに付けられる枚数 */
 export const MAX_PHOTOS = 8;
+/** 写真の説明の長さ */
+const MAX_CAPTION = 200;
 
 const EXTENSION: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 
@@ -128,8 +130,9 @@ export async function startPhotoUpload(
   await assertCanRead(db, actor, knowledgeId);
   assert((ALLOWED_TYPES as readonly string[]).includes(input.contentType), 'invalid', '写真は JPEG・PNG・WebP で送ってください');
   assert(Number.isInteger(input.bytes) && input.bytes > 0 && input.bytes <= MAX_PHOTO_BYTES, 'invalid', '写真が大きすぎます');
+  // 送りかけ（uploading）も数える。でないと枠だけ無限に作れる（掃除されるまでの24時間）
   const count = await one<{ n: number }>(
-    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1 AND state = 'active'`, [knowledgeId],
+    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1`, [knowledgeId],
   );
   assert(count.n < MAX_PHOTOS, 'conflict', `写真は${MAX_PHOTOS}枚までです`);
 
@@ -168,6 +171,10 @@ export async function receivePhoto(db: Db, storage: Storage, actor: Actor, photo
 export async function finishPhotoUpload(db: Db, storage: Storage, actor: Actor, photoId: string, caption?: string | null): Promise<PhotoView> {
   const p = await loadPhoto(db, photoId);
   assert(p.created_by === actor.userId, 'forbidden', 'この写真は登録できません');
+  assert(p.state === 'uploading', 'conflict', 'この写真はもう登録されています');
+  assert((caption ?? '').length <= MAX_CAPTION, 'invalid', `説明は${MAX_CAPTION}文字以内にしてください`);
+  // 「送り終わった」の申告だけを信じない。中身が無いまま一覧に出すと、開いた人が 500 を見る
+  assert(await storage.exists(p.storage_key), 'conflict', '写真の中身がまだ届いていません。先に送ってください');
   const row = await one<{ created_at: string }>(
     db,
     `UPDATE knowledge_photos SET state = 'active', caption = $2 WHERE id = $1 RETURNING created_at::text AS created_at`,

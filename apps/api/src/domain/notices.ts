@@ -6,7 +6,7 @@
 // 書けるのは trusted 以上。お知らせは承認を待っていると意味が無くなるので、承認は挟まない。
 
 import { maybeOne, one, type Db } from '../db/db.ts';
-import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
+import { assert, canAccessStore, canAdminister, canModerate, isTrusted, type Actor } from './actor.ts';
 import { assertStore } from './scope.ts';
 
 export const MAX_TITLE = 100;
@@ -169,7 +169,10 @@ async function assertCanEdit(db: Db, actor: Actor, id: string): Promise<{ store_
   // ミセナレが自動で出した知らせは人が直せない（直しても次の投稿で書き換わる）
   assert(row.kind === 'manual', 'forbidden', 'この連絡事項はミセナレが自動で出しています');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は直せません');
-  assert(row.created_by === actor.userId || actor.adminScope !== 'none', 'forbidden', '出した人か administrator だけが直せます');
+  // 全店共通（store_id が無い）は本部だけ。出すのが本部だけなのと対にする
+  if (row.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通の連絡事項は本部のみ直せます');
+  // 店舗の連絡事項は、出した人か「その店舗の」administrator。他店の店長は直せない
+  assert(row.created_by === actor.userId || canAdminister(actor, row.store_id), 'forbidden', '出した人か administrator だけが直せます');
   return row;
 }
 
