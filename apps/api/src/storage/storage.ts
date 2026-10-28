@@ -25,8 +25,8 @@ export interface Storage {
   put(key: string, body: Uint8Array, contentType: string): Promise<void>;
   /** 中身を読む（署名付きURLを使わない保存先向け） */
   get(key: string): Promise<Uint8Array>;
-  /** 中身が届いているか。「送り終わった」の申告だけを信じないために使う */
-  exists(key: string): Promise<boolean>;
+  /** 中身が届いているか、届いていれば大きさ。「送り終わった」の申告だけを信じないために使う */
+  head(key: string): Promise<{ bytes: number } | null>;
   remove(key: string): Promise<void>;
 }
 
@@ -55,11 +55,12 @@ export class LocalStorage implements Storage {
     return new Uint8Array(await readFile(this.pathOf(key)));
   }
 
-  async exists(key: string): Promise<boolean> {
+  async head(key: string): Promise<{ bytes: number } | null> {
     try {
-      return (await stat(this.pathOf(key))).isFile();
+      const st = await stat(this.pathOf(key));
+      return st.isFile() ? { bytes: st.size } : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -96,10 +97,10 @@ export class S3Storage implements Storage {
   async put(): Promise<void> { throw new Error('S3 へは端末から直接送ります'); }
   async get(): Promise<Uint8Array> { throw new Error('S3 からは署名付きURLで読みます'); }
 
-  async exists(key: string): Promise<boolean> {
+  async head(key: string): Promise<{ bytes: number } | null> {
     const res = await fetch(presignS3(this.config, 'HEAD', key, { expiresIn: 60, now: this.now() }), { method: 'HEAD' });
-    if (res.ok) return true;
-    if (res.status === 404 || res.status === 403) return false; // 無いキーへの HEAD は権限次第で 403 になる
+    if (res.ok) return { bytes: Number(res.headers.get('content-length') ?? 0) };
+    if (res.status === 404 || res.status === 403) return null; // 無いキーへの HEAD は権限次第で 403 になる
     throw new Error(`S3 の確認に失敗しました（${res.status}）`);
   }
 

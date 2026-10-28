@@ -11,7 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import type { Storage } from '../storage/storage.ts';
-import { assert, canAccessStore, canModerate, type Actor } from './actor.ts';
+import { assert, canAccessStore, canModerate, DomainError, type Actor } from './actor.ts';
 
 /** 端末で縮小してから送らせる。縮小後にこれを超えるものは受け取らない */
 export const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
@@ -193,14 +193,21 @@ export async function finishPhotoUpload(db: Db, storage: Storage, actor: Actor, 
   assert(p.created_by === actor.userId, 'forbidden', 'この写真は登録できません');
   assert(p.state === 'uploading', 'conflict', 'この写真はもう登録されています');
   assert((caption ?? '').length <= MAX_CAPTION, 'invalid', `説明は${MAX_CAPTION}文字以内にしてください`);
-  // 「送り終わった」の申告だけを信じない。中身が無いまま一覧に出すと、開いた人が 500 を見る
-  assert(await storage.exists(p.storage_key), 'conflict', '写真の中身がまだ届いていません。先に送ってください');
+  // 「送り終わった」の申告だけを信じない。中身が無いまま一覧に出すと、開いた人が 500 を見る。
+  // S3 では中身がサーバーを通らないので、大きさもここで初めて分かる
+  const stored = await storage.head(p.storage_key);
+  assert(stored !== null, 'conflict', '写真の中身がまだ届いていません。先に送ってください');
+  if (stored.bytes > MAX_PHOTO_BYTES) {
+    await storage.remove(p.storage_key).catch(() => undefined);
+    await db.query(`DELETE FROM knowledge_photos WHERE id = $1`, [photoId]);
+    throw new DomainError('invalid', '写真が大きすぎます');
+  }
   const row = await one<{ created_at: string }>(
     db,
-    `UPDATE knowledge_photos SET state = 'active', caption = $2 WHERE id = $1 RETURNING created_at::text AS created_at`,
-    [photoId, caption ?? null],
+    `UPDATE knowledge_photos SET state = 'active', caption = $2, bytes = $3 WHERE id = $1 RETURNING created_at::text AS created_at`,
+    [photoId, caption ?? null, stored.bytes],
   );
-  return view({ ...p, state: 'active', caption: caption ?? null, created_at: row.created_at }, storage, null);
+  return view({ ...p, state: 'active', caption: caption ?? null, bytes: stored.bytes, created_at: row.created_at }, storage, null);
 }
 
 function view(p: PhotoRow, storage: Storage, createdBy: string | null): PhotoView {
