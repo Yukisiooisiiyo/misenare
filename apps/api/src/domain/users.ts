@@ -66,13 +66,15 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
   assert(adminScope !== 'store' || input.storeId !== null, 'invalid', '店長の招待には店舗を指定してください');
 
   if (input.userId) {
-    const u = await maybeOne<{ status: string }>(db, `SELECT status FROM users WHERE id = $1`, [input.userId]);
+    // 既存の人への招待は、受け取った端末が**その人として**入れる鍵になる。
+    // 作った人の手元にも鍵が残るので、「誰の鍵を作れるか」は「誰を管理できるか」と同じにする。
+    // 店長が本部の人の鍵を作れると、それを自分で使って本部になれてしまう。
+    const u = await maybeOne<{ status: string; admin_scope: AdminScope }>(db, `SELECT status, admin_scope FROM users WHERE id = $1`, [input.userId]);
     assert(u !== undefined, 'not_found', '利用者が見つかりません');
     assert(u.status === 'active', 'conflict', '無効化された利用者です');
-    if (actor.adminScope !== 'tenant') {
-      const m = await maybeOne(db, `SELECT 1 FROM memberships WHERE user_id = $1 AND store_id = ANY($2::uuid[])`, [input.userId, actor.storeIds]);
-      assert(m !== undefined, 'forbidden', '自店舗の利用者ではありません');
-    }
+    await assertCanManageUser(db, actor, input.userId);
+    // 店長・本部の鍵を作り直せるのは本部だけ（店長同士でも、相手になりすませる形は作らない）
+    if (u.admin_scope !== 'none') assert(actor.adminScope === 'tenant', 'forbidden', '店長・本部の端末を追加できるのは本部のみです');
   } else {
     assert(typeof input.name === 'string' && input.name.trim().length > 0 && input.name.length <= 40, 'invalid', '名前を1〜40文字で入力してください');
   }

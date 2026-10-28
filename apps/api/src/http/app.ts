@@ -97,6 +97,7 @@ import {
   addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
+import { timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
@@ -650,7 +651,11 @@ export function createApp(deps: AppDeps) {
     const token = process.env.METRICS_TOKEN;
     if (!token) return process.env.NODE_ENV !== 'production';
     const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? url.searchParams.get('token');
-    return given === token;
+    if (given === null) return false;
+    // 1文字ずつ比べて途中で返す比較だと、かかる時間から合言葉の先頭が分かる
+    const a = Buffer.from(given);
+    const b = Buffer.from(token);
+    return a.length === b.length && timingSafeEqual(a, b);
   }
 
   async function handleRequest(req: Request, url: URL, id: string): Promise<Response> {
