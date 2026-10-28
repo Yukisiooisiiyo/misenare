@@ -94,6 +94,15 @@ describe('バーコードからの検索', () => {
     assert.equal(r.related[0]!.linked, true);
     assert.equal(r.related.filter((h) => h.id === carryId).length, 1, '重複しない');
   });
+
+  it('全店共通のナレッジに商品を紐づけられるのは本部だけ（本文を直せる人と同じ）', async () => {
+    const r0 = await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, FRIDGE));
+    if (r0.status !== 'found') throw new Error('not found');
+    const shared = await run((q) => createKnowledge(q, tokenizer, hq, { storeId: null, title: '全店の冷蔵庫', body: '本文', tagNames: ['#冷蔵庫'] }));
+    await rejects(run((q) => linkKnowledgeToProduct(q, trusted, shared.id, r0.product.id)), 'forbidden');
+    await rejects(run((q) => linkKnowledgeToProduct(q, storeBStaff, shared.id, r0.product.id)), 'forbidden');
+    await run((q) => linkKnowledgeToProduct(q, hq, shared.id, r0.product.id));
+  });
 });
 
 describe('商品情報の編集と履歴', () => {

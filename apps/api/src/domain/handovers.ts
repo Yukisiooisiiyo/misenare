@@ -137,6 +137,8 @@ export async function setHandoverState(db: Db, actor: Actor, id: string, state: 
   const row = await load(db, id);
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この引き継ぎは触れません');
   assert(row.deleted_at === null, 'conflict', 'この引き継ぎは消されています。先に戻してください');
+  // 同じ状態への押し直しは何もしない（履歴の行を1回ごとに増やされないため。二重タップでもよくある）
+  if (row.state === state) return { id, state };
   // 問い合わせごとに値の数が違うので、分けて書く（psql では通っても pg では落ちるため）
   if (state === 'done') {
     await db.query(`UPDATE handovers SET state = 'done', done_by = $2, done_at = now() WHERE id = $1`, [id, actor.userId]);

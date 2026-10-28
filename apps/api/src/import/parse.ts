@@ -60,7 +60,18 @@ function normalizeText(buf: Buffer): string {
 function tidy(s: string): string {
   // 行末の空白は正規表現（`[ \t　]+$`）で消さない。「空白の連続＋空白でない字」の行で
   // 連続の長さの2乗の時間になり、8万個の空白で20秒かかった。trimEnd は行の長さに比例する
-  return s.split('\n').map((line) => line.replace(/[　]+$/, '').trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return s.split('\n').map(trimTrailingSpace).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** 行末の空白（半角・タブ・全角）を取る。末尾から見るので行の長さに比例する（正規表現の `[　]+$` は2乗になる） */
+function trimTrailingSpace(line: string): string {
+  let end = line.length;
+  while (end > 0) {
+    const c = line.charCodeAt(end - 1);
+    if (c === 0x20 || c === 0x09 || c === 0x0d || c === 0x3000) end--;
+    else break;
+  }
+  return end === line.length ? line : line.slice(0, end);
 }
 
 function cut(s: string, max: number): string {
@@ -282,9 +293,12 @@ export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
   const rows: string[][] = [];
   for (const rowXml of elementsOf(xml, 'row')) {
     const row: string[] = [];
-    for (const cell of rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g)) {
-      const attrs = cell[1] ?? cell[3] ?? '';
-      const inner = cell[2] ?? '';
+    for (const cellXml of elementsOf(rowXml, 'c')) {
+      // <c …>…</c> か <c …/>。段落・行と同じく indexOf で切る（正規表現の [\s\S]*? は閉じない <c が並ぶと2乗）
+      const gt = cellXml.indexOf('>');
+      const selfClosing = cellXml[gt - 1] === '/';
+      const attrs = cellXml.slice(2, selfClosing ? gt - 1 : gt);
+      const inner = selfClosing ? '' : cellXml.slice(gt + 1, cellXml.length - '</c>'.length);
       const index = columnOf(/r="([A-Z]+\d+)"/.exec(attrs)?.[1] ?? 'A1');
       if (index >= MAX_COLUMNS) throw new ImportError('Excel ファイルとして読めませんでした（列の番地が範囲外です）');
       const type = /t="([^"]+)"/.exec(attrs)?.[1];

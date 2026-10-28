@@ -85,6 +85,9 @@ function validate(input: NoticeInput): void {
   }
   if (input.startsAt && input.endsAt) {
     assert(Date.parse(input.endsAt) > Date.parse(input.startsAt), 'invalid', '掲示の終わりは、始まりより後にしてください');
+  } else if (input.endsAt && !input.startsAt) {
+    // 始まりを省くと DB で now() が入る。終わりが過去だと CHECK (ends_at > starts_at) で 500 になるので先に断る
+    assert(Date.parse(input.endsAt) > Date.now(), 'invalid', '掲示の終わりは、今より後にしてください');
   }
 }
 

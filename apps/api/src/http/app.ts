@@ -115,6 +115,8 @@ interface Ctx {
   oidc: OidcDirectory;
   /** 回数を止める。外に取りに行く経路で使う */
   limit: (req: Request, name: string, rule: RateRule) => Promise<boolean>;
+  /** 回数を止める（利用者ごと）。ログイン後の重い読み取りで使う。鍵が IP でないので店舗の回線で巻き添えにならない */
+  limitUser: (name: string, rule: RateRule) => Promise<boolean>;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -286,7 +288,9 @@ function relationBody(v: unknown): RelationInput {
 
 function intParam(v: string | undefined, name: string): number {
   const n = Number(v);
-  if (!Number.isInteger(n) || n < 1) throw new HttpError(400, `${name} が正しくありません`);
+  // 上限は PostgreSQL の integer。超えると pg ドライバーでは「value out of range」で 500 になる
+  // （psql アダプタは数値リテラルに展開するので手元では出ず、本番でだけ起きる）
+  if (!Number.isInteger(n) || n < 1 || n > 2_147_483_647) throw new HttpError(400, `${name} が正しくありません`);
   return n;
 }
 
@@ -324,7 +328,13 @@ function routes(): Router<Ctx> {
   const r = new Router<Ctx>();
 
   // --- 探す ---------------------------------------------------------------
+  // 検索・バーコード・辞書の同期・読みの案は、1回ごとにタグ辞書を読み直す重い処理。
+  // 人が打てる速さをはるかに超える連打だけを止める（1人あたり）
+  const heavy = async (c: Ctx) => {
+    if (!(await c.limitUser('heavy-read', RULES.heavyRead))) throw new HttpError(429, '回数が多すぎます。少し待ってからお試しください');
+  };
   r.get('/stores/:storeId/search', async (c, req, p) => {
+    await heavy(c);
     const q = new URL(req.url).searchParams.get('q') ?? '';
     return json(await search(c.db, c.tokenizer, c.actor, p.storeId!, q));
   });
@@ -341,11 +351,13 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // 端末に同期するタグ辞書（候補表示と「もしかして」は端末内で計算する）
-  r.get('/stores/:storeId/tags/dictionary', async (c, _req, p) => json(await exportDictionary(c.db, c.actor, p.storeId!)));
+  r.get('/stores/:storeId/tags/dictionary', async (c, _req, p) => { await heavy(c); return json(await exportDictionary(c.db, c.actor, p.storeId!)); });
 
   // --- バーコード ----------------------------------------------------------
-  r.get('/stores/:storeId/barcode/:jan', async (c, _req, p) =>
-    json(await scanBarcode(c.db, c.tokenizer, c.actor, p.storeId!, p.jan!)));
+  r.get('/stores/:storeId/barcode/:jan', async (c, _req, p) => {
+    await heavy(c);
+    return json(await scanBarcode(c.db, c.tokenizer, c.actor, p.storeId!, p.jan!));
+  });
   r.post('/stores/:storeId/products', async (c, req, p) =>
     json(await registerProduct(c.db, c.actor, p.storeId!, productBody(await readJson(req))), 201));
   r.patch('/stores/:storeId/products/:productId', async (c, req, p) =>
@@ -435,6 +447,7 @@ function routes(): Router<Ctx> {
   // --- 引き継ぎ -------------------------------------------------------------
   r.get('/stores/:storeId/handovers', async (c, req, p) => {
     const date = new URL(req.url).searchParams.get('date') ?? undefined;
+    if (date !== undefined && !isDateOnly(date)) throw new HttpError(400, 'date は YYYY-MM-DD の形の実在する日付にしてください');
     return json(await listHandovers(c.db, c.actor, p.storeId!, date));
   });
   r.post('/stores/:storeId/handovers', async (c, req, p) => {
@@ -491,7 +504,7 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // タグの読み：機械が出した案を人が確かめる。確かめたものだけが検索に効く。
-  r.get('/tag-readings', async (c) => json(await listReadingProposals(c.db, c.tokenizer, c.actor)));
+  r.get('/tag-readings', async (c) => { await heavy(c); return json(await listReadingProposals(c.db, c.tokenizer, c.actor)); });
   r.post('/tag-readings/:tagId', async (c, req, p) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     // readings を省く、または空の配列にすると「読みなし」として確定する
@@ -538,6 +551,10 @@ function routes(): Router<Ctx> {
     }
     if (!Array.isArray(b.domains) || b.domains.some((d) => typeof d !== 'string')) {
       throw new HttpError(400, 'domains（メールアドレスのドメイン）が必要です');
+    }
+    if (b.domains.length > 20) throw new HttpError(400, 'ドメインは20個までにしてください');
+    if (b.defaultStoreId !== undefined && b.defaultStoreId !== null && !(typeof b.defaultStoreId === 'string' && UUID.test(b.defaultStoreId))) {
+      throw new HttpError(400, 'defaultStoreId が正しくありません');
     }
     return json(await addProvider(c.db, c.actor, {
       issuer: b.issuer,
@@ -680,14 +697,26 @@ export function createApp(deps: AppDeps) {
 
     // ログイン前に呼ぶ唯一の API：招待トークンを端末のセッショントークンに交換する
     if (url.pathname === '/auth/accept' && req.method === 'POST') {
-      if (!(await limiter.take(clientKey(req, 'accept'), RULES.acceptInvitation))) return tooMany();
+      // 数えるのは**失敗**だけ。店舗の端末は同じ回線から来るので、開店準備で10人以上が
+      // 一斉に QR を読むと、成功まで数えていては11人目から止まってしまう。
+      // 招待トークンは256ビットの乱数で総当たりは成立しないので、ここで守るのは DB の負荷だけ
+      const acceptKey = clientKey(req, 'accept');
+      if (await limiter.blocked(acceptKey, RULES.acceptInvitation)) return tooMany();
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       const token = typeof b.token === 'string' ? b.token : '';
       const parsed = parseToken(token);
-      if (!parsed) throw new HttpError(400, '招待のQRコードを読み取れませんでした');
+      if (!parsed) {
+        await limiter.take(acceptKey, RULES.acceptInvitation);
+        throw new HttpError(400, '招待のQRコードを読み取れませんでした');
+      }
       const deviceName = typeof b.deviceName === 'string' ? b.deviceName.slice(0, MAX_DEVICE_NAME) : null;
-      const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
-      return json(result, 201);
+      try {
+        const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
+        return json(result, 201);
+      } catch (err) {
+        if (err instanceof DomainError) await limiter.take(acceptKey, RULES.acceptInvitation);
+        throw err;
+      }
     }
 
     // ログイン前に呼ぶ、パスキーの2本。
@@ -699,21 +728,28 @@ export function createApp(deps: AppDeps) {
       return json(await startLogin((sql, params) => deps.database.raw(sql, params), site));
     }
     if (url.pathname === '/auth/passkey/finish' && req.method === 'POST') {
-      if (!(await limiter.take(clientKey(req, 'passkey'), RULES.passkeyLogin))) return tooMany();
+      // start で1回数えているので、finish は失敗だけ数える（1回のログインで2回消費しない）
+      const passkeyKey = clientKey(req, 'passkey');
+      if (await limiter.blocked(passkeyKey, RULES.passkeyLogin)) return tooMany();
       const site = requireSite();
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       for (const key of ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature', 'userHandle']) {
         if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
       }
-      const result = await loginWithPasskey(deps.database, site, {
-        credentialId: b.credentialId as string,
-        clientDataJSON: b.clientDataJSON as string,
-        authenticatorData: b.authenticatorData as string,
-        signature: b.signature as string,
-        userHandle: b.userHandle as string,
-        ...(typeof b.deviceName === 'string' ? { deviceName: b.deviceName.slice(0, MAX_DEVICE_NAME) } : {}),
-      });
-      return json(result, 201);
+      try {
+        const result = await loginWithPasskey(deps.database, site, {
+          credentialId: b.credentialId as string,
+          clientDataJSON: b.clientDataJSON as string,
+          authenticatorData: b.authenticatorData as string,
+          signature: b.signature as string,
+          userHandle: b.userHandle as string,
+          ...(typeof b.deviceName === 'string' ? { deviceName: b.deviceName.slice(0, MAX_DEVICE_NAME) } : {}),
+        });
+        return json(result, 201);
+      } catch (err) {
+        await limiter.take(passkeyKey, RULES.passkeyLogin);
+        throw err;
+      }
     }
 
     // ログイン前に呼ぶ、会社アカウント（SSO）の2本。
@@ -729,7 +765,9 @@ export function createApp(deps: AppDeps) {
       return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo }));
     }
     if (url.pathname === '/auth/sso/callback' && req.method === 'GET') {
-      if (!(await limiter.take(clientKey(req, 'sso'), RULES.ssoLogin))) return tooMany();
+      // start で1回数えているので、戻りは失敗だけ数える
+      const ssoKey = clientKey(req, 'sso');
+      if (await limiter.blocked(ssoKey, RULES.ssoLogin)) return tooMany();
       const site = requireSsoSite();
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
@@ -744,6 +782,7 @@ export function createApp(deps: AppDeps) {
         const back = result.returnTo === null ? '' : `&to=${encodeURIComponent(result.returnTo)}`;
         return appRedirect(`sso=${encodeURIComponent(result.sessionToken)}${back}`);
       } catch (err) {
+        await limiter.take(ssoKey, RULES.ssoLogin);
         const detail = err instanceof Error ? err.message : String(err);
         logger.warn('sso callback failed', { requestId: id, error: detail });
         // 画面に出すのは自分で書いた案内だけ。内部の例外文（SQL の断片など）は記録にだけ残す
@@ -777,6 +816,7 @@ export function createApp(deps: AppDeps) {
         {
           actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
           limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
+          limitUser: (name, rule) => limiter.take(`${name}:user:${actor.userId}`, rule),
         },
         req,
         matched.params,

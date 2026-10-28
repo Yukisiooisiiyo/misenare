@@ -175,6 +175,20 @@ describe('時間を使わされる入力', () => {
     assert.deepEqual(result.drafts, []);
   });
 
+  it('行末に全角空白を何万個も並べても、一瞬で終わる', () => {
+    const text = `見出し\n${'　'.repeat(80_000)}x\n本文`;
+    const started = Date.now();
+    parseImport('全角空白.txt', Buffer.from(text, 'utf8'));
+    assert.ok(Date.now() - started < 2000, `${Date.now() - started}ms`);
+  });
+
+  it('閉じないセルを1行に並べた Excel でも、一瞬で終わる', () => {
+    const sheet = `<worksheet><sheetData><row r="1">${'<c '.repeat(50_000)}</row></sheetData></worksheet>`;
+    const started = Date.now();
+    parseImport('セル.xlsx', fakeZip('xl/worksheets/sheet1.xml', sheet));
+    assert.ok(Date.now() - started < 2000, `${Date.now() - started}ms`);
+  });
+
   it('Excel の列の番地が範囲外なら断る（巨大な配列を作らない）', () => {
     const sheet = '<worksheet><sheetData><row r="1"><c r="ZZZZZZZ1" t="inlineStr"><is><t>x</t></is></c></row></sheetData></worksheet>';
     assert.throws(() => parseImport('列.xlsx', fakeZip('xl/worksheets/sheet1.xml', sheet)), /読めませんでした/);

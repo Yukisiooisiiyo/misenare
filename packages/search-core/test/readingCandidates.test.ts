@@ -86,4 +86,16 @@ describe('読みの候補', () => {
   it('かなだけの語はそのまま返す', () => {
     assert.deepEqual(readingCandidates('ぽいんと'), ['ポイント']);
   });
+
+  it('訓読みの漢字を何十字も並べられても、組み合わせの爆発で止まらない', () => {
+    // 連濁・半濁・促音便の分岐は字数に対して指数で増え、20字で9秒かかっていた。
+    // タグ名は30字まで通るので、そこまで一瞬で終わること（候補は空でよい）
+    for (const n of [14, 20, 30]) {
+      const started = Date.now();
+      readingCandidates('車'.repeat(n));
+      assert.ok(Date.now() - started < 1500, `${n}字で ${Date.now() - started}ms`);
+    }
+    // ふつうの語は今までどおり当たる
+    assert.ok(readingCandidates('下取').includes('シタドリ'));
+  });
 });

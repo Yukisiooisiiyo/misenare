@@ -62,6 +62,8 @@ export interface TenantReport {
   sweptPhotos: number;
   /** 持ち越しの期間を過ぎた引き継ぎ */
   closedHandovers: number;
+  /** 捨てた古い検索の記録 */
+  sweptLogs: number;
   /** 本部に知らせを送ったか（送る必要がなければ false） */
   notifiedRequests: boolean;
 }
@@ -185,6 +187,9 @@ async function reindex(db: Db, tokenizer: Tokenizer, limit: number): Promise<num
   return ids.length;
 }
 
+/** 検索の記録を残す日数。0件検索の一覧と「もしかして」の候補は直近30日しか見ない */
+const SEARCH_LOG_DAYS = 180;
+
 /** 落ちたまま置き去りにされた鍵を奪ってよくなるまでの時間 */
 const LOCK_STALE_HOURS = 6;
 
@@ -237,6 +242,12 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
         const readingsFilled = await fillReadings(db, tokenizer);
         const sweptPhotos = options.storage ? await sweepAbandonedPhotos(db, options.storage) : 0;
         const closedHandovers = await closeStaleHandovers(db);
+        // 検索の記録は、使う窓（0件検索 30日・「もしかして」の候補 30日）より十分長く残して、あとは捨てる。
+        // 検索のたびに1行増え、捨てる口が無いと際限なく溜まる
+        const sweptLogs = (await db.query<{ id: number }>(
+          `DELETE FROM search_logs WHERE created_at < now() - make_interval(days => $1) RETURNING id`,
+          [SEARCH_LOG_DAYS],
+        )).length;
         await db.query(
           `UPDATE hashtags h SET use_count =
              (SELECT count(*) FROM knowledge_tags kt WHERE kt.hashtag_id = h.id) +
@@ -266,7 +277,7 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
             console.error(`tenant ${tenantId}: 利用の申請の知らせを送れませんでした`, err);
           }
         }
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, notifiedRequests };
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, sweptLogs, notifiedRequests };
       });
       reports.push(report);
     } catch (err) {

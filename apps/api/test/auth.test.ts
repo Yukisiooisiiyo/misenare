@@ -153,15 +153,22 @@ describe('招待と端末セッション', () => {
 });
 
 describe('試行回数の制限', () => {
-  it('招待の受け取りは、同じ接続元から10分に10回まで', async () => {
+  it('招待の受け取りは、同じ接続元からの失敗を10分に20回まで。成功は数えない（店舗の一斉登録を止めない）', async () => {
     const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
     let now = 0;
     const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter(() => now) });
-    const accept = (ip: string) => limited(new Request('http://localhost/auth/accept', {
+    const accept = (ip: string, token = `${T}.${'B'.repeat(43)}`) => limited(new Request('http://localhost/auth/accept', {
       method: 'POST', headers: { 'content-type': 'application/json', [CLIENT_IP_HEADER]: ip },
-      body: JSON.stringify({ token: `${T}.${'B'.repeat(43)}` }),
+      body: JSON.stringify({ token }),
     }));
-    for (let i = 0; i < 10; i++) assert.equal((await accept('203.0.113.1')).status, 404);
+    // 同じ回線から25人が正しい招待で入る → 全員通る
+    const hqTok = await hqSession();
+    for (let i = 0; i < 25; i++) {
+      const inv = await call(hqTok, 'POST', '/invitations', { storeId: STORE_B, name: `一斉${i}` });
+      assert.equal((await accept('203.0.113.9', inv.body.token)).status, 201, `${i + 1}人目が止められた`);
+    }
+    // 失敗は数える
+    for (let i = 0; i < 20; i++) assert.equal((await accept('203.0.113.1')).status, 404);
     assert.equal((await accept('203.0.113.1')).status, 429);
     assert.equal((await accept('203.0.113.2')).status, 404, '別の接続元は止めない');
     now += 10 * 60_000 + 1;

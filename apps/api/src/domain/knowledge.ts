@@ -392,6 +392,12 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
 export async function listVersions(db: Db, actor: Actor, id: string) {
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
+  // 一度も公開されていないもの（承認待ちの新規投稿・取り込んだ資料の下書き）は、getKnowledge と同じく
+  // 書いた本人と承認できる人だけ。ここだけ緩いと、版の一覧から本文が読めてしまう
+  if (k.status !== 'published') {
+    const mine = await maybeOne(db, `SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1 AND edited_by = $2`, [id, actor.userId]);
+    assert(mine !== undefined || canModerate(actor, k.store_id), 'forbidden', 'このナレッジはまだ公開されていません');
+  }
   return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string; decided_by: string | null; decided_at: string | null }>(
     // 承認・却下した人も出す。承認した人がその内容に責任を持つため、誰が通したかを残す
     `SELECT v.version, v.state, v.title, v.body, v.edited_at, u.name AS edited_by,

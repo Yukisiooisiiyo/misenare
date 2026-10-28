@@ -49,7 +49,7 @@ async function setup() {
   }));
   // ドメインは DNS に印を置くまで入口で使われない（なりすまし対策）。
   // ここでは置けたことにする。印そのものの試験は sso.test.ts。
-  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
+  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now() WHERE tenant_id = $1`, [T]));
 }
 
 /** 会社のアカウントで入ろうとする（登録が無いので弾かれる） */

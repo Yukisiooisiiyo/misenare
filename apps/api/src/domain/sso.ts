@@ -15,6 +15,7 @@
 // メールアドレスは変わる（結婚・異動・社名変更）が、sub は相手が変えない印。
 // 初回だけ、メールアドレスで既存の利用者を探して結びつける。
 
+import { assertStore } from './scope.ts';
 import { maybeOne, one, type Database, type Db } from '../db/db.ts';
 import { secretBoxFromEnv, type SecretBox } from '../crypto/secretBox.ts';
 import { recordRequest } from './accessRequests.ts';
@@ -347,7 +348,8 @@ async function loadProvider(db: Db, id: string): Promise<ProviderRow> {
     db,
     `SELECT p.id, p.tenant_id, p.issuer, p.client_id, p.client_secret, p.jit_enabled,
             p.default_store_id, p.default_trust, p.disabled_at::text AS disabled_at,
-            COALESCE((SELECT array_agg(d.domain) FROM sso_domains d WHERE d.provider_id = p.id), '{}') AS domains
+            -- 自動登録で「会社の人か」を見るのに使う。確かめ済みのドメインだけ（確かめるまで使えない、の意図に揃える）
+            COALESCE((SELECT array_agg(d.domain) FROM sso_domains d WHERE d.provider_id = p.id AND d.verified_at IS NOT NULL), '{}') AS domains
        FROM sso_providers p WHERE p.id = $1`,
     [id],
   );
@@ -455,6 +457,12 @@ export async function addProvider(db: Db, actor: Actor, input: ProviderInput): P
   if (input.jitEnabled) {
     assert(input.defaultStoreId != null, 'invalid', '自動登録を使うなら、配属先の店舗を決めてください');
   }
+  // 配属先は自社の店舗であること（外部キーは RLS を無視するので、他社の店舗 ID も通ってしまう）
+  if (input.defaultStoreId != null) await assertStore(db, input.defaultStoreId);
+  // 止めた設定は行を残す（結びついた人を追えるように）ので、同じ発行元・client_id で作り直すと一意制約に当たる。
+  // 500 ではなく、理由を言って断る
+  const same = await maybeOne(db, `SELECT 1 FROM sso_providers WHERE issuer = $1 AND client_id = $2`, [issuer, input.clientId.trim()]);
+  assert(same === undefined, 'conflict', 'この発行元と client_id の設定はすでにあります（止めたものを含みます）');
 
   // 内緒の鍵は、どの行のものかを検印に混ぜて包む。行の ID は作ってから決まるので、
   // いちど空で作り、ID が分かってから包んで入れる（同じ取引の中なので外からは見えない）。
@@ -475,9 +483,12 @@ export async function addProvider(db: Db, actor: Actor, input: ProviderInput): P
     );
   }
   for (const domain of domains) {
-    // ドメインは世界で1つの会社にしか割り当てられない（打ったアドレスから会社を決めるため）
+    // ドメインは世界で1つの会社にしか割り当てられない（打ったアドレスから会社を決めるため）。
+    // ただし塞ぐのは**確かめ済み**のものと、自社が既に持っているものだけ。
+    // 他社が未確認のまま置いた登録で持ち主が永久に登録できない、という形にはしない
+    // （確かめられるのは DNS に印を置ける持ち主だけなので、未確認の登録は会社ごとに持ててよい）
     const taken = await maybeOne<{ tenant_id: string }>(
-      db, `SELECT tenant_id FROM sso_domains WHERE domain = $1`, [domain],
+      db, `SELECT tenant_id FROM sso_domains WHERE domain = $1 AND (verified_at IS NOT NULL OR tenant_id = $2)`, [domain, actor.tenantId],
     );
     if (taken) throw new DomainError('conflict', `${domain} はすでに登録されています`);
     await db.query(
