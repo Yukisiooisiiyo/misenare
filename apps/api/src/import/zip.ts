@@ -2,6 +2,7 @@
 // 必要なのは「中に入っている名前を指定して中身を取り出す」だけなので、
 // 末尾の中央ディレクトリだけを読み、圧縮は zlib に任せる。ライブラリは足さない。
 
+import { ImportError } from './error.ts';
 import { inflateRawSync } from 'node:zlib';
 
 const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
@@ -26,7 +27,7 @@ function findEndOfCentralDirectory(buf: Buffer): number {
   for (let i = buf.length - 22; i >= start; i--) {
     if (buf.readUInt32LE(i) === END_OF_CENTRAL_DIRECTORY) return i;
   }
-  throw new Error('ZIP ファイルとして読めませんでした');
+  throw new ImportError('ZIP ファイルとして読めませんでした');
 }
 
 export function listZipEntries(buf: Buffer): ZipEntry[] {
@@ -37,9 +38,9 @@ export function listZipEntries(buf: Buffer): ZipEntry[] {
   // ZIP64（項目が多い・大きいとき）。直前の「ZIP64 end of central directory locator」から本体を引く
   if (count === 0xffff || directoryOffset === 0xffffffff) {
     const locator = eocd - 20;
-    if (locator < 0 || buf.readUInt32LE(locator) !== 0x07064b50) throw new Error('ZIP ファイルとして読めませんでした');
+    if (locator < 0 || buf.readUInt32LE(locator) !== 0x07064b50) throw new ImportError('ZIP ファイルとして読めませんでした');
     const zip64 = Number(buf.readBigUInt64LE(locator + 8));
-    if (buf.readUInt32LE(zip64) !== END_OF_CENTRAL_DIRECTORY_64) throw new Error('ZIP ファイルとして読めませんでした');
+    if (buf.readUInt32LE(zip64) !== END_OF_CENTRAL_DIRECTORY_64) throw new ImportError('ZIP ファイルとして読めませんでした');
     count = Number(buf.readBigUInt64LE(zip64 + 32));
     directoryOffset = Number(buf.readBigUInt64LE(zip64 + 48));
   }
@@ -47,7 +48,7 @@ export function listZipEntries(buf: Buffer): ZipEntry[] {
   const entries: ZipEntry[] = [];
   let p = directoryOffset;
   for (let i = 0; i < count; i++) {
-    if (p + 46 > buf.length || buf.readUInt32LE(p) !== CENTRAL_FILE_HEADER) throw new Error('ZIP ファイルとして読めませんでした');
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== CENTRAL_FILE_HEADER) throw new ImportError('ZIP ファイルとして読めませんでした');
     const nameLength = buf.readUInt16LE(p + 28);
     const extraLength = buf.readUInt16LE(p + 30);
     const commentLength = buf.readUInt16LE(p + 32);
@@ -69,13 +70,13 @@ export function readZipEntry(buf: Buffer, name: string): Buffer | undefined {
   if (!entry) return undefined;
 
   const local = entry.localHeaderOffset;
-  if (buf.readUInt32LE(local) !== LOCAL_FILE_HEADER) throw new Error('ZIP ファイルとして読めませんでした');
+  if (buf.readUInt32LE(local) !== LOCAL_FILE_HEADER) throw new ImportError('ZIP ファイルとして読めませんでした');
   // ローカルヘッダの名前・拡張領域の長さは中央ディレクトリと違うことがあるので、こちらを見る
   const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
   const body = buf.subarray(start, start + entry.compressedSize);
 
-  if (entry.uncompressedSize > MAX_ENTRY_BYTES) throw new Error('ファイルが大きすぎます');
+  if (entry.uncompressedSize > MAX_ENTRY_BYTES) throw new ImportError('ファイルが大きすぎます');
   if (entry.compressionMethod === 0) return Buffer.from(body);
   if (entry.compressionMethod === 8) return inflateRawSync(body, { maxOutputLength: MAX_ENTRY_BYTES });
-  throw new Error(`この ZIP の圧縮方式には対応していません（${entry.compressionMethod}）`);
+  throw new ImportError(`この ZIP の圧縮方式には対応していません（${entry.compressionMethod}）`);
 }

@@ -626,11 +626,13 @@ export async function verifyDomain(
 ): Promise<DomainCheck> {
   requireTenantAdmin(actor);
   const name = domain.trim().toLowerCase();
+  // sso_domains はログイン前に引く表なので行レベルセキュリティが無い。ここで自社に絞る。
+  // 絞らないと、他社が登録したドメインの印（verify_token）を読めて、確認日時も書き換えられる
   const row = await maybeOne<{ verify_token: string; verified_at: string | null; checked_at: string | null }>(
     db,
     `SELECT verify_token, verified_at::text AS verified_at, checked_at::text AS checked_at
-       FROM sso_domains WHERE domain = $1`,
-    [name],
+       FROM sso_domains WHERE domain = $1 AND tenant_id = $2`,
+    [name, actor.tenantId],
   );
   if (!row) throw new DomainError('not_found', `${name} は登録されていません`);
   const record = { name: `${VERIFY_PREFIX}.${name}`, type: 'TXT' as const, value: `misenare-verify=${row.verify_token}` };
@@ -639,7 +641,7 @@ export async function verifyDomain(
   if (row.checked_at !== null && Date.now() - new Date(row.checked_at).getTime() < VERIFY_COOLDOWN_MS) {
     return { domain: name, verified: false, record, detail: '少し待ってからもう一度お試しください（DNS は反映に時間がかかります）' };
   }
-  await db.query(`UPDATE sso_domains SET checked_at = now() WHERE domain = $1`, [name]);
+  await db.query(`UPDATE sso_domains SET checked_at = now() WHERE domain = $1 AND tenant_id = $2`, [name, actor.tenantId]);
 
   let records: string[][];
   try {
@@ -659,6 +661,6 @@ export async function verifyDomain(
       detail: found.length === 0 ? '印が見つかりません' : `見つかったのは別の値です（${found.slice(0, 3).join('、')}）`,
     };
   }
-  await db.query(`UPDATE sso_domains SET verified_at = now() WHERE domain = $1`, [name]);
+  await db.query(`UPDATE sso_domains SET verified_at = now() WHERE domain = $1 AND tenant_id = $2`, [name, actor.tenantId]);
   return { domain: name, verified: true, record };
 }

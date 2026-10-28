@@ -6,7 +6,7 @@
 // 書けるのは trusted 以上。お知らせは承認を待っていると意味が無くなるので、承認は挟まない。
 
 import { maybeOne, one, type Db } from '../db/db.ts';
-import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
+import { assert, canAccessStore, canAdminister, canModerate, isTrusted, type Actor } from './actor.ts';
 import { assertStore } from './scope.ts';
 
 export const MAX_TITLE = 100;
@@ -169,13 +169,21 @@ async function assertCanEdit(db: Db, actor: Actor, id: string): Promise<{ store_
   // ミセナレが自動で出した知らせは人が直せない（直しても次の投稿で書き換わる）
   assert(row.kind === 'manual', 'forbidden', 'この連絡事項はミセナレが自動で出しています');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は直せません');
-  assert(row.created_by === actor.userId || actor.adminScope !== 'none', 'forbidden', '出した人か administrator だけが直せます');
+  // 全店共通（store_id が無い）は本部だけ。出すのが本部だけなのと対にする
+  if (row.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通の連絡事項は本部のみ直せます');
+  // 店舗の連絡事項は、出した人か「その店舗の」administrator。他店の店長は直せない
+  assert(row.created_by === actor.userId || canAdminister(actor, row.store_id), 'forbidden', '出した人か administrator だけが直せます');
   return row;
 }
 
 export async function updateNotice(db: Db, actor: Actor, id: string, input: NoticeInput) {
   validate(input);
   await assertCanEdit(db, actor, id);
+  // 始まりを省いて終わりだけ送られたときは、いまの始まりと比べる（DB の CHECK で 500 にしない）
+  if (input.endsAt && !input.startsAt) {
+    const cur = await one<{ starts_at: string }>(db, `SELECT starts_at::text AS starts_at FROM notices WHERE id = $1`, [id]);
+    assert(Date.parse(input.endsAt) > Date.parse(cur.starts_at), 'invalid', '掲示の終わりは、始まりより後にしてください');
+  }
   await db.query(
     `UPDATE notices SET title = $2, body = $3, priority = $4, requires_ack = $5,
             starts_at = coalesce($6::timestamptz, starts_at), ends_at = $7::timestamptz,
@@ -192,7 +200,13 @@ export async function updateNotice(db: Db, actor: Actor, id: string, input: Noti
 /** 掲示をやめる（消さずに、今日までにする）。記録は残る */
 export async function endNotice(db: Db, actor: Actor, id: string) {
   await assertCanEdit(db, actor, id);
-  await db.query(`UPDATE notices SET ends_at = now(), updated_by = $2, updated_at = now() WHERE id = $1`, [id, actor.userId]);
+  // まだ始まっていない知らせを終えるときは、始まりを少し前に引いてから終える（CHECK: ends_at > starts_at）。
+  // 「始まる前に終わった」記録になるが、出さずに済ませたいという意図はそのまま残る
+  await db.query(
+    `UPDATE notices SET starts_at = least(starts_at, now() - interval '1 second'), ends_at = now(), updated_by = $2, updated_at = now()
+      WHERE id = $1`,
+    [id, actor.userId],
+  );
   return { id, ended: true };
 }
 
@@ -312,27 +326,21 @@ export async function syncApprovalNotice(db: Db, tenantId: string, storeId: stri
     'そのほうが、次から精度が上がります。',
   ].join('\n');
 
-  // いま出ている知らせ。題名から前の件数を読む（題名はすぐ下で組み立てているので形は決まっている）
-  const [existing] = await db.query<{ id: string; title: string }>(
-    `SELECT id, title FROM notices WHERE kind = 'approvals' AND store_id IS NOT DISTINCT FROM $1`,
-    [storeId],
+  // 1文で「無ければ作る、あれば書き換える」。SELECT してから INSERT だと、2人が同時に投稿したとき
+  // 両方が「無い」を見て INSERT し、片方が一意索引（notices_one_approvals）で落ちて投稿ごと巻き戻る。
+  // RETURNING の副問合せは文の始まりの状態を見るので、前の題名（＝前の件数）がそこから取れる
+  const [row] = await db.query<{ id: string; previous: string | null }>(
+    `INSERT INTO notices (tenant_id, store_id, title, body, priority, requires_ack, kind, audience, created_by, updated_by)
+     VALUES ($1, $2, $3, $4, 'normal', false, 'approvals', 'trusted', NULL, NULL)
+     ON CONFLICT (tenant_id, coalesce(store_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE kind = 'approvals'
+     DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, updated_at = now()
+     RETURNING id, (SELECT n.title FROM notices n WHERE n.id = notices.id) AS previous`,
+    [tenantId, storeId, title, body],
   );
-  if (existing === undefined) {
-    await db.query(
-      `INSERT INTO notices (tenant_id, store_id, title, body, priority, requires_ack, kind, audience, created_by, updated_by)
-       VALUES ($1, $2, $3, $4, 'normal', false, 'approvals', 'trusted', NULL, NULL)`,
-      [tenantId, storeId, title, body],
-    );
-    return;
-  }
-  const before = Number(/(\d+)/.exec(existing.title)?.[1] ?? 0);
-  await db.query(
-    `UPDATE notices SET title = $2, body = $3, updated_at = now() WHERE id = $1`,
-    [existing.id, title, body],
-  );
+  const before = Number(/(\d+)/.exec(row?.previous ?? '')?.[1] ?? 0);
   // 増えたときだけ未読に戻す。減ったとき（誰かが承認したとき）に戻すと、
   // 承認するたびに全員へ赤い印が付く
-  if (pending > before) {
-    await db.query(`DELETE FROM notice_reads WHERE notice_id = $1`, [existing.id]);
+  if (row && pending > before) {
+    await db.query(`DELETE FROM notice_reads WHERE notice_id = $1`, [row.id]);
   }
 }

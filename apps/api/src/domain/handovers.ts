@@ -165,6 +165,8 @@ export async function deleteHandover(db: Db, actor: Actor, id: string) {
 export async function restoreHandover(db: Db, actor: Actor, id: string) {
   const row = await load(db, id);
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この引き継ぎは戻せません');
+  // 戻せる人は消せる人と同じ。でないと、承認者が消したものを誰でも戻せてしまう
+  assert(row.created_by === actor.userId || canModerate(actor, row.store_id), 'forbidden', '書いた人か trusted 以上だけが戻せます');
   assert(row.deleted_at !== null, 'conflict', 'この引き継ぎは消されていません');
   await db.query(`UPDATE handovers SET deleted_at = NULL, deleted_by = NULL WHERE id = $1`, [id]);
   await record(db, actor, id, 'restored');

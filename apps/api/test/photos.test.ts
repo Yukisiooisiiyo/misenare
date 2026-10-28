@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createKnowledge, approveVersion } from '../src/domain/knowledge.ts';
+import { createKnowledge, approveVersion, editKnowledge } from '../src/domain/knowledge.ts';
 import {
   deletePhoto,
   finishPhotoUpload,
@@ -16,7 +16,7 @@ import {
 } from '../src/domain/photos.ts';
 import { LocalStorage, S3Storage, storageFromEnv } from '../src/storage/storage.ts';
 import { presignS3, signingKey, uriEncode } from '../src/storage/s3.ts';
-import { freshDatabase, manager, storeBStaff, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
+import { freshDatabase, hq, manager, storeBStaff, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 import type { Actor } from '../src/domain/actor.ts';
 
@@ -127,6 +127,22 @@ describe('写真', () => {
     });
   });
 
+  it('写真を足せるのは本文を直せる人だけ。visitor は公開済みのナレッジに勝手に付けられない', async () => {
+    const id = await published('写真は承認者が付ける');
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(
+        startPhotoUpload(q, storage, otherVisitor, id, { contentType: 'image/jpeg', bytes: 8 }), /trusted 以上か/,
+      );
+    });
+    // 全店共通のナレッジは本部だけ。店舗の trusted でも足せない
+    const shared = await db.withTenant(T, async (q) => (await createKnowledge(q, tokenizer, hq, { storeId: null, title: '全店', body: '本文', tagNames: ['#写真'] })).id);
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(startPhotoUpload(q, storage, trusted, shared, { contentType: 'image/jpeg', bytes: 8 }), /本部のみ/);
+      await assert.rejects(startPhotoUpload(q, storage, storeBStaff, shared, { contentType: 'image/jpeg', bytes: 8 }), /本部のみ/);
+    });
+    await upload(shared, hq);
+  });
+
   it('未公開のナレッジの写真は、書いた人と承認できる人だけが見られる', async () => {
     const id = await db.withTenant(T, async (q) => {
       const k = await createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '承認待ち', body: '本文', tagNames: ['#写真'] });
@@ -149,6 +165,8 @@ describe('写真', () => {
 
   it('消せるのは付けた本人と承認できる人だけで、中身も消える', async () => {
     const id = await published('消す練習');
+    // visitor は修正案を出している間だけ写真を足せる
+    await db.withTenant(T, (q) => editKnowledge(q, tokenizer, visitor, id, { title: '消す練習', body: '写真を足したい', tagNames: ['#写真'] }));
     const mine = await upload(id, visitor);
     const others = await upload(id, trusted);
     await db.withTenant(T, async (q) => {

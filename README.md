@@ -275,7 +275,7 @@ docker run -d -p 8787:8787 -e DATABASE_URL=… -e TRUST_PROXY=1 misenare
 
 ## テストと CI
 
-- `npm test`：検索コアの単体テストと、本物の PostgreSQL に対する API テスト（約145件）
+- `npm test`：検索コアの単体テストと、本物の PostgreSQL に対する API テスト（430件超）
 - CI（GitHub Actions）
   - `test`：psql アダプタと本番と同じ pg ドライバーの両方で、型チェック・Web 版のビルド・テスト
   - `qr`：作った QR コードを別実装の読み取り器（jsQR・ZXing）に読ませて、本当に読めるか確かめる
@@ -285,4 +285,6 @@ docker run -d -p 8787:8787 -e DATABASE_URL=… -e TRUST_PROXY=1 misenare
 
 ## まだ無いもの
 
-- パスキー、チェーン向けの SSO
+- 全店共通のナレッジを現場から提案する経路（いまは本部だけが作れる）
+- ナレッジの有効期限を画面から設定する欄（API では受け付ける）
+- 本部が全店をまたいで一度に引く検索（検索は「自店舗＋全店共通」の範囲）

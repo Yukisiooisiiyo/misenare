@@ -12,7 +12,7 @@ import {
 } from '../src/domain/sso.ts';
 import { generateKey, isSealed } from '../src/crypto/secretBox.ts';
 import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
-import { freshDatabase, hq, manager, STORE_A, T, trusted } from './helpers.ts';
+import { freshDatabase, hq, manager, OTHER_T, otherTenant, STORE_A, T, trusted } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -535,6 +535,23 @@ describe('ドメインの持ち主であることを確かめる', () => {
     const missing = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp', async () => []));
     assert.equal(missing.verified, false);
     assert.ok(missing.detail?.includes('見つかりません'), missing.detail ?? '');
+    await clean();
+  });
+
+  it('他社が登録したドメインは、確かめることも印を見ることもできない', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    const [row] = await db.withTenant(T, (q) => q.query<{ verify_token: string }>(
+      `SELECT verify_token FROM sso_domains WHERE domain = $1`, ['kdenki.example.co.jp']));
+    // 他社の本部管理者が、自社の登録済みドメインを確かめようとする
+    await assert.rejects(
+      db.withTenant(OTHER_T, (q) => verifyDomain(q, otherTenant, 'kdenki.example.co.jp', async () => [[`misenare-verify=${row!.verify_token}`]])),
+      /登録されていません/,
+    );
+    const [after] = await db.withTenant(T, (q) => q.query<{ verified_at: string | null; checked_at: string | null }>(
+      `SELECT verified_at::text AS verified_at, checked_at::text AS checked_at FROM sso_domains WHERE domain = $1`, ['kdenki.example.co.jp']));
+    assert.equal(after!.verified_at, null, '他社の操作で確かめ済みになっている');
+    assert.equal(after!.checked_at, null, '他社の操作で確認日時が書き換わっている');
     await clean();
   });
 

@@ -20,8 +20,10 @@ export function migrate(url: string, log: (msg: string) => void = () => {}): str
   for (const f of files) {
     if (applied.has(f)) continue;
     log(`applying ${f}`);
-    psql(url, ['-f', `${MIGRATIONS_DIR}${f}`]);
-    psql(url, ['-c', `INSERT INTO schema_migrations (name) VALUES ('${f.replace(/'/g, "''")}')`]);
+    // ファイルの適用と「適用した」の記録を、同じ接続・同じトランザクション（-1）で行う。
+    // 別々にすると、途中で失敗したとき ADD COLUMN だけが残って記録が無く、
+    // やり直しが「column already exists」で止まる（BEGIN/COMMIT を書き忘れたファイルがあった）
+    psql(url, ['-1', '-f', `${MIGRATIONS_DIR}${f}`, '-c', `INSERT INTO schema_migrations (name) VALUES ('${f.replace(/'/g, "''")}')`]);
     done.push(f);
   }
   return done;

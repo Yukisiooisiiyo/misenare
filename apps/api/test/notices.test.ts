@@ -106,6 +106,17 @@ describe('連絡事項', () => {
     });
   });
 
+  it('まだ始まっていない知らせも終えられる（DB の制約で落ちない）', async () => {
+    const tomorrow = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const { id } = await run((q) => createNotice(q, manager, STORE_A, { title: '取りやめ', body: '本文', startsAt: tomorrow }));
+    await run(async (q) => {
+      await endNotice(q, manager, id);
+      assert.ok(!(await listNotices(q, visitor, STORE_A)).some((n) => n.id === id));
+      // 終わりだけを過去にする更新も、500 ではなく断る
+      await assert.rejects(updateNotice(q, manager, id, { title: '取りやめ', body: '本文', endsAt: new Date(Date.now() - 7 * 24 * 3600_000).toISOString() }), /後にしてください/);
+    });
+  });
+
   it('先の日付で出すと、その日まで出ない', async () => {
     const tomorrow = new Date(Date.now() + 24 * 3600_000).toISOString();
     const { id } = await run((q) => createNotice(q, manager, STORE_A, {

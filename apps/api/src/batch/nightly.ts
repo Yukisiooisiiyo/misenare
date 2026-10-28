@@ -185,7 +185,41 @@ async function reindex(db: Db, tokenizer: Tokenizer, limit: number): Promise<num
   return ids.length;
 }
 
+/** 落ちたまま置き去りにされた鍵を奪ってよくなるまでの時間 */
+const LOCK_STALE_HOURS = 6;
+
+/**
+ * 夜間バッチの鍵を取る。取れなければ false（別の1本が動いている）。
+ * 行で持つのは、接続プールを挟むと advisory lock の取った接続と離す接続が違ってしまうため
+ */
+async function acquireLock(database: Database): Promise<boolean> {
+  const rows = await database.raw(
+    `INSERT INTO batch_locks (name, locked_at) VALUES ('nightly', now())
+     ON CONFLICT (name) DO UPDATE SET locked_at = now()
+       WHERE batch_locks.locked_at < now() - make_interval(hours => $1)
+     RETURNING name`,
+    [LOCK_STALE_HOURS],
+  );
+  return rows.length === 1;
+}
+
+async function releaseLock(database: Database): Promise<void> {
+  await database.raw(`DELETE FROM batch_locks WHERE name = 'nightly'`).catch((err) => console.error('夜間バッチの鍵を返せませんでした', err));
+}
+
 export async function runNightly(database: Database, tokenizer: Tokenizer, options: BatchOptions = {}): Promise<TenantReport[]> {
+  if (!(await acquireLock(database))) {
+    console.error('夜間バッチは別の1本が動いています。今回はやめます');
+    return [];
+  }
+  try {
+    return await runNightlyLocked(database, tokenizer, options);
+  } finally {
+    await releaseLock(database);
+  }
+}
+
+async function runNightlyLocked(database: Database, tokenizer: Tokenizer, options: BatchOptions): Promise<TenantReport[]> {
   // 会社に属さない片付け（試行回数の記録）は、会社ごとの処理の前に1回だけ
   await sweepRateLimits((sql, params) => database.raw(sql, params)).catch((err) => console.error('rate_limits の片付けに失敗', err));
   await sweepChallenges((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの合言葉の片付けに失敗', err));

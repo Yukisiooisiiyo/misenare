@@ -10,6 +10,7 @@
 // 出てくるのは下書きなので、公開するかどうかは人が決める。
 // タグは付けない（本文から機械的に拾うと的外れなタグが増えるため）。書いた人が承認時に付ける。
 
+import { ImportError } from './error.ts';
 import { readZipEntry } from './zip.ts';
 import { readDocument } from './pdfObjects.ts';
 import { extractPdfText, isEncrypted, UNREADABLE } from './pdfText.ts';
@@ -57,7 +58,9 @@ function normalizeText(buf: Buffer): string {
 }
 
 function tidy(s: string): string {
-  return s.replace(/[ \t　]+$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  // 行末の空白は正規表現（`[ \t　]+$`）で消さない。「空白の連続＋空白でない字」の行で
+  // 連続の長さの2乗の時間になり、8万個の空白で20秒かかった。trimEnd は行の長さに比例する
+  return s.split('\n').map((line) => line.replace(/[　]+$/, '').trimEnd()).join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function cut(s: string, max: number): string {
@@ -202,11 +205,10 @@ function xmlText(xml: string): string {
 
 export function draftsFromDocx(buf: Buffer, source: string): Draft[] {
   const xml = readZipEntry(buf, 'word/document.xml');
-  if (!xml) throw new Error('Word ファイルとして読めませんでした');
+  if (!xml) throw new ImportError('Word ファイルとして読めませんでした');
   const document = xml.toString('utf8');
   const lines: string[] = [];
-  for (const match of document.matchAll(/<w:p[ >][\s\S]*?<\/w:p>|<w:p\/>/g)) {
-    const paragraph = match[0];
+  for (const paragraph of paragraphsOf(document)) {
     const text = xmlText(paragraph.replace(/<w:pPr>[\s\S]*?<\/w:pPr>/g, '')).trim();
     // Word の見出しスタイル（Heading1、見出し 1 など）は Markdown の # に置き換えて、同じ区切り方にする
     const style = /<w:pStyle\s+w:val="([^"]+)"/.exec(paragraph)?.[1] ?? '';
@@ -225,6 +227,44 @@ function sharedStrings(buf: Buffer): string[] {
   return [...xml.toString('utf8').matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => xmlText(m[1]!));
 }
 
+/**
+ * Word の XML から段落（<w:p …>…</w:p> と <w:p/>）を順に取り出す。
+ * 正規表現の `[\s\S]*?` でやると、閉じタグの無い `<w:p ` が続く入力で2乗の時間になるので、indexOf で歩く。
+ */
+function* paragraphsOf(document: string): Generator<string> {
+  yield* elementsOf(document, 'w:p');
+}
+
+/**
+ * `<tag …>…</tag>` と `<tag …/>` を順に取り出す（入れ子は考えない。Word の段落と Excel の行はどちらも入れ子にならない）。
+ * 正規表現の `[\s\S]*?` は、閉じタグの無い開きタグが続く入力で2乗の時間になるので使わない。
+ */
+function* elementsOf(xml: string, tag: string): Generator<string> {
+  const open = `<${tag}`;
+  const close = `</${tag}>`;
+  let at = 0;
+  for (;;) {
+    const start = xml.indexOf(open, at);
+    if (start < 0) return;
+    const after = xml[start + open.length];
+    if (after !== ' ' && after !== '>' && after !== '/') { at = start + open.length; continue; } // <w:pPr> などは別の名前
+    const gt = xml.indexOf('>', start);
+    if (gt < 0) return;
+    if (xml[gt - 1] === '/') { // <tag …/>
+      yield xml.slice(start, gt + 1);
+      at = gt + 1;
+      continue;
+    }
+    const end = xml.indexOf(close, gt);
+    if (end < 0) return;
+    yield xml.slice(start, end + close.length);
+    at = end + close.length;
+  }
+}
+
+/** Excel の列の上限（XFD）。番地から出した列番号がこれを超えるなら壊れた資料 */
+const MAX_COLUMNS = 16384;
+
 /** セルの番地（A1、BC12）から列番号（0始まり）を出す */
 function columnOf(ref: string): number {
   const letters = /^([A-Z]+)/.exec(ref)?.[1] ?? 'A';
@@ -237,15 +277,16 @@ export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
   const strings = sharedStrings(buf);
   // 1枚目のシートだけを見る
   const sheet = readZipEntry(buf, 'xl/worksheets/sheet1.xml');
-  if (!sheet) throw new Error('Excel ファイルとして読めませんでした');
+  if (!sheet) throw new ImportError('Excel ファイルとして読めませんでした');
   const xml = sheet.toString('utf8');
   const rows: string[][] = [];
-  for (const rowMatch of xml.matchAll(/<row[ >][\s\S]*?<\/row>|<row[^>]*\/>/g)) {
+  for (const rowXml of elementsOf(xml, 'row')) {
     const row: string[] = [];
-    for (const cell of rowMatch[0].matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g)) {
+    for (const cell of rowXml.matchAll(/<c\b([^>]*)>([\s\S]*?)<\/c>|<c\b([^>]*)\/>/g)) {
       const attrs = cell[1] ?? cell[3] ?? '';
       const inner = cell[2] ?? '';
       const index = columnOf(/r="([A-Z]+\d+)"/.exec(attrs)?.[1] ?? 'A1');
+      if (index >= MAX_COLUMNS) throw new ImportError('Excel ファイルとして読めませんでした（列の番地が範囲外です）');
       const type = /t="([^"]+)"/.exec(attrs)?.[1];
       const raw = /<v>([\s\S]*?)<\/v>/.exec(inner)?.[1] ?? '';
       let value: string;
@@ -335,7 +376,7 @@ export function draftsFromPdf(buf: Buffer, source: string): ParseResult {
 
 export function parseImport(fileName: string, buf: Buffer): ParseResult {
   const format = formatOf(fileName);
-  if (!format) throw new Error('取り込めるのは .txt .md .csv .tsv .docx .xlsx .pdf です');
+  if (!format) throw new ImportError('取り込めるのは .txt .md .csv .tsv .docx .xlsx .pdf です');
   const result: ParseResult = (() => {
     switch (format) {
       case 'pdf': return draftsFromPdf(buf, fileName);

@@ -473,7 +473,11 @@ async function renderKnowledge(id: string): Promise<void> {
   } catch (e) {
     return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
-  const photos = photoSection(k.id, true);
+  // 写真を足せるのは本文を直せる人と同じ：全店共通は本部、店舗は trusted 以上か、修正案を出している本人
+  const canAttach = k.storeId === null
+    ? me?.adminScope === 'tenant'
+    : isTrusted() || k.pendingEdits.some((p) => p.mine);
+  const photos = photoSection(k.id, canAttach);
   // 確認できるのは trusted 以上。押したところだけを描き直す（写真や読んでいた位置を保つため）
   const canVerify = isTrusted() && k.status === 'published';
   const freshBox = h('div');
@@ -623,7 +627,8 @@ function renderWrite(existing: Knowledge | null): void {
     message.hidden = true;
     if (tagField.value.trim()) addTag(tagField.value);
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; tagField.focus(); return; }
-    const payload = { title: title.value, body: body.value, tagNames: tags };
+    // 開いたときの版を添える。開いたあとに別の人が直していたら、サーバーが止めて教えてくれる
+    const payload = { title: title.value, body: body.value, tagNames: tags, ...(existing ? { baseVersion: existing.version } : {}) };
     try {
       type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing
@@ -856,14 +861,24 @@ function inviteForm(): HTMLElement {
 function printQr(who: string, svg: string): void {
   const w = window.open('', '_blank', 'width=480,height=640');
   if (!w) { toast('印刷用の画面を開けませんでした。ブラウザの設定を確かめてください。'); return; }
-  w.document.write(
-    `<!doctype html><html lang="ja"><head><meta charset="utf-8"><title>${who}さんの招待</title>`
-    + '<style>body{font-family:system-ui,sans-serif;text-align:center;padding:24px}'
-    + 'svg{width:min(80vw,320px);height:auto}p{font-size:14px;color:#333}</style></head><body>'
-    + `<h1>${who}さん</h1>${svg}`
-    + '<p>スマホのカメラで読み取ってください（1回限り・72時間有効）</p></body></html>',
-  );
-  w.document.close();
+  // 名前は HTML に埋めず、DOM として組み立てる（文字列連結だと名前に書いたタグがそのまま動く）
+  const d = w.document;
+  d.open();
+  d.write('<!doctype html><html lang="ja"><head><meta charset="utf-8"></head><body></body></html>');
+  d.close();
+  const title = d.createElement('title');
+  title.textContent = `${who}さんの招待`;
+  const style = d.createElement('style');
+  style.textContent = 'body{font-family:system-ui,sans-serif;text-align:center;padding:24px}'
+    + 'svg{width:min(80vw,320px);height:auto}p{font-size:14px;color:#333}';
+  d.head.append(title, style);
+  const h1 = d.createElement('h1');
+  h1.textContent = `${who}さん`;
+  const qr = d.createElement('div');
+  qr.innerHTML = svg; // 自分で作った SVG（packages/qr）。利用者の入力は <title> でエスケープ済み
+  const p = d.createElement('p');
+  p.textContent = 'スマホのカメラで読み取ってください（1回限り・72時間有効）';
+  d.body.append(h1, qr, p);
   w.focus();
   w.print();
 }

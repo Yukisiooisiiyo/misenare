@@ -75,7 +75,15 @@ describe('タグの関係', () => {
 describe('タグの統合', () => {
   it('administrator だけが統合でき、統合元のナレッジは統合先のタグで検索される', async () => {
     await rejects(run((q) => mergeTags(q, tokenizer, trusted, '長期保障', '長期保証')), 'forbidden');
+    // 統合したいタグは、たいてい先に同義として登録されている。その関係があっても統合できること
+    // （付け替えを先にやると into→into の関係になって CHECK で落ち、統合が 500 になっていた）
+    await run((q) => proposeRelation(q, trusted, { kind: 'synonym', fromTag: '長期保障', toTag: '長期保証' }));
+    await run((q) => proposeRelation(q, trusted, { kind: 'includes', fromTag: '長期保障', toTag: 'レジ' }));
+    await run((q) => proposeRelation(q, trusted, { kind: 'includes', fromTag: '長期保証', toTag: 'レジ' }));
     const r = await run((q) => mergeTags(q, tokenizer, manager, '長期保障', '長期保証'));
+    const left = await run((q) => q.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM tag_relations WHERE from_tag_id = to_tag_id`));
+    assert.equal(left[0]!.n, 0);
     assert.equal(r.reindexed, 1);
     assert.ok(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#長期保証'))).includes(typoId));
   });

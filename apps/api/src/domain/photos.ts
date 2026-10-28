@@ -11,13 +11,15 @@
 import { randomUUID } from 'node:crypto';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import type { Storage } from '../storage/storage.ts';
-import { assert, canAccessStore, canModerate, type Actor } from './actor.ts';
+import { assert, canAccessStore, canModerate, DomainError, type Actor } from './actor.ts';
 
 /** 端末で縮小してから送らせる。縮小後にこれを超えるものは受け取らない */
 export const MAX_PHOTO_BYTES = 3 * 1024 * 1024;
 export const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 /** 1つのナレッジに付けられる枚数 */
 export const MAX_PHOTOS = 8;
+/** 写真の説明の長さ */
+const MAX_CAPTION = 200;
 
 const EXTENSION: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
 
@@ -97,6 +99,26 @@ async function assertCanRead(db: Db, actor: Actor, knowledgeId: string): Promise
   return k;
 }
 
+/**
+ * 写真を足せるか。本文を直せる人と同じにする：
+ *   全店共通 … 本部だけ
+ *   店舗     … その店舗の trusted 以上。visitor は自分の案（承認待ちの版）がある間だけ
+ * 「読める＝足せる」にすると、駅前店の visitor が本部のナレッジに好きな画像を付けられ、承認も通らずに全員に見える
+ */
+async function assertCanAttach(db: Db, actor: Actor, knowledgeId: string): Promise<{ store_id: string | null }> {
+  const k = await assertCanRead(db, actor, knowledgeId);
+  if (k.store_id === null) {
+    assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジに写真を足せるのは本部のみです');
+    return k;
+  }
+  if (canModerate(actor, k.store_id)) return k;
+  const mine = await maybeOne(
+    db, `SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending'`, [knowledgeId, actor.userId],
+  );
+  assert(mine !== undefined, 'forbidden', '写真を足せるのは trusted 以上か、修正案を出している本人です');
+  return k;
+}
+
 async function loadPhoto(db: Db, photoId: string): Promise<PhotoRow> {
   const row = await maybeOne<PhotoRow>(
     db,
@@ -125,11 +147,12 @@ export async function startPhotoUpload(
   db: Db, storage: Storage, actor: Actor, knowledgeId: string,
   input: { contentType: string; bytes: number },
 ): Promise<UploadPlan> {
-  await assertCanRead(db, actor, knowledgeId);
+  await assertCanAttach(db, actor, knowledgeId);
   assert((ALLOWED_TYPES as readonly string[]).includes(input.contentType), 'invalid', '写真は JPEG・PNG・WebP で送ってください');
   assert(Number.isInteger(input.bytes) && input.bytes > 0 && input.bytes <= MAX_PHOTO_BYTES, 'invalid', '写真が大きすぎます');
+  // 送りかけ（uploading）も数える。でないと枠だけ無限に作れる（掃除されるまでの24時間）
   const count = await one<{ n: number }>(
-    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1 AND state = 'active'`, [knowledgeId],
+    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1`, [knowledgeId],
   );
   assert(count.n < MAX_PHOTOS, 'conflict', `写真は${MAX_PHOTOS}枚までです`);
 
@@ -168,12 +191,23 @@ export async function receivePhoto(db: Db, storage: Storage, actor: Actor, photo
 export async function finishPhotoUpload(db: Db, storage: Storage, actor: Actor, photoId: string, caption?: string | null): Promise<PhotoView> {
   const p = await loadPhoto(db, photoId);
   assert(p.created_by === actor.userId, 'forbidden', 'この写真は登録できません');
+  assert(p.state === 'uploading', 'conflict', 'この写真はもう登録されています');
+  assert((caption ?? '').length <= MAX_CAPTION, 'invalid', `説明は${MAX_CAPTION}文字以内にしてください`);
+  // 「送り終わった」の申告だけを信じない。中身が無いまま一覧に出すと、開いた人が 500 を見る。
+  // S3 では中身がサーバーを通らないので、大きさもここで初めて分かる
+  const stored = await storage.head(p.storage_key);
+  assert(stored !== null, 'conflict', '写真の中身がまだ届いていません。先に送ってください');
+  if (stored.bytes > MAX_PHOTO_BYTES) {
+    await storage.remove(p.storage_key).catch(() => undefined);
+    await db.query(`DELETE FROM knowledge_photos WHERE id = $1`, [photoId]);
+    throw new DomainError('invalid', '写真が大きすぎます');
+  }
   const row = await one<{ created_at: string }>(
     db,
-    `UPDATE knowledge_photos SET state = 'active', caption = $2 WHERE id = $1 RETURNING created_at::text AS created_at`,
-    [photoId, caption ?? null],
+    `UPDATE knowledge_photos SET state = 'active', caption = $2, bytes = $3 WHERE id = $1 RETURNING created_at::text AS created_at`,
+    [photoId, caption ?? null, stored.bytes],
   );
-  return view({ ...p, state: 'active', caption: caption ?? null, created_at: row.created_at }, storage, null);
+  return view({ ...p, state: 'active', caption: caption ?? null, bytes: stored.bytes, created_at: row.created_at }, storage, null);
 }
 
 function view(p: PhotoRow, storage: Storage, createdBy: string | null): PhotoView {

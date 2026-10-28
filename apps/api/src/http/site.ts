@@ -40,9 +40,15 @@ export function staticFiles(dir: string) {
   const rootDir = normalize(dir).replace(/[\\/]+$/, '');
   return async (pathname: string): Promise<Response> => {
     const rel = pathname.replace(/^\/app\/?/, '') || 'index.html';
-    const file = normalize(join(rootDir, decodeURIComponent(rel)));
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rel);
+    } catch {
+      return new Response('Not Found', { status: 404, headers: SECURITY_HEADERS }); // 壊れた %
+    }
+    const file = normalize(join(rootDir, decoded));
     // ディレクトリの外は読ませない
-    if (file !== rootDir && !file.startsWith(rootDir + sep)) return new Response('Not Found', { status: 404 });
+    if (file !== rootDir && !file.startsWith(rootDir + sep)) return new Response('Not Found', { status: 404, headers: SECURITY_HEADERS });
     try {
       const st = await stat(file);
       if (!st.isFile()) throw new Error('not a file');

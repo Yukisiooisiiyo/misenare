@@ -92,6 +92,32 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(newbieToken, 'POST', '/invitations', { storeId: STORE_A, name: 'x' })).status, 403);
   });
 
+  it('既存の人への招待（端末の追加）は、その人になりすませる鍵。店長は本部や店長の鍵を作れない', async () => {
+    // 本部の人が店舗に所属していても（兼務）、店長はその人の鍵を作れない。
+    // 作れると、返ってきたトークンを自分で受け取って本部になれる
+    await db.withTenant(T, (q) => q.query(
+      `INSERT INTO memberships (tenant_id, user_id, store_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, [T, hq.userId, STORE_A],
+    ));
+    const up = await call(managerToken, 'POST', '/invitations', { storeId: STORE_A, userId: hq.userId });
+    assert.equal(up.status, 403, '店長が本部の鍵を作れている');
+    // 自店舗の一般スタッフの端末追加はできる（機種変更）
+    const ok = await call(managerToken, 'POST', '/invitations', { storeId: STORE_A, userId: newbieId });
+    assert.equal(ok.status, 201);
+    const again = await call(null, 'POST', '/auth/accept', { token: ok.body.token, deviceName: '新しいスマホ' });
+    assert.equal(again.body.userId, newbieId);
+    await db.withTenant(T, (q) => q.query(`DELETE FROM sessions WHERE device_name = '新しいスマホ'`)); // 後の端末数の確認に影響させない
+    // 他店舗の人の鍵は作れない
+    const other = await call(hqToken, 'POST', '/invitations', { storeId: STORE_B, name: '駅前の人' });
+    const otherAccepted = await call(null, 'POST', '/auth/accept', { token: other.body.token });
+    assert.equal((await call(managerToken, 'POST', '/invitations', { storeId: STORE_A, userId: otherAccepted.body.userId })).status, 403);
+    // 店長同士でもだめ（本部だけが店長の端末を追加できる）
+    const manager2 = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: '副店長', trustLevel: 'trusted', adminScope: 'store' });
+    const m2 = await call(null, 'POST', '/auth/accept', { token: manager2.body.token });
+    assert.equal((await call(managerToken, 'POST', '/invitations', { storeId: STORE_A, userId: m2.body.userId })).status, 403);
+    assert.equal((await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, userId: m2.body.userId })).status, 201);
+    await db.withTenant(T, (q) => q.query(`DELETE FROM memberships WHERE user_id = $1 AND store_id = $2`, [hq.userId, STORE_A]));
+  });
+
   it('他社のトークンでは自社のデータに触れない', async () => {
     const forged = `${OTHER_T}.${newbieToken.split('.')[1]}`;
     assert.equal((await call(forged, 'GET', '/me')).status, 401);
@@ -142,13 +168,16 @@ describe('試行回数の制限', () => {
     assert.equal((await accept('203.0.113.1')).status, 404, '時間がたてば戻る');
   });
 
-  it('無効なトークンが30回続いた接続元は、正しいトークンでも一時的に止める', async () => {
+  it('無効なトークンが30回続いた接続元は、無効なトークンを止める。正しいトークンの人は通す', async () => {
+    // 店舗のスマホは同じ回線（同じ接続元）から来る。誰かの古い端末が切れたトークンで
+    // 鳴き続けただけで、店舗の全員が締め出されてはいけない
     const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
     const limited = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter() });
     const me = (ip: string, token: string) => limited(new Request('http://localhost/me', { headers: { authorization: `Bearer ${token}`, [CLIENT_IP_HEADER]: ip } }));
     for (let i = 0; i < 30; i++) assert.equal((await me('198.51.100.7', `${T}.${'C'.repeat(43)}`)).status, 401);
+    assert.equal((await me('198.51.100.7', `${T}.${'C'.repeat(43)}`)).status, 429, '無効なトークンは止まる');
     const good = await hqSession();
-    assert.equal((await me('198.51.100.7', good)).status, 429);
+    assert.equal((await me('198.51.100.7', good)).status, 200, '同じ回線の正しいトークンまで止めている');
     assert.equal((await me('198.51.100.8', good)).status, 200);
   });
 });

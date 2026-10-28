@@ -142,15 +142,30 @@ export async function mergeTags(db: Db, tokenizer: Tokenizer, actor: Actor, from
     [fromId, intoId],
   );
   await db.query(`DELETE FROM product_tags WHERE hashtag_id = $1`, [fromId]);
-  // 関係を付け替える。自分自身への関係になるものと、重複するものは消す
-  await db.query(`UPDATE tag_relations SET from_tag_id = $2 WHERE from_tag_id = $1`, [fromId, intoId]);
-  await db.query(`UPDATE tag_relations SET to_tag_id = $2 WHERE to_tag_id = $1`, [fromId, intoId]);
-  await db.query(`DELETE FROM tag_relations WHERE from_tag_id = to_tag_id`);
+  // 関係を付け替える。**付け替える前に**、自分自身への関係になるものと、付け替え先に既にあるものを消す。
+  // UPDATE を先にやると、from↔into の同義（統合したいタグはたいてい同義として登録されている）が
+  // into→into になった瞬間に CHECK（from_tag_id <> to_tag_id）で落ち、統合そのものが失敗していた
+  await db.query(
+    `DELETE FROM tag_relations
+      WHERE (from_tag_id = $1 AND to_tag_id = $2) OR (from_tag_id = $2 AND to_tag_id = $1)`,
+    [fromId, intoId],
+  );
+  // from 側の関係のうち、into 側に同じ種類・同じ相手の関係が既にあるものは、付け替えると重複するので消す
   await db.query(
     `DELETE FROM tag_relations a USING tag_relations b
-      WHERE a.id > b.id AND a.kind = b.kind AND a.kind <> 'alias'
-        AND a.from_tag_id = b.from_tag_id AND a.to_tag_id = b.to_tag_id`,
+      WHERE a.kind = b.kind AND a.kind <> 'alias'
+        AND ((a.from_tag_id = $1 AND b.from_tag_id = $2 AND a.to_tag_id = b.to_tag_id)
+          OR (a.to_tag_id = $1 AND b.to_tag_id = $2 AND a.from_tag_id = b.from_tag_id))`,
+    [fromId, intoId],
   );
+  // 別名も同じ：同じ単語が into を指す行が既にあれば、from を指す方を消す
+  await db.query(
+    `DELETE FROM tag_relations a USING tag_relations b
+      WHERE a.kind = 'alias' AND b.kind = 'alias' AND a.to_tag_id = $1 AND b.to_tag_id = $2 AND a.from_text = b.from_text`,
+    [fromId, intoId],
+  );
+  await db.query(`UPDATE tag_relations SET from_tag_id = $2 WHERE from_tag_id = $1`, [fromId, intoId]);
+  await db.query(`UPDATE tag_relations SET to_tag_id = $2 WHERE to_tag_id = $1`, [fromId, intoId]);
   // 統合元のタグ名は、別名として残す（「#長期保障」と打っても「#長期保証」に読み替える）
   const fromTag = await one<{ name: string }>(db, `SELECT name FROM hashtags WHERE id = $1`, [fromId]);
   await db.query(

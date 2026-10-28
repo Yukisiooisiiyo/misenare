@@ -8,6 +8,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import type { Db } from '../src/db/db.ts';
+import { DomainError } from '../src/domain/actor.ts';
 import { listNotices, markRead, noticeBadge, updateNotice } from '../src/domain/notices.ts';
 import { approveVersion, createKnowledge, editKnowledge, getKnowledge, listVersions } from '../src/domain/knowledge.ts';
 import { freshDatabase, hq, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
@@ -263,5 +264,34 @@ describe('同じナレッジを2人が同時に直したとき', () => {
     assert.equal(seenByOther.some((v) => v.version === a.version), false);
     const seenByAuthor = await run((q) => listVersions(q, visitor, k.id));
     assert.equal(seenByAuthor.some((v) => v.version === a.version), true);
+  });
+
+  it('trusted 同士でも、開いたあとに別の人が公開していたら止める（画面が見ていた版を添える）', async () => {
+    // trusted の編集は承認を通らずその場で公開されるので、承認時の検査では守れない。
+    // 画面が「開いたときの版」を添えて送り、サーバーがいまの版と比べる
+    await clean();
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, {
+      storeId: STORE_A, title: '返品の受付', body: 'レシートを確認する。', tagNames: ['#返品'],
+    }));
+    const opened = (await run((q) => getKnowledge(q, trusted, k.id))).version; // 2人とも v1 を開いた
+    // B（店長）が先に直して公開
+    await run((q) => editKnowledge(q, tokenizer, manager, k.id, {
+      title: '返品の受付', body: 'レシートを確認する。開封済みは店長に相談。', tagNames: ['#返品'], baseVersion: opened,
+    }));
+    // A（trusted）が v1 を見たまま送る → 止まる。B の修正は消えない
+    await assert.rejects(
+      run((q) => editKnowledge(q, tokenizer, trusted, k.id, {
+        title: '返品の受付', body: 'レシートを確認する。14日以内。', tagNames: ['#返品'], baseVersion: opened,
+      })),
+      (e: unknown) => e instanceof DomainError && e.code === 'conflict',
+    );
+    const now = await run((q) => getKnowledge(q, trusted, k.id));
+    assert.ok(now.body.includes('店長に相談'), 'B の修正が消えている');
+    // いまの版を見てから送れば通る
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, {
+      title: '返品の受付', body: now.body + ' 14日以内。', tagNames: ['#返品'], baseVersion: now.version,
+    }));
+    // 版を添えない（古い端末）ときは止めない
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '返品の受付', body: '古い端末から。', tagNames: ['#返品'] }));
   });
 });
