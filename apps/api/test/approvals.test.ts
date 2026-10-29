@@ -216,6 +216,19 @@ describe('同じナレッジを2人が同時に直したとき', () => {
     return { k, a, b };
   }
 
+  it('同じ人が同じナレッジを続けて直すと、その人の案は最新の1つだけ残る。他の人の案は残る', async () => {
+    const { k, b } = await twoProposals();
+    const c = await run((q) => editKnowledge(q, tokenizer, visitor, k.id, {
+      title: '搬入の手順', body: '玄関の幅を測る。エレベーターの寸法と、台車の有無も確かめる。', tagNames: ['#搬入'],
+    }));
+    const pending = await run((q) => q.query<{ version: number; edited_by: string }>(
+      `SELECT version, edited_by FROM knowledge_versions WHERE knowledge_id = $1 AND state = 'pending' ORDER BY version`, [k.id]));
+    assert.deepEqual(pending.map((p) => p.version), [b.version, c.version]);
+    assert.deepEqual(pending.map((p) => p.edited_by), [visitor2.userId, visitor.userId]);
+    const view = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.equal(view.pendingEdits.length, 2);
+  });
+
   it('お互いの案が見える（誰の案かも分かる）', async () => {
     const { k } = await twoProposals();
     // 書いた本人から見ても、相手の案が見える

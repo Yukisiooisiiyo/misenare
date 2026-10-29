@@ -648,6 +648,8 @@ export interface AppDeps {
   alerts?: Alerts;
   /** 相手の IdP とのやり取り（試験では偽の IdP を差し込む） */
   oidc?: OidcDirectory;
+  /** 上限の差し替え（試験で回数を小さくするため。本番では指定しない） */
+  userWriteRule?: RateRule;
 }
 
 export function createApp(deps: AppDeps) {
@@ -810,6 +812,11 @@ export function createApp(deps: AppDeps) {
     }
     const actor = await loadActor(deps.database, identity);
     if (!actor) throw new HttpError(401, 'この利用者は無効です');
+
+    // 書き込みは利用者ごとに共通の上限を掛ける。個々の経路で回数の穴を塞ぐのではなく、ここ1か所で止める
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      if (!(await limiter.take(`write:user:${actor.userId}`, deps.userWriteRule ?? RULES.userWrite))) return tooMany();
+    }
 
     return await deps.database.withTenant(actor.tenantId, (db) =>
       matched.handler(

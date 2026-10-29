@@ -175,6 +175,39 @@ describe('試行回数の制限', () => {
     assert.equal((await accept('203.0.113.1')).status, 404, '時間がたてば戻る');
   });
 
+  it('認証後の書き込みは、利用者ごとに上限がある。別の利用者と GET は止めない', async () => {
+    // 本番は10分で300回。試験では回数を小さくして、同じ数え方で確かめる
+    const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    const limited = createApp({
+      database: db, auth: new SessionAuthenticator(db), tokenizer,
+      limiter: new MemoryRateLimiter(), userWriteRule: { limit: 5, windowMs: 10 * 60_000 },
+    });
+    // 同じ接続元から来る（店舗の回線）。鍵は利用者なので巻き添えにならないはず
+    const as = async (token: string, method: string, path: string, body?: unknown) => {
+      const res = await limited(new Request(`http://localhost${path}`, {
+        method, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, [CLIENT_IP_HEADER]: '203.0.113.50' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }));
+      await res.text();
+      return res.status;
+    };
+    const hqTok = await hqSession();
+    // 招待を1回（書き込み1回目）。受け取りはログイン前なので数えない
+    const inv = await call(hqTok, 'POST', '/invitations', { storeId: STORE_B, name: '上限の試験' });
+    const accepted = await limited(new Request('http://localhost/auth/accept', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inv.body.token }),
+    }));
+    const other = (await accepted.json() as { sessionToken: string }).sessionToken;
+    assert.equal(await as(hqTok, 'POST', '/invitations', { storeId: STORE_B, name: '1' }), 201);
+    for (let i = 0; i < 4; i++) assert.equal(await as(hqTok, 'POST', `/stores/${STORE_B}/handovers`, { body: `引き継ぎ${i}` }), 201, `${i + 1}回目が止められた`);
+    assert.equal(await as(hqTok, 'POST', `/stores/${STORE_B}/handovers`, { body: 'あふれた分' }), 429);
+    // パスキー登録の開始（POST）も共通の上限の対象
+    assert.equal(await as(hqTok, 'POST', '/passkeys/register/start', {}), 429);
+    assert.equal(await as(hqTok, 'GET', '/me'), 200, 'GET は何回でも通る');
+    for (let i = 0; i < 10; i++) assert.equal(await as(hqTok, 'GET', `/stores/${STORE_B}/handovers`), 200);
+    assert.equal(await as(other, 'POST', `/stores/${STORE_B}/handovers`, { body: '別の人' }), 201, '別の利用者は止めない');
+  });
+
   it('無効なトークンが30回続いた接続元は、無効なトークンを止める。正しいトークンの人は通す', async () => {
     // 店舗のスマホは同じ回線（同じ接続元）から来る。誰かの古い端末が切れたトークンで
     // 鳴き続けただけで、店舗の全員が締め出されてはいけない

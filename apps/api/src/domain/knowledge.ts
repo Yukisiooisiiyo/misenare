@@ -239,6 +239,12 @@ export async function editKnowledge(
   await assertAreas(db, k.store_id, input.areaIds);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const version = await nextVersion(db, id);
+  // 同じ人の案は最新の1つだけ残す。直すたびに積まれると承認者が同じ人の案を何本も見ることになり、
+  // 本人も最新がどれか分からなくなる。閉じるのは本人の案だけで、他人の案は触らない
+  await db.query(
+    `UPDATE knowledge_versions SET state = 'superseded' WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending'`,
+    [id, actor.userId],
+  );
   // 期限を指定しなければ今の期限を引き継ぐ。どちらの場合も公開（承認）されるまで効かない
   await insertVersion(db, actor, id, version, {
     title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [],

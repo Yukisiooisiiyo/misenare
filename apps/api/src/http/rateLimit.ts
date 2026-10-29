@@ -145,6 +145,12 @@ export const RULES = {
    * 鍵は利用者なので、店舗の回線で誰かの巻き添えにはならない。
    */
   heavyRead: { limit: 120, windowMs: 60_000 },
+  /**
+   * 認証後の書き込み（GET・HEAD 以外）すべてに掛かる、利用者ごとの上限：10分で300回まで。
+   * 人が操作できる速さをはるかに超える連打だけを止める。
+   * 鍵が利用者なので店舗の回線で巻き添えにならない。
+   */
+  userWrite: { limit: 300, windowMs: 10 * 60_000 },
 } satisfies Record<string, RateRule>;
 
 /** node:http のアダプタが付ける、接続元の IP のヘッダー（外から来た同名のヘッダーは上書きする） */
