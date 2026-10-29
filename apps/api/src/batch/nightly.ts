@@ -15,6 +15,7 @@
 import { suggestReading, type Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
+import { invalidateDictionary } from '../domain/tags.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
 import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
@@ -238,6 +239,8 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
     // 会社ごとに別のトランザクション。1社の失敗が他社の処理を止めないようにする
     try {
       const report = await database.withTenant(tenantId, async (db) => {
+        // 辞書のキャッシュは別プロセスの書き換えを TTL でしか拾えない。バッチは最新の辞書で索引したいので、最初に捨てる
+        invalidateDictionary(tenantId);
         const expired = await expireKnowledge(db, tokenizer);
         const fromLogs = await candidatesFromPickedLogs(db, tenantId, options.pickedThreshold ?? 3, options.logDays ?? 30);
         const fromProviders = await candidatesFromProviders(db, tenantId, options.candidateProviders ?? []);

@@ -8,7 +8,7 @@ import { hiraToKata, normalizeTagName, normalizeText, readingCandidates, suggest
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, isTrusted, type Actor } from './actor.ts';
 import { indexKnowledge } from './indexer.ts';
-import { canonicalTagIds, refreshUseCounts } from './tags.ts';
+import { canonicalTagIds, invalidateDictionary, refreshUseCounts } from './tags.ts';
 
 export type RelationKind = 'synonym' | 'includes' | 'alias';
 export interface RelationState { id: string; state: 'candidate' | 'approved' | 'rejected' }
@@ -55,10 +55,13 @@ export async function proposeRelation(db: Db, actor: Actor, input: RelationInput
       db, `SELECT id, state FROM tag_relations WHERE kind = 'alias' AND from_text = $1 AND to_tag_id = $2`, [text, toId],
     );
     if (existing) return decideIfTrusted(db, actor, existing.id, existing.state);
-    return one<RelationState>(db,
+    const created = await one<RelationState>(db,
       `INSERT INTO tag_relations (tenant_id, kind, from_text, to_tag_id, state, source, evidence, approved_by)
        VALUES ($1, 'alias', $2, $3, $4, 'manual', 1, $5) RETURNING id, state`,
       [actor.tenantId, text, toId, approved ? 'approved' : 'candidate', approved ? actor.userId : null]);
+    // 承認済みで入った関係は辞書に載るので、覚えてある辞書を捨てる（候補のままなら辞書は変わらない）
+    if (created.state === 'approved') invalidateDictionary(actor.tenantId);
+    return created;
   }
 
   assert(input.fromTag !== undefined, 'invalid', '起点のタグを指定してください');
@@ -77,10 +80,12 @@ export async function proposeRelation(db: Db, actor: Actor, input: RelationInput
     [fromId, toId],
   );
   if (existing) return decideIfTrusted(db, actor, existing.id, existing.state);
-  return one<RelationState>(db,
+  const created = await one<RelationState>(db,
     `INSERT INTO tag_relations (tenant_id, kind, from_tag_id, to_tag_id, state, source, evidence, approved_by)
      VALUES ($1, $2, $3, $4, $5, 'manual', 1, $6) RETURNING id, state`,
     [actor.tenantId, input.kind, fromId, toId, approved ? 'approved' : 'candidate', approved ? actor.userId : null]);
+  if (created.state === 'approved') invalidateDictionary(actor.tenantId);
+  return created;
 }
 
 async function decideIfTrusted(db: Db, actor: Actor, id: string, state: string): Promise<RelationState> {
@@ -98,15 +103,19 @@ export async function decideRelation(db: Db, actor: Actor, id: string, decision:
   if (decision === 'approved' && r.kind === 'includes') {
     assert(!(await wouldCycle(db, r.from_tag_id!, r.to_tag_id)), 'conflict', '包含関係が循環してしまいます');
   }
-  return one<RelationState>(db,
+  const decided = await one<RelationState>(db,
     `UPDATE tag_relations SET state = $2, approved_by = $3 WHERE id = $1 RETURNING id, state`,
     [id, decision, actor.userId]);
+  // 承認すれば辞書に入り、却下すれば（承認済みだったものは）辞書から外れる
+  invalidateDictionary(actor.tenantId);
+  return decided;
 }
 
 export async function deleteRelation(db: Db, actor: Actor, id: string) {
   assert(isTrusted(actor), 'forbidden', 'タグの関係を削除できるのは trusted 以上です');
   const rows = await db.query(`DELETE FROM tag_relations WHERE id = $1 RETURNING id`, [id]);
   assert(rows.length === 1, 'not_found', '関係が見つかりません');
+  invalidateDictionary(actor.tenantId);
 }
 
 export async function listRelations(db: Db, actor: Actor, state: 'candidate' | 'approved' | 'rejected') {
@@ -174,6 +183,8 @@ export async function mergeTags(db: Db, tokenizer: Tokenizer, actor: Actor, from
      ON CONFLICT DO NOTHING`,
     [actor.tenantId, fromTag.name, intoId, actor.userId],
   );
+  // 統合元は辞書から消え、関係も付け替わった。次の索引し直しが古い辞書を引かないよう、その前に捨てる
+  invalidateDictionary(actor.tenantId);
   // 統合元が付いていたナレッジを索引し直す（索引は統合先のタグで作られる）
   const affected = await db.query<{ knowledge_id: string }>(`SELECT knowledge_id FROM knowledge_tags WHERE hashtag_id = $1`, [fromId]);
   for (const { knowledge_id } of affected) await indexKnowledge(db, tokenizer, knowledge_id);
@@ -277,5 +288,7 @@ export async function confirmReading(
     [tagId, cleaned, actor.userId],
   );
   assert(rows.length === 1, 'not_found', 'タグが見つかりません');
+  // 読みは辞書の別名として検索に効くので、確定したらすぐ反映する
+  invalidateDictionary(actor.tenantId);
   return { id: tagId, readings: cleaned };
 }

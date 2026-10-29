@@ -8,7 +8,7 @@ import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './ac
 import { indexKnowledge } from './indexer.ts';
 import { assertStore } from './scope.ts';
 import { syncApprovalNotice } from './notices.ts';
-import { activateTags, resolveTags } from './tags.ts';
+import { activateTags, invalidateDictionary, resolveTags } from './tags.ts';
 
 export interface KnowledgeInput {
   /** null なら全店共通（本部のみ作成可） */
@@ -200,10 +200,12 @@ async function pendingReadings(db: Db, tokenizer: Tokenizer, tagIds: readonly st
     // バッチが置いた案があればそれを使い、無ければいま作る
     const suggestion = r.reading_proposed === null ? suggestReading(tokenizer, r.name) : null;
     if (suggestion?.kind === 'settled') {
-      await db.query(
-        `UPDATE hashtags SET readings = ARRAY[$2], reading_checked_at = now() WHERE id = $1`,
+      const set = await db.query<{ tenant_id: string }>(
+        `UPDATE hashtags SET readings = ARRAY[$2], reading_checked_at = now() WHERE id = $1 RETURNING tenant_id`,
         [r.id, suggestion.reading],
       );
+      // 読みは辞書の別名になるので、覚えてある辞書を捨てる
+      for (const t of set) invalidateDictionary(t.tenant_id);
       continue; // 尋ねない
     }
     const proposed = r.reading_proposed ?? (suggestion?.kind === 'proposal' ? suggestion.reading : '');

@@ -13,8 +13,37 @@ import { assert, canAccessStore, isTrusted, type Actor } from './actor.ts';
 
 interface TagRow { id: string; name: string; readings: string[]; use_count: number; state: string }
 
-/** 検索・候補表示に使う辞書。active なタグと approved な関係だけを含む。 */
-export async function loadDictionary(db: Db): Promise<TagDictionary> {
+// 辞書のプロセス内キャッシュ。
+// 検索のたびに hashtags の active 全件と tag_relations の approved 全件を読んで作り直すと、
+// タグが増えるほど検索が遅くなる（5,000件で 15ms → 45ms）。辞書は書き換わることが少ないので覚えておく。
+// 1台・単一プロセスなので、プロセス内で持てばよい。台を増やすときはここを外に出す
+// （他の台の書き換えが見えなくなるので、共有のキャッシュか、版番号の確認が要る）。
+const DICTIONARY_TTL_MS = 30_000;
+interface CachedDictionary { dictionary: TagDictionary; builtAt: number }
+const dictionaryCache = new Map<string, CachedDictionary>();
+// 作っている最中に書き換えが入ったら、その結果は古いので覚えない（invalidate のたびに進める）
+const dictionaryGeneration = new Map<string, number>();
+
+/** そのテナントの辞書を捨てる。タグや関係を書き換えたら、その最後で呼ぶ。 */
+export function invalidateDictionary(tenantId: string): void {
+  dictionaryCache.delete(tenantId);
+  dictionaryGeneration.set(tenantId, (dictionaryGeneration.get(tenantId) ?? 0) + 1);
+}
+
+/** 全テナントの辞書を捨てる。スキーマごと作り直すテスト用。 */
+export function clearDictionaryCache(): void {
+  dictionaryCache.clear();
+  dictionaryGeneration.clear();
+}
+
+/**
+ * 検索・候補表示に使う辞書。active なタグと approved な関係だけを含む。
+ * 同じテナントは 30 秒は作り直さない。別プロセスの夜間バッチが読みを埋めた分は、この期限で拾う。
+ */
+export async function loadDictionary(db: Db, tenantId: string): Promise<TagDictionary> {
+  const hit = dictionaryCache.get(tenantId);
+  if (hit && Date.now() - hit.builtAt < DICTIONARY_TTL_MS) return hit.dictionary;
+  const generation = dictionaryGeneration.get(tenantId) ?? 0;
   const tags = await db.query<TagRow>(
     `SELECT id, name, readings, use_count, state FROM hashtags WHERE state = 'active'`,
   );
@@ -27,7 +56,9 @@ export async function loadDictionary(db: Db): Promise<TagDictionary> {
       ? { kind: 'alias', fromText: r.from_text!, toTagId: r.to_tag_id }
       : { kind: r.kind, fromTagId: r.from_tag_id!, toTagId: r.to_tag_id },
   );
-  return new TagDictionary(entries, relations);
+  const dictionary = new TagDictionary(entries, relations);
+  if ((dictionaryGeneration.get(tenantId) ?? 0) === generation) dictionaryCache.set(tenantId, { dictionary, builtAt: Date.now() });
+  return dictionary;
 }
 
 /**
@@ -38,28 +69,38 @@ export async function loadDictionary(db: Db): Promise<TagDictionary> {
 export async function resolveTags(db: Db, actor: Actor, names: string[]): Promise<string[]> {
   const normalized = [...new Set(names.map(normalizeTagName).filter((n) => n.length > 0))];
   assert(normalized.every((n) => [...n].length <= 30), 'invalid', 'タグは30文字以内にしてください');
+  // 名前の解決は1本にまとめる（タグ数ぶん発行していた）。統合先への置き換えも全 id を1回で引く
+  const found = normalized.length === 0
+    ? []
+    : await db.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE name = ANY($1::text[])`, [normalized]);
+  const idByName = new Map(found.map((r) => [r.name, r.id]));
+  const canonical = await canonicalTagMap(db, [...idByName.values()]);
   const ids: string[] = [];
+  let created = false;
   for (const name of normalized) {
-    const existing = await db.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = $1`, [name]);
-    const row = existing[0];
-    if (row) {
-      ids.push(...(await canonicalTagIds(db, [row.id])));
+    const existingId = idByName.get(name);
+    if (existingId !== undefined) {
+      const target = canonical.get(existingId);
+      if (target !== undefined) ids.push(target);
       continue;
     }
     // 確認と挿入の間に同じ名前が入ると UNIQUE 違反で 500 になるので、衝突したら入った方を引き直す
-    const created = await db.query<{ id: string }>(
+    const inserted = await db.query<{ id: string }>(
       `INSERT INTO hashtags (tenant_id, name, state, created_by)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (tenant_id, name) DO NOTHING RETURNING id`,
       [actor.tenantId, name, isTrusted(actor) ? 'active' : 'pending', actor.userId],
     );
-    if (created[0]) {
-      ids.push(created[0].id);
+    if (inserted[0]) {
+      ids.push(inserted[0].id);
+      created = true;
       continue;
     }
     const raced = await db.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = $1`, [name]);
     ids.push(...(await canonicalTagIds(db, [raced[0]!.id])));
   }
+  // 新しいタグは辞書に載るので、覚えてある辞書は捨てる（この後の索引づくりが新しいタグを引けるように）
+  if (created) invalidateDictionary(actor.tenantId);
   return [...new Set(ids)];
 }
 
@@ -68,7 +109,13 @@ export async function resolveTags(db: Db, actor: Actor, names: string[]): Promis
  * 循環していても止まるよう、たどるのは最大10段まで。
  */
 export async function canonicalTagIds(db: Db, tagIds: string[]): Promise<string[]> {
-  if (tagIds.length === 0) return [];
+  const map = await canonicalTagMap(db, tagIds);
+  return [...new Set(tagIds.flatMap((id) => (map.has(id) ? [map.get(id)!] : [])))];
+}
+
+/** 各 id の統合先を、再帰 CTE 1本でまとめて引く（id → 統合先。存在しない id は入らない）。 */
+async function canonicalTagMap(db: Db, tagIds: string[]): Promise<Map<string, string>> {
+  if (tagIds.length === 0) return new Map();
   const rows = await db.query<{ id: string; target: string }>(
     `WITH RECURSIVE chain(start, id, merged_into, depth) AS (
        SELECT h.id, h.id, h.merged_into, 0 FROM hashtags h WHERE h.id = ANY($1::uuid[])
@@ -80,8 +127,7 @@ export async function canonicalTagIds(db: Db, tagIds: string[]): Promise<string[
      SELECT DISTINCT ON (start) start AS id, id AS target FROM chain ORDER BY start, depth DESC`,
     [tagIds],
   );
-  const map = new Map(rows.map((r) => [r.id, r.target]));
-  return [...new Set(tagIds.flatMap((id) => (map.has(id) ? [map.get(id)!] : [])))];
+  return new Map(rows.map((r) => [r.id, r.target]));
 }
 
 /** タグの使用回数（ナレッジ＋商品）を数え直す。 */
@@ -99,7 +145,12 @@ export async function refreshUseCounts(db: Db, tagIds: string[]): Promise<void> 
 /** 承認待ちのタグを有効にする（ナレッジや商品の承認と一緒に行う）。 */
 export async function activateTags(db: Db, tagIds: string[]): Promise<void> {
   if (tagIds.length === 0) return;
-  await db.query(`UPDATE hashtags SET state = 'active' WHERE id = ANY($1::uuid[]) AND state = 'pending'`, [tagIds]);
+  const rows = await db.query<{ tenant_id: string }>(
+    `UPDATE hashtags SET state = 'active' WHERE id = ANY($1::uuid[]) AND state = 'pending' RETURNING tenant_id`,
+    [tagIds],
+  );
+  // active になったタグは辞書に入る。テナントは RETURNING から取る（引数に持たず、SQL も増やさない）
+  for (const t of new Set(rows.map((r) => r.tenant_id))) invalidateDictionary(t);
 }
 
 /**

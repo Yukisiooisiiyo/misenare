@@ -70,7 +70,7 @@ async function card(db: Db, productId: string, storeId: string): Promise<Product
  *   1. その商品に直接紐づいたナレッジ（最上位）
  *   2. 商品のタグ・商品名・メーカーを検索語にした BM25F の結果（同義・包含の展開込み）
  */
-async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, product: ProductCard, limit = 10) {
+async function relatedKnowledge(db: Db, tokenizer: Tokenizer, tenantId: string, storeId: string, product: ProductCard, limit = 10) {
   const linked = await db.query<{ id: string }>(
     `SELECT k.id FROM knowledge_products kp JOIN knowledge k ON k.id = kp.knowledge_id
       WHERE kp.product_id = $1 AND k.status = 'published'
@@ -81,7 +81,7 @@ async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, p
   );
   const linkedHits = await describeHits(db, linked.map((l) => ({ id: l.id, score: 0, matchedTerms: [] })));
 
-  const dictionary = await loadDictionary(db);
+  const dictionary = await loadDictionary(db, tenantId);
   // search() と同じ上限。保存された文字列がそのまま解析に流れるので、ここでも切る
   const queryText = [...product.tags.map((t) => `#${t}`), product.name, product.maker ?? ''].join(' ').slice(0, 200);
   const { groups } = analyzeQuery(queryText, { tokenizer, dictionary });
@@ -110,7 +110,7 @@ export async function scanBarcode(db: Db, tokenizer: Tokenizer, actor: Actor, st
     return { status: 'unknown', janCode };
   }
   const product = await card(db, p.id, storeId);
-  return { status: 'found', product, related: await relatedKnowledge(db, tokenizer, storeId, product) };
+  return { status: 'found', product, related: await relatedKnowledge(db, tokenizer, actor.tenantId, storeId, product) };
 }
 
 export interface ProductInput {
