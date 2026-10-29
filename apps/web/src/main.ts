@@ -1,8 +1,8 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
 // 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
 
-import { api, ApiError, fetchDictionary, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
-import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
+import { api, ApiError, fetchDictionary, onUnauthorized, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
+import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
@@ -45,6 +45,9 @@ async function boot(): Promise<void> {
     }
     return renderFatal(e);
   }
+  // 起動後に別の要求が 401 を受けたら（端末が無効にされた・セッションが切れた）、ここで招待画面へ戻す。
+  // 起動時の /me は上の catch が自分で扱うので、/me が通ってから登録する
+  onUnauthorized(backToWelcome);
   if (me.stores.length === 0) return renderFatal(new Error('所属している店舗がありません。店長に確認してください。'));
   if (!session.storeId || !me.stores.some((s) => s.id === session.storeId)) session.storeId = me.stores[0]!.id;
   // 辞書と数は互いに待つ必要が無いので、同時に取る（どちらも失敗を中で受けるので、片方の失敗で止まらない）。
@@ -54,11 +57,26 @@ async function boot(): Promise<void> {
   route();
 }
 
+/** 401 を受けたときの戻り方。起動時の /me と同じく、トークンを捨てて招待画面へ */
+function backToWelcome(): void {
+  session.token = null;
+  // hashchange で route() が走っても、古い画面を描き直さないようにする
+  me = null;
+  badges = null;
+  location.hash = '';
+  renderWelcome('セッションが切れました。もう一度登録してください');
+}
+
+/** 辞書の取得の世代。店舗を続けて切り替えたとき、遅れて届いた古い店舗の辞書で上書きしない */
+let dictSeq = 0;
+
 async function loadDictionary(): Promise<void> {
+  const mine = ++dictSeq;
   try {
-    dict = new LocalDictionary(await fetchDictionary(session.storeId!));
+    const d = new LocalDictionary(await fetchDictionary(session.storeId!));
+    if (mine === dictSeq) dict = d;
   } catch {
-    dict = null; // 辞書が取れなくても検索と投稿はできる（候補が出ないだけ）
+    if (mine === dictSeq) dict = null; // 辞書が取れなくても検索と投稿はできる（候補が出ないだけ）
   }
 }
 
@@ -68,7 +86,12 @@ const isAdmin = () => me !== null && me.adminScope !== 'none';
 
 // --- 招待の受け取り ------------------------------------------------------------
 
+/** 招待の受け取り中。コードの貼り付け・QR・リンクのどこから来ても、同時に1回だけ走らせる */
+let accepting = false;
+
 async function acceptInvite(token: string): Promise<void> {
+  if (accepting) return;
+  accepting = true;
   shell(null, h('section', { class: 'page center' }, h('p', {}, '端末を登録しています…')));
   try {
     const deviceName = navigator.userAgent.includes('iPhone') ? 'iPhone' : navigator.userAgent.includes('Android') ? 'Android' : 'ブラウザ';
@@ -78,6 +101,8 @@ async function acceptInvite(token: string): Promise<void> {
     await boot();
   } catch (e) {
     renderWelcome(e instanceof Error ? e.message : String(e));
+  } finally {
+    accepting = false;
   }
 }
 
@@ -116,16 +141,25 @@ function renderWelcome(error?: string): void {
   // 登録が無いドメインなら、その場で招待の案内に戻す。
   const email = h('input', { id: 'sso-email', type: 'email', autocomplete: 'username',
     placeholder: 'you@example.co.jp', inputmode: 'email' });
+  // 相手の画面へ移り始めたあとは、戻ってくるまで押し直させない（action の finally はボタンを戻してしまう）
+  let leaving = false;
   const company = action('会社のアカウントで入る', 'secondary', async () => {
+    if (leaving) return;
     problem.hidden = true;
     const value = email.value.trim();
     if (value === '') { problem.textContent = '会社のメールアドレスを入れてください。'; problem.hidden = false; return; }
+    email.disabled = true;
     try {
       const r = await api<{ authorizeUrl: string }>('POST', '/auth/sso/start', { email: value });
+      leaving = true;
+      // 「戻る」で戻ってきたとき（ページが丸ごと復元される）は、もう一度押せるようにする
+      window.addEventListener('pageshow', () => { leaving = false; }, { once: true });
       location.href = r.authorizeUrl;
     } catch (e) {
       problem.textContent = e instanceof Error ? e.message : String(e);
       problem.hidden = false;
+    } finally {
+      email.disabled = false;
     }
   });
 
@@ -158,7 +192,7 @@ function renderFatal(e: unknown): void {
 // パスキーの管理は、店長だけでなく**全員**が使う。端末を替えたときに自分で
 // 入り直せるようにするのが目的なので、承認・管理（trusted 以上）には置かない。
 
-async function renderDevice(): Promise<void> {
+async function renderDevice(stale: () => boolean): Promise<void> {
   const section = h('section', { class: 'page' },
     h('h1', {}, 'この端末の設定'),
     h('p', { class: 'hint' }, `いまお使いの端末：${guessDeviceName()}`),
@@ -174,9 +208,11 @@ async function renderDevice(): Promise<void> {
     try {
       rows = await listPasskeys();
     } catch (e) {
+      if (stale()) return;
       list.append(h('p', { class: 'hint' }, e instanceof Error ? e.message : String(e)));
       return;
     }
+    if (stale()) return;
     list.append(...countedList('登録したパスキー', rows, (row, remove) =>
       h('li', { class: 'row' },
         h('span', {}, row.name ?? '名前なし'),
@@ -223,6 +259,9 @@ type Tab = 'home' | 'notices' | 'search' | 'write';
 /** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
 let disposeView: (() => void) | null = null;
 
+/** 店舗の切り替えの世代 */
+let storeSwitchSeq = 0;
+
 function shell(tab: Tab | null, ...content: Node[]): void {
   disposeView?.();
   disposeView = null;
@@ -231,8 +270,11 @@ function shell(tab: Tab | null, ...content: Node[]): void {
   const header = me ? h('header', { class: 'topbar' },
     me.stores.length > 1
       ? h('select', { class: 'store-select', 'aria-label': '店舗', onchange: async (e: Event) => {
+          // 続けて切り替えたら、最後に選んだ店舗の辞書で描く（先の切り替えは途中で手を引く）
+          const mine = ++storeSwitchSeq;
           session.storeId = (e.target as HTMLSelectElement).value;
           await loadDictionary();
+          if (mine !== storeSwitchSeq) return;
           route();
         } }, ...me.stores.map((s) => h('option', { value: s.id, ...(s.id === session.storeId ? { selected: true } : {}) }, s.name)))
       : h('span', { class: 'store-name' }, store?.name ?? ''),
@@ -287,11 +329,16 @@ async function refreshBadges(maxAgeMs = 0): Promise<void> {
   if (!me || !session.storeId) return;
   // 店舗を切り替えた直後は、新しい店舗の数を取る（古い店舗の数を5秒使い回さない）
   if (badges && badgesStore === storeId() && Date.now() - badgesAt < maxAgeMs) return;
+  // await の間に店舗が切り替わっても、取った数を別の店舗のものとして入れない
+  const sid = storeId();
   try {
-    badges = await api<Badges>('GET', `/stores/${storeId()}/badges`);
+    const got = await api<Badges>('GET', `/stores/${sid}/badges`);
+    if (sid !== session.storeId) return;
+    badges = got;
     badgesAt = Date.now();
-    badgesStore = storeId();
+    badgesStore = sid;
   } catch {
+    if (sid !== session.storeId) return;
     badges = null;
   }
   const tab = document.querySelector('.tabbar a[href="#/notices"]');
@@ -304,7 +351,17 @@ async function refreshBadges(maxAgeMs = 0): Promise<void> {
 
 // --- ルーティング ---------------------------------------------------------------
 
+/**
+ * 画面の世代。非同期で描く画面は、await のあとで世代が進んでいたら（先に別の画面へ移っていたら）
+ * 何もしない。遅れて届いた応答が、いま見ている画面を上書きするのを防ぐ。
+ */
+let routeGen = 0;
+
 function route(): void {
+  // 401 で招待画面へ戻したあとに残ったイベントでは、画面を描かない
+  if (!me) return;
+  const gen = ++routeGen;
+  const stale = () => gen !== routeGen;
   const hash = location.hash || '#/home';
   const [path, query] = hash.slice(1).split('?') as [string, string | undefined];
   const params = new URLSearchParams(query ?? '');
@@ -312,12 +369,12 @@ function route(): void {
   const edit = /^\/edit\/([0-9a-f-]{36})$/.exec(path);
   if (path === '/search') return void renderSearch(params.get('q') ?? '');
   if (path === '/write') return renderWrite(null);
-  if (edit) return void loadAndEdit(edit[1]!);
-  if (k) return void renderKnowledge(k[1]!);
-  if (path === '/scan') return renderScan(params.get('jan') ?? '');
+  if (edit) return void loadAndEdit(edit[1]!, stale);
+  if (k) return void renderKnowledge(k[1]!, stale);
+  if (path === '/scan') return renderScan(params.get('jan') ?? '', stale);
   if (path === '/notices') return void renderNoticesTab();
-  if (path === '/manage') return void renderManage();
-  if (path === '/device') return void renderDevice();
+  if (path === '/manage') return void renderManage(stale);
+  if (path === '/device') return void renderDevice(stale);
   return void renderHome();
 }
 
@@ -477,13 +534,15 @@ function hitList(hits: Hit[], logId?: number): HTMLElement {
 
 // --- ナレッジの詳細 ---------------------------------------------------------------
 
-async function renderKnowledge(id: string): Promise<void> {
+async function renderKnowledge(id: string, stale: () => boolean): Promise<void> {
   let k: Knowledge;
   try {
     k = await api<Knowledge>('GET', `/knowledge/${id}`);
   } catch (e) {
+    if (stale()) return;
     return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
+  if (stale()) return; // 応答を待つ間に別の画面へ移っていたら、遅れて届いた詳細で上書きしない
   // 写真を足せるのは本文を直せる人と同じ：全店共通は本部、店舗は trusted 以上か、修正案を出している本人
   const canAttach = k.storeId === null
     ? me?.adminScope === 'tenant'
@@ -579,19 +638,67 @@ function freshnessDetail(k: Knowledge, onVerify?: () => Promise<void>): HTMLElem
 
 // --- 書く（投稿・編集） ------------------------------------------------------------
 
-async function loadAndEdit(id: string): Promise<void> {
+async function loadAndEdit(id: string, stale: () => boolean): Promise<void> {
   try {
-    renderWrite(await api<Knowledge>('GET', `/knowledge/${id}`));
+    const existing = await api<Knowledge>('GET', `/knowledge/${id}`);
+    if (stale()) return;
+    renderWrite(existing);
   } catch (e) {
+    if (stale()) return;
     renderFatal(e);
   }
 }
 
+/**
+ * 書きかけの保存。売場では接客で呼ばれて画面を離れたり、ブラウザがタブを捨てたりする。
+ * タブを閉じれば消える sessionStorage に置く（端末に長く残したくない／共用端末で他の人に見せない）。
+ * 使えない環境（プライベートモードなど）では、保存も復元も黙って諦める。
+ */
+interface Draft { title: string; body: string; tags: string[] }
+
+function draftStore(): Storage | null {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function readDraft(key: string): Draft | null {
+  try {
+    const raw = draftStore()?.getItem(key);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Partial<Draft>;
+    if (typeof d.title !== 'string' || typeof d.body !== 'string' || !Array.isArray(d.tags)) return null;
+    return { title: d.title, body: d.body, tags: d.tags.filter((t): t is string => typeof t === 'string') };
+  } catch {
+    return null;
+  }
+}
+
+function writeDraft(key: string, d: Draft | null): void {
+  try {
+    if (d) draftStore()?.setItem(key, JSON.stringify(d));
+    else draftStore()?.removeItem(key);
+  } catch {
+    // 保存できなくても書く操作は止めない
+  }
+}
+
 function renderWrite(existing: Knowledge | null): void {
-  const tags: string[] = existing ? [...existing.tags] : [];
-  const title = h('input', { id: 'title', type: 'text', maxlength: 100, value: existing?.title ?? '', placeholder: '例：冷蔵庫のリサイクル料金', required: true });
+  const draftKey = `misenare.draft.${existing?.id ?? 'new'}`;
+  const initial: Draft = { title: existing?.title ?? '', body: existing?.body ?? '', tags: existing ? [...existing.tags] : [] };
+  // 開いたときの内容と同じなら戻すものは無い（編集を開いただけの保存は残さない）
+  const saved = readDraft(draftKey);
+  const draft = saved && JSON.stringify(saved) !== JSON.stringify(initial) ? saved : null;
+  const tags: string[] = draft ? [...draft.tags] : [...initial.tags];
+  const title = h('input', { id: 'title', type: 'text', maxlength: 100, value: draft?.title ?? initial.title, placeholder: '例：冷蔵庫のリサイクル料金', required: true });
   const body = h('textarea', { id: 'body', rows: 8, placeholder: '手順や注意点。お客様への伝え方なども' });
-  body.value = existing?.body ?? '';
+  body.value = draft?.body ?? initial.body;
+  const keepDraft = () => {
+    const now: Draft = { title: title.value, body: body.value, tags: [...tags] };
+    writeDraft(draftKey, JSON.stringify(now) === JSON.stringify(initial) ? null : now);
+  };
   const tagField = h('input', { id: 'tag', type: 'text', placeholder: '#を付けずに入力してもOK', autocomplete: 'off', enterkeyhint: 'done' });
   const tagList = h('div', { class: 'tag-row' });
   const suggest = h('div', { class: 'suggest', hidden: true });
@@ -601,6 +708,7 @@ function renderWrite(existing: Knowledge | null): void {
   const drawTags = () => {
     clear(tagList);
     tagList.append(...tags.map((t) => tagChip(t, { removable: true, onClick: () => { tags.splice(tags.indexOf(t), 1); drawTags(); drawProposals(); } })));
+    keepDraft();
   };
   const addTag = (name: string) => {
     const n = name.replace(/^[#＃]+/, '').trim();
@@ -630,14 +738,13 @@ function renderWrite(existing: Knowledge | null): void {
   tagField.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); if (tagField.value.trim()) addTag(tagField.value); }
   });
-  title.addEventListener('input', drawProposals);
-  body.addEventListener('input', drawProposals);
+  title.addEventListener('input', () => { drawProposals(); keepDraft(); });
+  body.addEventListener('input', () => { drawProposals(); keepDraft(); });
 
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
     message.hidden = true;
     if (tagField.value.trim()) addTag(tagField.value);
-    if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; tagField.focus(); return; }
+    if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; setTimeout(() => tagField.focus(), 0); return; } // 送信中は欄が無効なので、戻ってから合わせる
     // 開いたときの版を添える。開いたあとに別の人が直していたら、サーバーが止めて教えてくれる
     const payload = { title: title.value, body: body.value, tagNames: tags, ...(existing ? { baseVersion: existing.version } : {}) };
     try {
@@ -645,6 +752,7 @@ function renderWrite(existing: Knowledge | null): void {
       const r = existing
         ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
         : await api<Saved>('POST', `/stores/${storeId()}/knowledge`, payload);
+      writeDraft(draftKey, null);
       toast(r.published ? '公開しました' : '承認を依頼しました');
       await loadDictionary();
       const goOn = async () => { await loadDictionary(); location.hash = `#/k/${r.id}`; };
@@ -661,8 +769,9 @@ function renderWrite(existing: Knowledge | null): void {
   };
 
   drawTags();
-  shell('write', h('form', { class: 'page write', onsubmit: submit },
+  const form = h('form', { class: 'page write' },
     h('h1', {}, existing ? 'ナレッジを編集' : 'ナレッジを書く'),
+    draft ? h('p', { class: 'hint' }, '書きかけを戻しました') : null,
     h('label', { for: 'title' }, 'タイトル'), title,
     h('label', { for: 'body' }, '内容'), body,
     h('label', { for: 'tag' }, 'ハッシュタグ'),
@@ -670,64 +779,96 @@ function renderWrite(existing: Knowledge | null): void {
     message,
     h('button', { type: 'submit', class: 'primary' }, isTrusted() ? '公開する' : '承認を依頼する'),
     isTrusted() ? null : h('p', { class: 'note' }, 'trusted のメンバーが承認すると公開されます。'),
-  ));
+  );
+  // 送信中は押し直せないようにする。連打で同じナレッジが2件公開されるのを防ぐ
+  submitOnce(form, submit);
+  shell('write', form);
   drawProposals();
   (existing ? body : title).focus();
 }
 
 // --- バーコード -------------------------------------------------------------------
 
-function renderScan(initialJan: string): void {
+function renderScan(initialJan: string, stale: () => boolean): void {
   const field = h('input', { id: 'jan', type: 'text', inputmode: 'numeric', pattern: '[0-9]*', maxlength: 13, value: initialJan, placeholder: '4901234567894', autocomplete: 'off' });
   const out = h('div', { class: 'scan-result', 'aria-live': 'polite' });
   const video = h('video', { class: 'camera', playsinline: true, muted: true, hidden: true });
-  const lookup = async () => {
+  const lookupButton = h('button', { type: 'button', class: 'secondary' }, '調べる');
+  // 続けて調べたとき、最後に調べたものの結果だけを描く
+  let lookupSeq = 0;
+  const lookup = busyGuard(() => [lookupButton, field], async () => {
     const jan = field.value.replace(/\D/g, '');
     if (!jan) return;
+    stopCamera(); // 数字で調べるなら、カメラはもう要らない
     history.replaceState(null, '', `#/scan?jan=${jan}`);
+    const mine = ++lookupSeq;
     try {
-      renderScanResult(out, await api<ScanResult>('GET', `/stores/${storeId()}/barcode/${jan}`));
+      const r = await api<ScanResult>('GET', `/stores/${storeId()}/barcode/${jan}`);
+      if (stale() || mine !== lookupSeq) return;
+      renderScanResult(out, r);
     } catch (e) {
+      if (stale() || mine !== lookupSeq) return;
       clear(out);
       out.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
-  };
+  });
   // 端末が BarcodeDetector に対応していればカメラで読む（Android の Chrome など）。無ければ数字を入力する
   const Detector = (window as unknown as { BarcodeDetector?: new (o: { formats: string[] }) => { detect(v: HTMLVideoElement): Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
+  // カメラは押すたびに新しく掴むので、前の stream と読み取りのループを止めてから始める。
+  // 止め忘れるとカメラが点いたままになり、電池も食う。画面を離れるときも止める（disposeView）
+  let stream: MediaStream | null = null;
+  let frame = 0;
+  let cameraSeq = 0;
+  const stopCamera = () => {
+    cameraSeq += 1; // 動いているループと、取得待ちの startCamera を無効にする
+    cancelAnimationFrame(frame);
+    stream?.getTracks().forEach((t) => t.stop());
+    stream = null;
+    video.srcObject = null;
+    video.hidden = true;
+  };
   const startCamera = async () => {
     if (!Detector) return;
+    stopCamera();
+    const mine = cameraSeq;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-      video.srcObject = stream;
+      const got = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      if (mine !== cameraSeq) { got.getTracks().forEach((t) => t.stop()); return; } // 待つ間に離れた・押し直された
+      stream = got;
+      video.srcObject = got;
       video.hidden = false;
       await video.play();
+      if (mine !== cameraSeq) return;
       const detector = new Detector({ formats: ['ean_13', 'ean_8'] });
       const tick = async () => {
-        if (video.hidden) return;
+        if (mine !== cameraSeq) return;
         const codes = await detector.detect(video).catch(() => []);
+        if (mine !== cameraSeq) return;
         if (codes[0]) {
           field.value = codes[0].rawValue;
-          stream.getTracks().forEach((t) => t.stop());
-          video.hidden = true;
+          stopCamera();
           void lookup();
           return;
         }
-        requestAnimationFrame(() => void tick());
+        frame = requestAnimationFrame(() => void tick());
       };
       void tick();
     } catch {
+      if (mine === cameraSeq) stopCamera(); // play() などで失敗したとき、掴んだカメラを放す
       toast('カメラを使えませんでした。数字を入力してください');
     }
   };
   field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void lookup(); } });
+  lookupButton.addEventListener('click', () => void lookup());
   shell('search', h('section', { class: 'page' },
     h('h1', {}, 'バーコードで調べる'),
     Detector ? h('button', { type: 'button', class: 'primary', onclick: () => void startCamera() }, 'カメラで読み取る') : null,
     video,
     h('label', { for: 'jan' }, 'JANコード（バーコードの下の数字）'),
-    h('div', { class: 'search-bar' }, field, h('button', { type: 'button', class: 'secondary', onclick: () => void lookup() }, '調べる')),
+    h('div', { class: 'search-bar' }, field, lookupButton),
     out,
   ));
+  disposeView = stopCamera;
   if (initialJan) void lookup();
 }
 
@@ -765,8 +906,8 @@ function productForm(janCode: string, existing: ProductCard | null, out: HTMLEle
   tagField.addEventListener('input', () => { if (dict) renderSuggestions(suggest, tagField.value, dict.suggest(tagField.value, tags), (e) => add(e.tag.name), true); });
   tagField.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (tagField.value.trim()) add(tagField.value); } });
   draw();
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
+    message.hidden = true;
     if (tagField.value.trim()) add(tagField.value);
     try {
       const r = existing
@@ -779,56 +920,93 @@ function productForm(janCode: string, existing: ProductCard | null, out: HTMLEle
       message.hidden = false;
     }
   };
-  return h('form', { class: 'write', onsubmit: submit },
+  const form = h('form', { class: 'write' },
     h('label', { for: 'pname' }, '商品名'), name,
     h('label', { for: 'pmaker' }, 'メーカー'), maker,
     h('label', { for: 'pnote' }, '売場のメモ'), note,
     h('label', { for: 'ptag' }, 'ハッシュタグ'), tagList, tagField, suggest,
     message,
     h('button', { type: 'submit', class: 'primary' }, existing ? '保存する' : '登録する'));
+  submitOnce(form, submit); // 連打で同じ商品を2回送らない
+  return form;
 }
 
 // --- 承認・管理（trusted / administrator） --------------------------------------------
 
-async function renderManage(): Promise<void> {
+/**
+ * 承認・管理の上3つの一覧の枠。取れたものだけ描き、失敗した枠にだけ赤字を出す。
+ * reload は、行の操作が 409 になった（他の人が先に操作した）あとに、その一覧だけ取り直すために使う。
+ */
+interface ListFrame<T> {
+  box: HTMLElement;
+  apply: (r: PromiseSettledResult<T>) => void;
+  reload: () => Promise<void>;
+  fetcher: () => Promise<T>;
+}
+
+function listFrame<T>(fetcher: () => Promise<T>, draw: (items: T) => Node[]): ListFrame<T> {
+  const box = h('div');
+  const apply = (r: PromiseSettledResult<T>) => {
+    clear(box);
+    if (r.status === 'fulfilled') box.append(...draw(r.value));
+    else box.append(h('p', { class: 'error', role: 'alert' }, r.reason instanceof Error ? r.reason.message : String(r.reason)));
+  };
+  const reload = async () => {
+    try {
+      apply({ status: 'fulfilled', value: await fetcher() });
+    } catch (reason) {
+      apply({ status: 'rejected', reason });
+    }
+  };
+  return { box, apply, reload, fetcher };
+}
+
+async function renderManage(stale: () => boolean): Promise<void> {
   if (!isTrusted()) { location.hash = '#/home'; return; }
   const section = h('section', { class: 'page manage' }, h('h1', {}, '承認・管理'));
   shell(null, section);
-  try {
-    const [pending, zero, stale] = await Promise.all([
-      api<Array<{ id: string; version: number; title: string; edited_by: string; is_new: boolean }>>('GET', `/stores/${storeId()}/pending`),
-      api<Array<{ query: string; times: number }>>('GET', `/stores/${storeId()}/zero-hits`),
-      api<Array<{ id: string; title: string; verified_at: string | null }>>('GET', `/stores/${storeId()}/stale`),
-    ]);
-    section.append(
-      ...countedList('承認待ち', pending, (p, remove) =>
-        h('li', { class: 'row' },
-          h('a', { href: `#/k/${p.id}` }, p.title),
-          h('span', { class: 'hint' }, `${p.edited_by}さん・${p.is_new ? '新規' : '修正'}`),
-          h('span', { class: 'row-actions' },
-            action('公開する', 'primary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/approve`); toast('公開しました'); remove(); }),
-            action('却下する', 'secondary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/reject`); toast('却下しました'); remove(); }))), 'h2'),
+  const sid = storeId();
+  type PendingRow = { id: string; version: number; title: string; edited_by: string; is_new: boolean };
+  type StaleRow = { id: string; title: string; verified_at: string | null };
+  const pendingList: ListFrame<PendingRow[]> = listFrame(
+    () => api<PendingRow[]>('GET', `/stores/${sid}/pending`),
+    (pending) => countedList('承認待ち', pending, (p, remove) =>
+      h('li', { class: 'row' },
+        h('a', { href: `#/k/${p.id}` }, p.title),
+        h('span', { class: 'hint' }, `${p.edited_by}さん・${p.is_new ? '新規' : '修正'}`),
+        h('span', { class: 'row-actions' },
+          action('公開する', 'primary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/approve`); toast('公開しました'); remove(); }, () => pendingList.reload()),
+          action('却下する', 'secondary small', async () => { await api('POST', `/knowledge/${p.id}/versions/${p.version}/reject`); toast('却下しました'); remove(); }, () => pendingList.reload()))), 'h2'));
+  const zeroList = listFrame(
+    () => api<Array<{ query: string; times: number }>>('GET', `/stores/${sid}/zero-hits`),
+    (zero) => [
       h('h2', {}, '見つからなかった検索'),
       zero.length === 0 ? h('p', { class: 'hint' }, 'ありません。') : h('ul', { class: 'rows' }, ...zero.slice(0, 20).map((z) =>
         h('li', { class: 'row' }, h('span', {}, z.query), h('span', { class: 'hint' }, `${z.times}回`)))),
-      ...countedList(`${staleLabel()}確認されていないナレッジ`, stale, (s, remove) =>
-        h('li', { class: 'row' },
-          h('a', { href: `#/k/${s.id}` }, s.title),
-          h('span', { class: 'row-actions' },
-            action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }))), 'h2'),
+    ]);
+  const staleList: ListFrame<StaleRow[]> = listFrame(
+    () => api<StaleRow[]>('GET', `/stores/${sid}/stale`),
+    (old) => countedList(`${staleLabel()}確認されていないナレッジ`, old, (s, remove) =>
+      h('li', { class: 'row' },
+        h('a', { href: `#/k/${s.id}` }, s.title),
+        h('span', { class: 'row-actions' },
+          action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }, () => staleList.reload()))), 'h2'));
+  // 3本は互いに待たない。1本が失敗しても、取れたものは出す
+  const [a, b, c] = await Promise.allSettled([pendingList.fetcher(), zeroList.fetcher(), staleList.fetcher()]);
+  if (stale()) return; // 待つ間に別の画面へ移っていた
+  pendingList.apply(a);
+  zeroList.apply(b);
+  staleList.apply(c);
+  section.append(pendingList.box, zeroList.box, staleList.box);
+  section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
+  if (isAdmin()) {
+    section.append(
+      accessRequestPanel(me!.stores, storeId(), () => { void refreshBadges().then(updateManageCount); }),
+      staffPanel(storeId(), me!.id),
+      inviteForm(),
     );
-    section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
-    if (isAdmin()) {
-      section.append(
-        accessRequestPanel(me!.stores, storeId(), () => { void refreshBadges().then(updateManageCount); }),
-        staffPanel(storeId(), me!.id),
-        inviteForm(),
-      );
-      // 会社のアカウントの設定は本部だけ（会社全体に効くため）
-      if (me!.adminScope === 'tenant') section.append(ssoPanel(me!.stores));
-    }
-  } catch (e) {
-    section.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    // 会社のアカウントの設定は本部だけ（会社全体に効くため）
+    if (me!.adminScope === 'tenant') section.append(ssoPanel(me!.stores));
   }
 }
 
@@ -836,8 +1014,7 @@ function inviteForm(): HTMLElement {
   const name = h('input', { id: 'iname', type: 'text', maxlength: 40, placeholder: '例：佐藤' });
   const trusted = h('input', { id: 'itrusted', type: 'checkbox' });
   const out = h('div', { class: 'invite-out', 'aria-live': 'polite' });
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
     try {
       const r = await api<{ token: string; expiresAt: string }>('POST', '/invitations', {
         storeId: storeId(), name: name.value, trustLevel: trusted.checked ? 'trusted' : 'visitor',
@@ -860,12 +1037,14 @@ function inviteForm(): HTMLElement {
       out.append(h('p', { class: 'error', role: 'alert' }, err instanceof Error ? err.message : String(err)));
     }
   };
-  return h('form', { class: 'write', onsubmit: submit },
+  const form = h('form', { class: 'write' },
     h('h2', {}, 'スタッフを招待する'),
     h('label', { for: 'iname' }, '名前'), name,
     h('label', { class: 'check' }, trusted, '最初から trusted にする（投稿がすぐ公開される）'),
     h('button', { type: 'submit', class: 'primary' }, '招待リンクを作る'),
     out);
+  submitOnce(form, submit); // 連打で招待が何本もできないように
+  return form;
 }
 
 /** 招待QRコードを1枚だけ別の窓で開いて印刷する（休憩室に貼る・手渡しする用） */
