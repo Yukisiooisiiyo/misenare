@@ -52,6 +52,9 @@ export function serve(handler: (req: Request) => Promise<Response>, port: number
       res.end(Buffer.from(await response.arrayBuffer()));
     } catch (err) {
       const tooLarge = err instanceof Error && err.message === 'payload_too_large';
+      // ここは logger もメトリクスも通らない最後の受け皿。何が起きたかを残す
+      // （サイズ超過は利用者側の問題なので警告、それ以外は想定外なのでエラー）
+      (tooLarge ? console.warn : console.error)('リクエストの処理で例外', { method: req.method, url: req.url, err });
       res.statusCode = tooLarge ? 413 : 500;
       res.setHeader('content-type', 'application/json; charset=utf-8');
       res.end(JSON.stringify({ error: tooLarge ? 'payload_too_large' : 'internal' }));

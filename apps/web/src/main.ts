@@ -894,4 +894,22 @@ function printQr(who: string, svg: string): void {
   w.print();
 }
 
+// 想定外の失敗（捕まえ損ねた例外・待たれていない Promise）で画面が黙ったままにならないようにする。
+// 連続で起きる（ループ中の失敗など）と toast が積み重なるので、3 秒は再表示しない
+let lastCrashToast = 0;
+function crashToast(): void {
+  const now = Date.now();
+  if (now - lastCrashToast < 3000) return;
+  lastCrashToast = now;
+  toast('画面で問題が起きました。もう一度お試しください');
+}
+window.addEventListener('unhandledrejection', (ev) => {
+  console.error('unhandledrejection', ev.reason);
+  crashToast();
+});
+window.addEventListener('error', (ev) => {
+  console.error('error', ev.error ?? ev.message);
+  crashToast();
+});
+
 void boot();

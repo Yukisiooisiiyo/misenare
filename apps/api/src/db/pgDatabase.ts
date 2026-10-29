@@ -10,8 +10,15 @@ export class PgDatabase implements Database {
   private readonly pool: Pool;
   private readonly timeZone = appTimeZone();
 
-  constructor(connectionString: string) {
+  constructor(connectionString: string, onError?: (err: Error) => void) {
     this.pool = new pg.Pool({ connectionString, max: 10 });
+    // 使われていない（アイドル）接続が DB の再起動や切断で壊れると、プールは 'error' を出す。
+    // リスナが無いとこれが uncaughtException になってプロセスごと落ちるので、記録だけして続ける。
+    // 壊れた接続はプールが捨て、次に必要になったときに作り直す。
+    this.pool.on('error', (err: Error) => {
+      if (onError) onError(err);
+      else console.error('アイドル接続でエラー', err);
+    });
   }
 
   async withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {

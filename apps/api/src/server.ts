@@ -24,7 +24,7 @@ import { createApp } from './http/app.ts';
 import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
 import { createSite } from './http/site.ts';
-import { Logger } from './http/observe.ts';
+import { Alerts, Logger } from './http/observe.ts';
 import cluster from 'node:cluster';
 import { fileURLToPath } from 'node:url';
 
@@ -38,6 +38,29 @@ if (report.fatal && process.env.CONFIG_CHECK !== 'off') {
   console.error('[設定] 上の × を直してから起動してください（CONFIG_CHECK=off で無視できます）');
   process.exit(78); // EX_CONFIG
 }
+
+// プロセス全体の最後の受け皿。親（cluster の見張り）でもワーカーでも効くよう、分かれ道より前に置く。
+// どちらも付けないと、Node は何も記録せずに（スタックを標準エラーに出すだけで）落ちる。
+const logger = new Logger();
+const alerts = new Alerts();
+const describe = (err: unknown): { error: string; stack?: string | undefined } =>
+  err instanceof Error ? { error: err.message, stack: err.stack } : { error: String(err) };
+
+process.on('unhandledRejection', (reason) => {
+  // 1 件の待たれていない失敗でプロセスを止めない。記録して知らせるだけで続ける
+  logger.error('unhandledRejection', describe(reason));
+  void alerts.notify('unhandledRejection', `misenare: unhandledRejection\n${describe(reason).error}`);
+});
+let dying = false;
+process.on('uncaughtException', (err) => {
+  // どこまで壊れているか分からないので続けない。記録と通知の時間を 1 秒だけとり、
+  // 終了コード 1 で落として restart policy（docker の restart / cluster の立て直し）に任せる
+  logger.error('uncaughtException', describe(err));
+  if (dying) return;
+  dying = true;
+  void alerts.notify('uncaughtException', `misenare: uncaughtException\n${describe(err).error}`);
+  setTimeout(() => process.exit(1), 1000);
+});
 
 // 1台の 4 OCPU を使い切るために、同じ serve() を回すプロセスを複数立てる。
 // 親は点検のあと子を立てて見張るだけで、DB には触れない。落ちた子は立て直す。
@@ -74,15 +97,16 @@ async function openDatabase(): Promise<Database> {
     return new PsqlDatabase(url!);
   }
   const { PgDatabase } = await import('./db/pgDatabase.ts');
-  return new PgDatabase(url!);
+  // アイドル接続の切断（DB の再起動など）は記録して続ける。接続はプールが作り直す
+  return new PgDatabase(url!, (err) => logger.error('pg pool idle client error', describe(err)));
 }
 
 const database = await openDatabase();
 // 行レベルセキュリティを素通りするロール（スーパーユーザーなど）では起動しない
 await assertRlsEnforced((sql) => database.raw(sql));
-const logger = new Logger();
 const app = createApp({
   logger,
+  alerts,
   database,
   // MISENARE_DEV_AUTH=1 のときだけ開発用のヘッダー認証（本番環境では作れない）
   auth: process.env.MISENARE_DEV_AUTH === '1' ? new DevHeaderAuthenticator() : new SessionAuthenticator(database),
@@ -90,7 +114,13 @@ const app = createApp({
 });
 // Web 版（apps/web をビルドした dist）を /app/ で、API を /api/ で配信する
 const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
-serve(createSite(app, webDir), port);
+const server = serve(createSite(app, webDir), port);
+// ポートが使用中（EADDRINUSE）などで待ち受けられないとき。リスナが無いと uncaughtException になるので、
+// 理由が分かる形で記録し、終了コード 1 で落とす（立て直しは restart policy に任せる）
+server.on('error', (err) => {
+  logger.error('server error', describe(err));
+  process.exit(1);
+});
 logger.info('listening', {
   port,
   rateLimit: process.env.RATE_LIMIT === 'db' ? 'db' : 'memory',
