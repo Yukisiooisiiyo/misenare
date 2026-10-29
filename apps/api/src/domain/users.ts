@@ -78,6 +78,8 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
   } else {
     assert(typeof input.name === 'string' && input.name.trim().length > 0 && input.name.length <= 40, 'invalid', '名前を1〜40文字で入力してください');
   }
+  // userId を指定したときも name は記録に残るので、あれば同じ上限で止める
+  if (input.userId && input.name !== undefined) assert(input.name.length <= 40, 'invalid', '名前は40文字以内にしてください');
 
   const token = issueToken(actor.tenantId);
   const row = await one<{ id: string; expires_at: string }>(
@@ -99,16 +101,21 @@ export async function acceptInvitation(db: Db, tenantId: string, token: string, 
   const inv = await maybeOne<{
     id: string; token_hash: string; store_id: string | null; user_id: string | null; name: string | null;
     trust_level: TrustLevel; admin_scope: AdminScope; expired: boolean; used: boolean;
+    creator_inactive: boolean;
   }>(
     db,
-    `SELECT id, token_hash, store_id, user_id, name, trust_level, admin_scope,
-            expires_at < now() AS expired, used_at IS NOT NULL AS used
-       FROM invitations WHERE token_hash = $1 FOR UPDATE`,
+    `SELECT i.id, i.token_hash, i.store_id, i.user_id, i.name, i.trust_level, i.admin_scope,
+            i.expires_at < now() AS expired, i.used_at IS NOT NULL AS used,
+            COALESCE(c.status <> 'active', false) AS creator_inactive
+       FROM invitations i LEFT JOIN users c ON c.id = i.created_by
+      WHERE i.token_hash = $1 FOR UPDATE OF i`,
     [hashToken(token)],
   );
   if (!inv || !sameHash(inv.token_hash, hashToken(token))) throw new DomainError('not_found', '招待が見つかりません');
   assert(!inv.used, 'conflict', 'この招待はすでに使われています');
   assert(!inv.expired, 'conflict', 'この招待は期限切れです。もう一度発行してもらってください');
+  // 無効化された人が出した招待で入れてしまうと、止めたはずの権限が残る（created_by が NULL の初期設定は通す）
+  assert(!inv.creator_inactive, 'conflict', 'この招待を作った人は無効化されています。もう一度発行してもらってください');
 
   let userId = inv.user_id;
   if (userId === null) {

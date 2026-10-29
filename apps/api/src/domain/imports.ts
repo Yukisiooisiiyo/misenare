@@ -119,6 +119,7 @@ export async function discardImport(db: Db, actor: Actor, importId: string, stor
     [importId],
   );
   await syncApprovalNotice(db, actor.tenantId, row.store_id);
-  for (const p of photos) await storage!.remove(p.storage_key).catch(() => undefined); // 消せなくても取り下げは成立させる
+  // 消せなくても取り下げは成立させる。ただし行は消えて実体だけ残るので、キーと理由を残す
+  for (const p of photos) await storage!.remove(p.storage_key).catch((err) => console.warn('写真の実体を消せませんでした', { key: p.storage_key, err }));
   return { discarded: deleted.length };
 }

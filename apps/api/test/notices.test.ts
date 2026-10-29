@@ -97,6 +97,22 @@ describe('連絡事項', () => {
     });
   });
 
+  it('無効化された人は、未確認の数にも一覧にも出ない', async () => {
+    const { id } = await run((q) => createNotice(q, manager, STORE_A, {
+      title: '無効化の確認', body: '読んだら確認を。', requiresAck: true,
+    }));
+    const pending = async () => run(async (q) => (await listNotices(q, manager, STORE_A)).find((n) => n.id === id)!.pendingAcks);
+    const before = await pending();
+    await run((q) => q.query(`UPDATE users SET status = 'disabled' WHERE id = $1`, [visitor.userId]));
+    try {
+      assert.equal(await pending(), before! - 1, '無効化された人は未確認に数えない');
+      const readers = await run((q) => noticeReaders(q, manager, id));
+      assert.ok(!readers.some((r) => r.id === visitor.userId), '一覧にも出ない');
+    } finally {
+      await run((q) => q.query(`UPDATE users SET status = 'active' WHERE id = $1`, [visitor.userId]));
+    }
+  });
+
   it('掲示の期間が切れたものは出さない（記録は残る）', async () => {
     const { id } = await run((q) => createNotice(q, manager, STORE_A, { title: '週末のセール', body: '土日のみ。' }));
     await run(async (q) => {

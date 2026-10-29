@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
+import { DomainError } from '../src/domain/actor.ts';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import { approveRequest, getNotifySettings, listRequests, pendingDigest, rejectRequest, requestBadge, setNotifyEmail } from '../src/domain/accessRequests.ts';
 import { runNightly } from '../src/batch/nightly.ts';
@@ -106,6 +107,19 @@ describe('利用の申請', () => {
     await clean();
   });
 
+  it('同じメールの既存の利用者が無効化されていたら、承認しても結びつけない', async () => {
+    await setup();
+    await assert.rejects(knock(), /申請を出しました/);
+    await db.withTenant(T, (q) => q.query(
+      `INSERT INTO users (tenant_id, name, trust_level, email, status) VALUES ($1, '辞めた田中', 'visitor', 'tanaka@kdenki.example.co.jp', 'disabled')`, [T]));
+    const [req] = await db.withTenant(T, (q) => listRequests(q, manager));
+    await assert.rejects(
+      db.withTenant(T, (q) => approveRequest(q, manager, req!.id, { storeId: STORE_A })),
+      (e: unknown) => e instanceof DomainError && e.code === 'conflict' && /無効化されています/.test(e.message));
+    assert.equal((await db.withTenant(T, (q) => listRequests(q, manager))).length, 1, '申請は残る');
+    await clean();
+  });
+
   it('名前は承認する人が直せる（IdP が名乗った名前を鵜呑みにしない）', async () => {
     await setup();
     await assert.rejects(knock({ name: '店長' }), /申請を出しました/);
@@ -181,6 +195,20 @@ describe('利用の申請', () => {
     await db.withTenant(T, async (q) => {
       assert.deepEqual(await requestBadge(q, manager), { pending: 0 });
     });
+    await clean();
+  });
+
+  it('同じ申請を2人が同時に承認しても、1人しか通らない', async () => {
+    await setup();
+    await assert.rejects(knock(), /申請を出しました/);
+    const [req] = await db.withTenant(T, (q) => listRequests(q, manager));
+    const results = await Promise.allSettled([
+      db.withTenant(T, (q) => approveRequest(q, manager, req!.id, { storeId: STORE_A })),
+      db.withTenant(T, (q) => approveRequest(q, hq, req!.id, { storeId: STORE_A })),
+    ]);
+    assert.equal(results.filter((x) => x.status === 'fulfilled').length, 1);
+    const users = await db.withTenant(T, (q) => q.query(`SELECT 1 FROM users WHERE email = 'tanaka@kdenki.example.co.jp'`));
+    assert.equal(users.length, 1);
     await clean();
   });
 

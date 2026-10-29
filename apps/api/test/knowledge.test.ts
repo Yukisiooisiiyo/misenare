@@ -12,8 +12,8 @@ import {
   rejectVersion,
   revertToVersion,
 } from '../src/domain/knowledge.ts';
-import { search, zeroHitQueries } from '../src/domain/search.ts';
-import { exportDictionary } from '../src/domain/tags.ts';
+import { recordSearchFeedback, search, zeroHitQueries } from '../src/domain/search.ts';
+import { exportDictionary, invalidateDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, hq, manager, otherTenant, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
@@ -181,6 +181,14 @@ describe('検索の範囲と並び順', () => {
     await rejects(run((q) => search(q, tokenizer, trusted, STORE_B, 'テレビ')), 'forbidden');
   });
 
+  it('入れない店舗のナレッジを、開いた記録に結びつけられない', async () => {
+    const b = await db.withTenant(T, (q) => createKnowledge(q, tokenizer, storeBStaff, {
+      storeId: STORE_B, title: '駅前店の鍵の保管', body: '事務所の金庫。', tagNames: ['#鍵'],
+    }));
+    // 自社のナレッジなので存在確認は通るが、STORE_A の人は STORE_B に入れない
+    await rejects(run((q) => recordSearchFeedback(q, trusted, 1, { openedKnowledgeId: b.id })), 'forbidden');
+  });
+
   it('他社のデータは行レベルセキュリティで見えない', async () => {
     const r = await db.withTenant(otherTenant.tenantId, (q) => q.query(`SELECT count(*)::int AS n FROM knowledge`));
     assert.equal(r[0]!.n, 0);
@@ -200,6 +208,8 @@ describe('検索の範囲と並び順', () => {
        SELECT $1, 'synonym', a.id, c.id, 'approved' FROM hashtags a, hashtags c WHERE a.name = 'エアコン' AND c.name = 'クーラー'`,
       [T],
     ));
+    // SQL で直接書いたので、辞書のキャッシュは自分で捨てる（画面の操作なら承認の関数が捨てる）
+    invalidateDictionary(T);
     const after = await run((q) => search(q, tokenizer, trusted, STORE_A, '#エアコン'));
     assert.ok(ids(after).includes(k.id));
     assert.equal(after.hits[0]!.title, 'エアコンの掃除', '直接タグが付いたものが上');

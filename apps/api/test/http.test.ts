@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import type { Actor } from '../src/domain/actor.ts';
-import { createApp } from '../src/http/app.ts';
+import { createApp, resetSsoSite } from '../src/http/app.ts';
 import { DevHeaderAuthenticator } from '../src/http/auth.ts';
-import { freshDatabase, jan, STORE_A, STORE_B, tokenizer, trusted, visitor } from './helpers.ts';
+import { freshDatabase, hq, jan, manager, STORE_A, STORE_B, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -93,5 +93,101 @@ describe('HTTP API', () => {
     const r = await call(visitor, 'GET', `/stores/${STORE_A}/tags/dictionary`);
     assert.ok(r.body.tags.some((t: { name: string }) => t.name === '電子レンジ'));
     assert.ok(Object.keys(r.body.cooccurrence).length > 0);
+  });
+
+  it('辞書は ETag を付け、変わっていなければ 304 で本文を返さない', async () => {
+    const path = `/stores/${STORE_A}/tags/dictionary`;
+    const headers = (actor: Actor, extra: Record<string, string> = {}) =>
+      ({ 'x-dev-tenant-id': actor.tenantId, 'x-dev-user-id': actor.userId, ...extra });
+    const first = await app(new Request(`http://localhost${path}`, { headers: headers(visitor) }));
+    assert.equal(first.status, 200);
+    const etag = first.headers.get('etag') ?? '';
+    assert.match(etag, /^"[0-9a-f]{16}"$/);
+    assert.ok(JSON.parse(await first.text()).tags.length > 0);
+
+    const same = await app(new Request(`http://localhost${path}`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(same.status, 304);
+    assert.equal(await same.text(), '');
+    assert.equal(same.headers.get('etag'), etag);
+
+    // 辞書が変わったら ETag も変わり、古い ETag では 200 で新しい本文が返る
+    await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, {
+      title: '辞書の ETag の確認', body: '新しいタグを足す。', tagNames: ['#etag確認用'],
+    });
+    const changed = await app(new Request(`http://localhost${path}`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get('etag'), etag);
+    assert.ok(JSON.parse(await changed.text()).tags.some((t: { name: string }) => t.name === 'etag確認用'));
+
+    // ETag が一致しても、権限の確認は先に済んでいる（入れない店舗の辞書は 304 にならず 403）
+    const other = await app(new Request(`http://localhost/stores/${STORE_B}/tags/dictionary`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(other.status, 403);
+  });
+});
+
+describe('入力の範囲と長さ', () => {
+  it('年が 1〜9999 の範囲外の日時は 400（DB のキャストで 500 にしない）', async () => {
+    const base = { title: 'x', body: 'y', tagNames: ['#x'] };
+    for (const expiresAt of ['0000-01-01T00:00:00Z', '+010000-01-01T00:00:00Z']) {
+      assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { ...base, expiresAt })).status, 400, expiresAt);
+    }
+  });
+
+  it('オフセットの無い日時は 400（サーバーの TZ で読まれて日本時間と 9 時間ずれる）。+09:00 と Z は通る', async () => {
+    const base = { title: 'x', body: 'y', tagNames: ['#x'] };
+    for (const expiresAt of ['2099-10-30T09:00', '2099-10-30 09:00', '2099-10-30T09:00:00', '2099-10-30']) {
+      const r = await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { ...base, expiresAt });
+      assert.equal(r.status, 400, expiresAt);
+      assert.match(r.body.message, /タイムゾーン/);
+    }
+    for (const expiresAt of ['2099-10-30T09:00:00+09:00', '2099-10-30T00:00:00Z', '2099-10-30T09:00+0900']) {
+      assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { ...base, expiresAt })).status, 201, expiresAt);
+    }
+  });
+
+  it('0000年の日付は 400', async () => {
+    assert.equal((await call(trusted, 'GET', `/stores/${STORE_A}/handovers?date=0000-01-01`)).status, 400);
+    assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: 'x', forDate: '0000-01-01' })).status, 400);
+  });
+
+  it('商品の編集で name: null を送ると 400', async () => {
+    const r = await call(trusted, 'PATCH', `/stores/${STORE_A}/products/${STORE_A}`, { name: null });
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+  });
+
+  it('取り込みのファイル名が200文字を超えると 400', async () => {
+    const res = await app(new Request(`http://localhost/stores/${STORE_A}/imports?name=${'a'.repeat(201)}`, {
+      method: 'POST',
+      headers: { 'x-dev-tenant-id': trusted.tenantId, 'x-dev-user-id': trusted.userId },
+      body: 'abc',
+    }));
+    assert.equal(res.status, 400);
+  });
+
+  it('タグの読みの確定で readings が21個以上なら 400', async () => {
+    const readings = Array.from({ length: 21 }, (_, i) => `ヨミ${i}`);
+    const r = await call(manager, 'POST', `/tag-readings/${STORE_A}`, { readings });
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+  });
+
+  it('SSO の設定とログイン前の入力は、長すぎると 400', async () => {
+    const provider = { issuer: 'https://idp.example.com', clientId: 'c', domains: ['example.co.jp'] };
+    const post = (body: unknown) => call(hq, 'POST', '/sso/providers', body);
+    assert.equal((await post({ ...provider, issuer: 'https://' + 'a'.repeat(500) })).status, 400);
+    assert.equal((await post({ ...provider, clientId: 'c'.repeat(201) })).status, 400);
+    assert.equal((await post({ ...provider, clientSecret: 's'.repeat(4001) })).status, 400);
+    assert.equal((await post({ ...provider, domains: ['a'.repeat(254)] })).status, 400);
+    assert.equal((await call(hq, 'POST', '/sso/domains/verify', { domain: 'a'.repeat(254) })).status, 400);
+    assert.equal((await call(hq, 'POST', '/sso/check', { issuer: 'https://' + 'a'.repeat(500) })).status, 400);
+
+    // ログイン前の入口は、SSO の設定があるときだけ中身を見る
+    process.env.SSO_REDIRECT_URI = 'https://misenare.example.com/api/auth/sso/callback';
+    resetSsoSite();
+    try {
+      assert.equal((await call(null, 'POST', '/auth/sso/start', { email: 'a'.repeat(250) + '@example.co.jp' })).status, 400);
+    } finally {
+      delete process.env.SSO_REDIRECT_URI;
+      resetSsoSite();
+    }
   });
 });

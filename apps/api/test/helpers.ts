@@ -8,6 +8,7 @@ import type { Database } from '../src/db/db.ts';
 import { assertRlsEnforced } from '../src/db/safety.ts';
 import { PsqlDatabase } from '../src/db/psqlDatabase.ts';
 import type { Actor } from '../src/domain/actor.ts';
+import { clearDictionaryCache } from '../src/domain/tags.ts';
 
 /** テストで使う DB。DB_DRIVER=pg なら本番と同じ pg ドライバー、それ以外は psql アダプタ。 */
 export type TestDatabase = Database & { raw(sql: string, params?: readonly unknown[]): Promise<unknown[]> };
@@ -45,6 +46,8 @@ export const storeBStaff: Actor = { userId: '40000000-0000-0000-0000-00000000000
 export const otherTenant: Actor = { userId: '40000000-0000-0000-0000-000000000009', tenantId: OTHER_T, storeIds: [], trustLevel: 'trusted', adminScope: 'tenant' };
 
 export async function freshDatabase(): Promise<TestDatabase> {
+  // スキーマごと作り直すので、前のテストの辞書のキャッシュ（同じテナント ID）を残さない
+  clearDictionaryCache();
   execFileSync('psql', [DATABASE_URL, '-X', '-q', '-c', 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'], { stdio: 'pipe' });
   migrate(DATABASE_URL);
   const db = await openTestDatabase(DATABASE_URL);

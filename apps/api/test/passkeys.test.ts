@@ -325,6 +325,13 @@ describe('パスキーで入る（ログイン前の経路）', () => {
     assert.equal(finish.status, 409, JSON.stringify(finish.body));
   });
 
+  it('長すぎる値は 400 で返す（DB や署名の検証まで通さない）', async () => {
+    const finish = await call('/auth/passkey/finish', {
+      credentialId: 'x'.repeat(65537), clientDataJSON: 'x', authenticatorData: 'x', signature: 'x', userHandle: 'x',
+    });
+    assert.equal(finish.status, 400);
+  });
+
   it('足りない項目があれば 400 で返す', async () => {
     const finish = await call('/auth/passkey/finish', { credentialId: 'x' });
     assert.equal(finish.status, 400);

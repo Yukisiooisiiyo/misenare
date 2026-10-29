@@ -92,6 +92,41 @@ export function tagChip(name: string, opts: { onClick?: () => void; removable?: 
   return h('span', { class: cls }, label);
 }
 
+type Control = HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+
+/**
+ * 処理中は同じ処理を二重に走らせない。
+ * 売場の電波は遅いので、応答を待つ間に押し直されやすい。投稿は連打すると同じ内容が2件公開されるため、
+ * 走っている間は呼ばれても無視し、controls で渡した部品を押せなくする（元から無効だったものは触らない）。
+ */
+export function busyGuard(controls: () => Control[], fn: () => Promise<void>): () => Promise<void> {
+  let busy = false;
+  return async () => {
+    if (busy) return;
+    busy = true;
+    const targets = controls().filter((c) => !c.disabled);
+    for (const c of targets) c.disabled = true;
+    try {
+      await fn();
+    } finally {
+      for (const c of targets) c.disabled = false;
+      busy = false;
+    }
+  };
+}
+
+/**
+ * フォームの送信を1回ずつにする。送信中は送信ボタンと入力欄を無効にし、終わったら戻す。
+ * 無効にした欄の値は読めるので、handler の中で今までどおり .value を使ってよい。
+ * preventDefault もここで行う（handler では要らない）。
+ */
+export function submitOnce(form: HTMLFormElement, handler: () => Promise<void>): void {
+  const run = busyGuard(
+    () => [...form.querySelectorAll<Control>('button[type="submit"], input, textarea, select')],
+    handler);
+  form.addEventListener('submit', (e) => { e.preventDefault(); void run(); });
+}
+
 export function toast(message: string): void {
   const el = h('div', { class: 'toast', role: 'status' }, message);
   document.body.append(el);

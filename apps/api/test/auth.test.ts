@@ -50,11 +50,36 @@ describe('招待と端末セッション', () => {
     assert.ok(rows.every((r) => /^[0-9a-f]{64}$/.test(r.token_hash) && !hqToken.includes(r.token_hash)));
   });
 
+  it('既存の利用者への招待でも、名前を付けるなら40文字まで', async () => {
+    const r = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, userId: hq.userId, name: 'あ'.repeat(41) });
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+  });
+
   it('ログインしていない・形の違うトークン・存在しないトークンは 401', async () => {
     assert.equal((await call(null, 'GET', '/me')).status, 401);
     assert.equal((await call('garbage', 'GET', '/me')).status, 401);
     assert.equal((await call(`${T}.${'A'.repeat(43)}`, 'GET', '/me')).status, 401);
     assert.equal((await call(hqToken, 'GET', '/me')).body.adminScope, 'tenant');
+  });
+
+  it('認証つきの GET は取引を1回しか開かない（BEGIN と COMMIT は1組、set_config は tenant_id と TimeZone）', async () => {
+    const counter = db as unknown as { statements?: number };
+    if (counter.statements === undefined) return; // pg ドライバーには数える口が無い
+    const before = counter.statements;
+    assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
+    // 内訳：BEGIN, set_config×2, verifySession, users, memberships, /me の本体3本, COMMIT = 10 本。
+    // 以前は同じ GET で BEGIN / set_config / COMMIT の組が3回走り、TZ の分を除いても 15 本だった
+    assert.equal(counter.statements - before, 10);
+    // 取引が1つだけであることを直接確かめる
+    const log: string[] = [];
+    const orig = db.withTenant.bind(db);
+    db.withTenant = ((t: string, fn: Parameters<typeof orig>[1]) => { log.push(t); return orig(t, fn); }) as typeof db.withTenant;
+    try {
+      assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
+    } finally {
+      db.withTenant = orig;
+    }
+    assert.equal(log.length, 1, `取引が ${log.length} 回開かれました`);
   });
 
   it('本部は店長の招待を作れ、店長は自店舗のスタッフを招待できる', async () => {
@@ -145,6 +170,17 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(newbieToken, 'GET', '/me')).status, 401);
   });
 
+  it('無効化された人が作った招待は受け取れない（初期設定の招待は通る）', async () => {
+    const boss = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: '辞める店長', trustLevel: 'trusted', adminScope: 'store' });
+    const bossAccepted = await call(null, 'POST', '/auth/accept', { token: boss.body.token, deviceName: '辞める店長のスマホ' });
+    const inv = await call(bossAccepted.body.sessionToken, 'POST', '/invitations', { storeId: STORE_A, name: '残った招待' });
+    assert.equal(inv.status, 201);
+    await db.withTenant(T, (q) => q.query(`UPDATE users SET status = 'disabled' WHERE id = $1`, [bossAccepted.body.userId]));
+    const r = await call(null, 'POST', '/auth/accept', { token: inv.body.token });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.match(r.body.error?.message ?? r.body.message ?? JSON.stringify(r.body), /作った人は無効化/);
+  });
+
   it('ログアウトするとその端末のトークンだけが失効する', async () => {
     assert.equal((await call(managerToken, 'POST', '/auth/logout')).status, 200);
     assert.equal((await call(managerToken, 'GET', '/me')).status, 401);
@@ -173,6 +209,39 @@ describe('試行回数の制限', () => {
     assert.equal((await accept('203.0.113.2')).status, 404, '別の接続元は止めない');
     now += 10 * 60_000 + 1;
     assert.equal((await accept('203.0.113.1')).status, 404, '時間がたてば戻る');
+  });
+
+  it('認証後の書き込みは、利用者ごとに上限がある。別の利用者と GET は止めない', async () => {
+    // 本番は10分で300回。試験では回数を小さくして、同じ数え方で確かめる
+    const { MemoryRateLimiter, CLIENT_IP_HEADER } = await import('../src/http/rateLimit.ts');
+    const limited = createApp({
+      database: db, auth: new SessionAuthenticator(db), tokenizer,
+      limiter: new MemoryRateLimiter(), userWriteRule: { limit: 5, windowMs: 10 * 60_000 },
+    });
+    // 同じ接続元から来る（店舗の回線）。鍵は利用者なので巻き添えにならないはず
+    const as = async (token: string, method: string, path: string, body?: unknown) => {
+      const res = await limited(new Request(`http://localhost${path}`, {
+        method, headers: { 'content-type': 'application/json', authorization: `Bearer ${token}`, [CLIENT_IP_HEADER]: '203.0.113.50' },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }));
+      await res.text();
+      return res.status;
+    };
+    const hqTok = await hqSession();
+    // 招待を1回（書き込み1回目）。受け取りはログイン前なので数えない
+    const inv = await call(hqTok, 'POST', '/invitations', { storeId: STORE_B, name: '上限の試験' });
+    const accepted = await limited(new Request('http://localhost/auth/accept', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: inv.body.token }),
+    }));
+    const other = (await accepted.json() as { sessionToken: string }).sessionToken;
+    assert.equal(await as(hqTok, 'POST', '/invitations', { storeId: STORE_B, name: '1' }), 201);
+    for (let i = 0; i < 4; i++) assert.equal(await as(hqTok, 'POST', `/stores/${STORE_B}/handovers`, { body: `引き継ぎ${i}` }), 201, `${i + 1}回目が止められた`);
+    assert.equal(await as(hqTok, 'POST', `/stores/${STORE_B}/handovers`, { body: 'あふれた分' }), 429);
+    // パスキー登録の開始（POST）も共通の上限の対象
+    assert.equal(await as(hqTok, 'POST', '/passkeys/register/start', {}), 429);
+    assert.equal(await as(hqTok, 'GET', '/me'), 200, 'GET は何回でも通る');
+    for (let i = 0; i < 10; i++) assert.equal(await as(hqTok, 'GET', `/stores/${STORE_B}/handovers`), 200);
+    assert.equal(await as(other, 'POST', `/stores/${STORE_B}/handovers`, { body: '別の人' }), 201, '別の利用者は止めない');
   });
 
   it('無効なトークンが30回続いた接続元は、無効なトークンを止める。正しいトークンの人は通す', async () => {

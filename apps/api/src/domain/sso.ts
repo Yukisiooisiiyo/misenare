@@ -17,7 +17,7 @@
 
 import { assertStore } from './scope.ts';
 import { maybeOne, one, type Database, type Db } from '../db/db.ts';
-import { secretBoxFromEnv, type SecretBox } from '../crypto/secretBox.ts';
+import { SecretError, secretBoxFromEnv, type SecretBox } from '../crypto/secretBox.ts';
 import { recordRequest } from './accessRequests.ts';
 import { assert, DomainError, type Actor } from './actor.ts';
 import { hashToken, issueToken } from './users.ts';
@@ -202,7 +202,10 @@ export async function finishSso(
     });
     idToken = exchanged.idToken;
   } catch (err) {
-    throw new DomainError('forbidden', err instanceof OidcError ? err.message : String(err));
+    // OidcError / SecretError の文面は利用者向けに書かれている。それ以外は内部の例外文なので画面に出さない
+    if (err instanceof OidcError || err instanceof SecretError) throw new DomainError('forbidden', err.message);
+    console.warn('会社のアカウントとのやり取りで想定外の失敗', err);
+    throw new DomainError('forbidden', '会社のアカウントとのやり取りに失敗しました。もう一度お試しください');
   }
 
   let claims: IdTokenClaims;

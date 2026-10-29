@@ -1,15 +1,24 @@
 // 本番用：node-postgres（pg）による実装。`npm install pg @types/pg` が必要。
 
 import pg from 'pg';
+import { appTimeZone } from '../config.ts';
 import type { Database, Db } from './db.ts';
 
 type Pool = InstanceType<typeof pg.Pool>;
 
 export class PgDatabase implements Database {
   private readonly pool: Pool;
+  private readonly timeZone = appTimeZone();
 
-  constructor(connectionString: string) {
+  constructor(connectionString: string, onError?: (err: Error) => void) {
     this.pool = new pg.Pool({ connectionString, max: 10 });
+    // 使われていない（アイドル）接続が DB の再起動や切断で壊れると、プールは 'error' を出す。
+    // リスナが無いとこれが uncaughtException になってプロセスごと落ちるので、記録だけして続ける。
+    // 壊れた接続はプールが捨て、次に必要になったときに作り直す。
+    this.pool.on('error', (err: Error) => {
+      if (onError) onError(err);
+      else console.error('アイドル接続でエラー', err);
+    });
   }
 
   async withTenant<T>(tenantId: string, fn: (db: Db) => Promise<T>): Promise<T> {
@@ -22,6 +31,8 @@ export class PgDatabase implements Database {
       await client.query('BEGIN');
       // 第3引数 true：このトランザクションの中だけ有効
       await client.query("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+      // current_date / now()::date を日本時間で評価させる（サーバーは UTC のことが多い）。これも取引の中だけ
+      await client.query("SELECT set_config('TimeZone', $1, true)", [this.timeZone]);
       const result = await fn(db);
       await client.query('COMMIT');
       return result;

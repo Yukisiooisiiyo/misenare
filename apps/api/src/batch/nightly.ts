@@ -8,12 +8,14 @@
 //   7. 送りかけのまま残った写真を片付ける
 //   8. 古い試行回数の記録を捨てる（会社に属さないので、会社ごとの処理の前に1回）
 //   9. 持ち越しの期間を過ぎた引き継ぎを閉じる
+//  10. 使用済み・期限切れから30日たった招待を捨てる
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
 import { suggestReading, type Tokenizer } from '@misenare/search-core';
 import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
+import { invalidateDictionary } from '../domain/tags.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
 import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
@@ -64,6 +66,8 @@ export interface TenantReport {
   closedHandovers: number;
   /** 捨てた古い検索の記録 */
   sweptLogs: number;
+  /** 捨てた古い招待（使用済み・期限切れから30日たったもの） */
+  sweptInvitations: number;
   /** 本部に知らせを送ったか（送る必要がなければ false） */
   notifiedRequests: boolean;
 }
@@ -235,6 +239,8 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
     // 会社ごとに別のトランザクション。1社の失敗が他社の処理を止めないようにする
     try {
       const report = await database.withTenant(tenantId, async (db) => {
+        // 辞書のキャッシュは別プロセスの書き換えを TTL でしか拾えない。バッチは最新の辞書で索引したいので、最初に捨てる
+        invalidateDictionary(tenantId);
         const expired = await expireKnowledge(db, tokenizer);
         const fromLogs = await candidatesFromPickedLogs(db, tenantId, options.pickedThreshold ?? 3, options.logDays ?? 30);
         const fromProviders = await candidatesFromProviders(db, tenantId, options.candidateProviders ?? []);
@@ -247,6 +253,12 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
         const sweptLogs = (await db.query<{ id: number }>(
           `DELETE FROM search_logs WHERE created_at < now() - make_interval(days => $1) RETURNING id`,
           [SEARCH_LOG_DAYS],
+        )).length;
+        // 招待も、使用済み・期限切れの行が残り続けるので、30日たったものは捨てる
+        const sweptInvitations = (await db.query<{ id: string }>(
+          `DELETE FROM invitations
+            WHERE (used_at IS NOT NULL OR expires_at < now()) AND created_at < now() - interval '30 days'
+            RETURNING id`,
         )).length;
         await db.query(
           `UPDATE hashtags h SET use_count =
@@ -277,7 +289,7 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
             console.error(`tenant ${tenantId}: 利用の申請の知らせを送れませんでした`, err);
           }
         }
-        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, sweptLogs, notifiedRequests };
+        return { tenantId, expired, candidatesFromLogs: fromLogs, candidatesFromProviders: fromProviders, reindexed, staleKnowledge: stale[0]!.n, readingsFilled, sweptPhotos, closedHandovers, sweptLogs, sweptInvitations, notifiedRequests };
       });
       reports.push(report);
     } catch (err) {

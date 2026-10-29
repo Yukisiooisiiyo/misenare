@@ -11,6 +11,28 @@
 // 止めるのは「黙って壊れる」ものだけにする。足りなくても安全側に倒れるものは
 // 警告にとどめる。止めすぎると、出すのが怖くなって古い版が動き続ける。
 
+/**
+ * 日付の判断に使うタイムゾーン（MISENARE_TZ、既定は日本時間）。
+ * なぜ要るか：PostgreSQL の current_date はサーバーの TZ（Docker の postgres は UTC）で決まり、
+ * 日本の店舗では 0:00〜8:59 のあいだ「今日の引き継ぎ」が前日になる。
+ * 綴りを間違えると PostgreSQL の set_config が毎回失敗して全リクエストが落ちるので、起動のときに Intl で確かめて止める。
+ */
+export function appTimeZone(env: NodeJS.ProcessEnv = process.env): string {
+  const tz = env.MISENARE_TZ?.trim() || 'Asia/Tokyo';
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: tz });
+  } catch {
+    throw new Error(`MISENARE_TZ が正しくありません（IANA の名前で書いてください。例: Asia/Tokyo）: ${tz}`);
+  }
+  return tz;
+}
+
+/** 指定タイムゾーンでの「今日」を YYYY-MM-DD で返す（toISOString は UTC なので 9 時間ずれる）。 */
+export function todayIn(timeZone: string = appTimeZone(), now: Date = new Date()): string {
+  // sv-SE の日付表記が YYYY-MM-DD なので、これを借りる
+  return new Intl.DateTimeFormat('sv-SE', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+}
+
 export interface Finding {
   level: 'error' | 'warn' | 'info';
   key: string;
