@@ -133,6 +133,18 @@ describe('入力の範囲と長さ', () => {
     }
   });
 
+  it('オフセットの無い日時は 400（サーバーの TZ で読まれて日本時間と 9 時間ずれる）。+09:00 と Z は通る', async () => {
+    const base = { title: 'x', body: 'y', tagNames: ['#x'] };
+    for (const expiresAt of ['2099-10-30T09:00', '2099-10-30 09:00', '2099-10-30T09:00:00', '2099-10-30']) {
+      const r = await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { ...base, expiresAt });
+      assert.equal(r.status, 400, expiresAt);
+      assert.match(r.body.message, /タイムゾーン/);
+    }
+    for (const expiresAt of ['2099-10-30T09:00:00+09:00', '2099-10-30T00:00:00Z', '2099-10-30T09:00+0900']) {
+      assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { ...base, expiresAt })).status, 201, expiresAt);
+    }
+  });
+
   it('0000年の日付は 400', async () => {
     assert.equal((await call(trusted, 'GET', `/stores/${STORE_A}/handovers?date=0000-01-01`)).status, 400);
     assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: 'x', forDate: '0000-01-01' })).status, 400);

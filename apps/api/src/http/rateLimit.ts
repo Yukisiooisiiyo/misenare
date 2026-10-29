@@ -17,6 +17,8 @@ export interface RateRule {
 }
 
 export interface Limiter {
+  /** DB を使わず記憶の中だけで数える（取引の中から呼んでも接続を取り合わない）。DB で数える版は付けない */
+  readonly local?: boolean;
   /** 上限に達していれば false。達していなければ1回数えて true。 */
   take(key: string, rule: RateRule): Promise<boolean>;
   /** 上限に達しているかだけを見る（数えない） */
@@ -24,6 +26,7 @@ export interface Limiter {
 }
 
 export class MemoryRateLimiter implements Limiter {
+  readonly local = true;
   private readonly hits = new Map<string, number[]>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}

@@ -62,6 +62,26 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(hqToken, 'GET', '/me')).body.adminScope, 'tenant');
   });
 
+  it('認証つきの GET は取引を1回しか開かない（BEGIN と COMMIT は1組、set_config は tenant_id と TimeZone）', async () => {
+    const counter = db as unknown as { statements?: number };
+    if (counter.statements === undefined) return; // pg ドライバーには数える口が無い
+    const before = counter.statements;
+    assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
+    // 内訳：BEGIN, set_config×2, verifySession, users, memberships, /me の本体3本, COMMIT = 10 本。
+    // 以前は同じ GET で BEGIN / set_config / COMMIT の組が3回走り、TZ の分を除いても 15 本だった
+    assert.equal(counter.statements - before, 10);
+    // 取引が1つだけであることを直接確かめる
+    const log: string[] = [];
+    const orig = db.withTenant.bind(db);
+    db.withTenant = ((t: string, fn: Parameters<typeof orig>[1]) => { log.push(t); return orig(t, fn); }) as typeof db.withTenant;
+    try {
+      assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
+    } finally {
+      db.withTenant = orig;
+    }
+    assert.equal(log.length, 1, `取引が ${log.length} 回開かれました`);
+  });
+
   it('本部は店長の招待を作れ、店長は自店舗のスタッフを招待できる', async () => {
     const inv = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: '佐藤店長', trustLevel: 'trusted', adminScope: 'store' });
     assert.equal(inv.status, 201);

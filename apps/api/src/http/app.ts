@@ -100,7 +100,7 @@ import {
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
-import { loadActor, type Authenticator, type Identity } from './auth.ts';
+import { loadActorIn, type Authenticator, type Identity } from './auth.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
 import { HttpError, json, matchesEtag, readJson, Router } from './router.ts';
@@ -153,6 +153,21 @@ function isDateTime(v: unknown): v is string {
   return y >= 1 && y <= 9999;
 }
 
+/**
+ * 日時にタイムゾーン（Z か ±hh:mm）が付いているか。
+ * 付いていないと Date.parse も PostgreSQL もサーバーの TZ（多くは UTC）で読み、日本時間と 9 時間ずれる。
+ * Web は toISOString() で Z 付きを送るので、ずれるのは外から直接呼んだときだけ。
+ */
+function hasOffset(v: string): boolean {
+  return /[T ]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?\s?(Z|[+-]\d{2}(:?\d{2})?)$/i.test(v);
+}
+
+/** 日時の入力を確かめる。形が悪ければ message、オフセットが無ければその旨を 400 で返す */
+function checkDateTime(v: unknown, message: string): void {
+  if (!isDateTime(v)) throw new HttpError(400, message);
+  if (!hasOffset(v)) throw new HttpError(400, '日時にはタイムゾーン（Z か +09:00）を付けてください');
+}
+
 /** YYYY-MM-DD として実在する日付か */
 function isDateOnly(v: unknown): v is string {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
@@ -188,9 +203,7 @@ function knowledgeBody(v: unknown): Omit<KnowledgeInput, 'storeId'> {
     throw new HttpError(400, 'areaIds が正しくありません');
   }
   if (Array.isArray(b.areaIds) && b.areaIds.length > MAX_AREAS) throw new HttpError(400, `売場は${MAX_AREAS}か所までにしてください`);
-  if (b.expiresAt !== undefined && b.expiresAt !== null && !isDateTime(b.expiresAt)) {
-    throw new HttpError(400, 'expiresAt は日時の文字列か null にしてください');
-  }
+  if (b.expiresAt !== undefined && b.expiresAt !== null) checkDateTime(b.expiresAt, 'expiresAt は日時の文字列か null にしてください');
   if (b.baseVersion !== undefined && b.baseVersion !== null && !(Number.isInteger(b.baseVersion) && (b.baseVersion as number) >= 1)) {
     throw new HttpError(400, 'baseVersion は 1 以上の整数か null にしてください');
   }
@@ -279,9 +292,7 @@ function noticeBody(v: unknown): NoticeInput {
   if (b.requiresAck !== undefined && typeof b.requiresAck !== 'boolean') throw new HttpError(400, 'requiresAck は true か false です');
   for (const key of ['startsAt', 'endsAt']) {
     const v2 = b[key];
-    if (v2 !== undefined && v2 !== null && !isDateTime(v2)) {
-      throw new HttpError(400, `${key} は日時の文字列か null にしてください`);
-    }
+    if (v2 !== undefined && v2 !== null) checkDateTime(v2, `${key} は日時の文字列か null にしてください`);
   }
   return {
     title: b.title,
@@ -695,7 +706,7 @@ export interface AppDeps {
 export function createApp(deps: AppDeps) {
   const router = routes();
   // RATE_LIMIT=db なら台をまたいで共有する。既定はサーバーの記憶の中（1台向け）
-  const limiter = deps.limiter
+  const limiter: Limiter = deps.limiter
     ?? (process.env.RATE_LIMIT === 'db' ? new DatabaseRateLimiter((sql, params) => deps.database.raw(sql, params)) : new MemoryRateLimiter());
   const storage = deps.storage ?? storageFromEnv();
   const metrics = deps.metrics ?? new Metrics();
@@ -846,21 +857,12 @@ export function createApp(deps: AppDeps) {
     // 切れたトークンで鳴き続けただけで店舗全員が締め出されてはいけない。
     const failKey = clientKey(req, 'authfail');
     const blocked = await limiter.blocked(failKey, RULES.failedAuth);
-    const identity = await deps.auth.identify(req);
-    if (!identity) {
-      if (blocked) return tooMany();
-      if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
-      throw new HttpError(401, 'ログインしてください');
-    }
-    const actor = await loadActor(deps.database, identity);
-    if (!actor) throw new HttpError(401, 'この利用者は無効です');
-
-    // 書き込みは利用者ごとに共通の上限を掛ける。個々の経路で回数の穴を塞ぐのではなく、ここ1か所で止める
-    if (req.method !== 'GET' && req.method !== 'HEAD') {
-      if (!(await limiter.take(`write:user:${actor.userId}`, deps.userWriteRule ?? RULES.userWrite))) return tooMany();
-    }
-
-    return await deps.database.withTenant(actor.tenantId, (db) =>
+    // 利用者の確認・権限の読み込み・ハンドラを、**同じ取引1回**の中で流す。
+    // 以前は identify・loadActor・ハンドラで取引を3回開き、BEGIN / set_config ×2 / COMMIT が毎回3組走っていた。
+    // テナントはトークンから DB なしで分かるので、先に取引を開ける。
+    const isWrite = req.method !== 'GET' && req.method !== 'HEAD';
+    const writeRule = deps.userWriteRule ?? RULES.userWrite;
+    const runHandler = (db: Db, actor: Actor, identity: Identity) =>
       matched.handler(
         {
           actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
@@ -869,8 +871,40 @@ export function createApp(deps: AppDeps) {
         },
         req,
         matched.params,
-      ),
-    );
+      );
+    type Outcome =
+      | { kind: 'done'; response: Response }
+      | { kind: 'no_identity' }
+      | { kind: 'inactive' }
+      | { kind: 'limited' }
+      | { kind: 'continue'; actor: Actor; identity: Identity };
+    const tenantId = deps.auth.tenantOf(req);
+    const outcome: Outcome = tenantId === null ? { kind: 'no_identity' } : await deps.database.withTenant(tenantId, async (db): Promise<Outcome> => {
+      const identity = await deps.auth.identifyIn(db, req);
+      if (!identity || identity.tenantId !== tenantId) return { kind: 'no_identity' };
+      const actor = await loadActorIn(db, identity);
+      if (!actor) return { kind: 'inactive' };
+      if (isWrite) {
+        // 書き込みは利用者ごとに共通の上限を掛ける。個々の経路で回数の穴を塞ぐのではなく、ここ1か所で止める。
+        // 記憶の中で数える上限は取引の中でも安全。DB で数える上限は別の接続を取りに行くので、取引を閉じてから数える
+        if (!limiter.local) return { kind: 'continue', actor, identity };
+        if (!(await limiter.take(`write:user:${actor.userId}`, writeRule))) return { kind: 'limited' };
+      }
+      return { kind: 'done', response: await runHandler(db, actor, identity) };
+    });
+
+    // 失敗したときの回数の数え取りは、取引の外で（DB で数える上限が接続を取り合わないように）
+    if (outcome.kind === 'no_identity') {
+      if (blocked) return tooMany();
+      if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
+      throw new HttpError(401, 'ログインしてください');
+    }
+    if (outcome.kind === 'inactive') throw new HttpError(401, 'この利用者は無効です');
+    if (outcome.kind === 'limited') return tooMany();
+    if (outcome.kind === 'done') return outcome.response;
+
+    if (!(await limiter.take(`write:user:${outcome.actor.userId}`, writeRule))) return tooMany();
+    return await deps.database.withTenant(outcome.actor.tenantId, (db) => runHandler(db, outcome.actor, outcome.identity));
   }
 
   return async function handle(req: Request): Promise<Response> {

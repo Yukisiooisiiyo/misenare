@@ -4,7 +4,7 @@
 //   それ以外 … API（以前のパスとの互換）
 
 import { readFile, stat } from 'node:fs/promises';
-import { extname, join, normalize, sep } from 'node:path';
+import { basename, extname, join, normalize, sep } from 'node:path';
 import { matchesEtag } from './router.ts';
 
 const TYPES: Record<string, string> = {
@@ -37,6 +37,12 @@ function securityHeaders(photoOrigin?: string): Record<string, string> {
 
 const SECURITY_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
 
+/**
+ * ファイル名に内容のハッシュ（app.1a2b3c4d.js）が入っているものは、中身が変われば名前も変わる。
+ * なので1年キャッシュして、二度と取りに来させない。build.mjs が index.html をこの名前に書き換える。
+ */
+const HASHED_NAME = /\.[0-9a-f]{8,16}\.[A-Za-z0-9]+$/;
+
 export function staticFiles(dir: string) {
   const rootDir = normalize(dir).replace(/[\\/]+$/, '');
   return async (pathname: string, req?: Request): Promise<Response> => {
@@ -54,7 +60,9 @@ export function staticFiles(dir: string) {
       const st = await stat(file);
       if (!st.isFile()) throw new Error('not a file');
       const type = TYPES[extname(file)] ?? 'application/octet-stream';
-      const cache = extname(file) === '.html' ? 'no-cache' : 'public, max-age=300';
+      const cache = extname(file) === '.html'
+        ? 'no-cache'
+        : HASHED_NAME.test(basename(file)) ? 'public, max-age=31536000, immutable' : 'public, max-age=300';
       // 中身を読まずに決められる弱い ETag（大きさと更新時刻）。期限が切れた再取得や no-cache の index.html が、
       // 変わっていなければ 304 で済み、本文を送り直さない
       const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;

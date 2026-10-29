@@ -57,3 +57,22 @@ describe('静的ファイルの ETag', () => {
     assert.equal((await get('/app/none.js', { 'if-none-match': '*' })).status, 404);
   });
 });
+
+describe('ハッシュ付きファイル名の長期キャッシュ', () => {
+  it('app.<8桁>.js / styles.<8桁>.css は1年・immutable。ハッシュの無い名前や index.html は今までどおり', async () => {
+    await writeFile(join(dir, 'app.1a2b3c4d.js'), 'console.log(3);');
+    await writeFile(join(dir, 'styles.0123abcd.css'), 'body{}');
+    await writeFile(join(dir, 'app.12345.js'), 'x'); // 5桁は対象外
+    await writeFile(join(dir, 'app.ZZZZZZZZ.js'), 'x'); // 16進でない
+    const long = 'public, max-age=31536000, immutable';
+    assert.equal((await get('/app/app.1a2b3c4d.js')).headers.get('cache-control'), long);
+    assert.equal((await get('/app/styles.0123abcd.css')).headers.get('cache-control'), long);
+    assert.equal((await get('/app/app.12345.js')).headers.get('cache-control'), 'public, max-age=300');
+    assert.equal((await get('/app/app.ZZZZZZZZ.js')).headers.get('cache-control'), 'public, max-age=300');
+    assert.equal((await get('/app/app.js')).headers.get('cache-control'), 'public, max-age=300');
+    assert.equal((await get('/app/')).headers.get('cache-control'), 'no-cache');
+    // 304 でも同じ指定を返す
+    const tag = (await get('/app/app.1a2b3c4d.js')).headers.get('etag')!;
+    assert.equal((await get('/app/app.1a2b3c4d.js', { 'if-none-match': tag })).headers.get('cache-control'), long);
+  });
+});

@@ -4,6 +4,8 @@
 //   DB_DRIVER     … pg（既定。npm install が必要）/ psql（pg を入れられない開発環境向け）
 //   MISENARE_DEV_AUTH=1 … 開発用のヘッダー認証を使う（既定は招待QRの端末セッション）
 //   TOKENIZER=kuromoji … 形態素解析で分割する（npm install kuromoji が必要。既定は Intl.Segmenter）
+//   MISENARE_WORKERS … API のプロセス数（既定 1）。2 以上なら node:cluster で束ねる。
+//                      辞書のキャッシュと記憶の中の試行回数はプロセスごとになる（docs/deploy.md の 12）
 //   RATE_LIMIT=db … 試行回数を PostgreSQL で数える（台を増やすとき）
 //   METRICS_TOKEN … /metrics を見るための合言葉（本番では必ず設定する）
 //   ALERT_WEBHOOK_URL … サーバー側のエラーを知らせる先（Slack 互換）
@@ -23,16 +25,43 @@ import { DevHeaderAuthenticator, SessionAuthenticator } from './http/auth.ts';
 import { serve } from './http/nodeServer.ts';
 import { createSite } from './http/site.ts';
 import { Logger } from './http/observe.ts';
+import cluster from 'node:cluster';
 import { fileURLToPath } from 'node:url';
 
 // 設定の点検を先に行う。足りないものは、動き出す前に言う
+// （ワーカーでも同じ点検は通るが、同じ指摘を台数ぶん繰り返さないよう、言うのは親だけ）
 const report = checkConfig();
-if (report.findings.length > 0) {
+if (report.findings.length > 0 && !cluster.isWorker) {
   for (const line of formatReport(report)) console.error(`[設定] ${line}`);
 }
 if (report.fatal && process.env.CONFIG_CHECK !== 'off') {
   console.error('[設定] 上の × を直してから起動してください（CONFIG_CHECK=off で無視できます）');
   process.exit(78); // EX_CONFIG
+}
+
+// 1台の 4 OCPU を使い切るために、同じ serve() を回すプロセスを複数立てる。
+// 親は点検のあと子を立てて見張るだけで、DB には触れない。落ちた子は立て直す。
+const workers = Math.max(1, Math.floor(Number(process.env.MISENARE_WORKERS ?? 1)) || 1);
+if (workers >= 2 && cluster.isPrimary) {
+  let stopping = false;
+  const spawn = (): void => { cluster.fork(); };
+  for (let i = 0; i < workers; i++) spawn();
+  cluster.on('exit', (worker, code, signal) => {
+    if (stopping) return;
+    console.error(`[cluster] worker ${worker.process.pid} が止まりました（code=${code} signal=${signal}）。立て直します`);
+    // DB が落ちているなどで起動のたびに死ぬとき、休みなく立て直すと CPU を食い潰すので1秒あける
+    setTimeout(spawn, 1000);
+  });
+  const stop = (): void => {
+    stopping = true;
+    for (const w of Object.values(cluster.workers ?? {})) w?.kill('SIGTERM');
+    setTimeout(() => process.exit(0), 5000).unref();
+  };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  // 子が全員いなくなるまで親は動かし続ける。ここから下（DB を開いて serve する部分）は子だけが通る
+  await new Promise<void>((resolve) => cluster.on('exit', () => { if (stopping && Object.keys(cluster.workers ?? {}).length === 0) resolve(); }));
+  process.exit(0);
 }
 
 const url = process.env.DATABASE_URL;
