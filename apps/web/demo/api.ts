@@ -51,6 +51,9 @@ export type ScanResult =
   | { status: 'unknown'; janCode: string }
   | { status: 'found'; product: ProductCard; related: Hit[] };
 
+/** 本物の api.ts と同じ口。デモには 401 が無いので、登録しても何も起きない */
+export function onUnauthorized(_fn: () => void): void { /* デモでは何もしない */ }
+
 /** デモでは、ログイン状態は常に「入っている」 */
 export const session = {
   get token(): string | null { return 'demo'; },
