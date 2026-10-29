@@ -78,6 +78,8 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
   } else {
     assert(typeof input.name === 'string' && input.name.trim().length > 0 && input.name.length <= 40, 'invalid', '名前を1〜40文字で入力してください');
   }
+  // userId を指定したときも name は記録に残るので、あれば同じ上限で止める
+  if (input.userId && input.name !== undefined) assert(input.name.length <= 40, 'invalid', '名前は40文字以内にしてください');
 
   const token = issueToken(actor.tenantId);
   const row = await one<{ id: string; expires_at: string }>(

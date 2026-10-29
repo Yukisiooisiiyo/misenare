@@ -184,6 +184,20 @@ describe('利用の申請', () => {
     await clean();
   });
 
+  it('同じ申請を2人が同時に承認しても、1人しか通らない', async () => {
+    await setup();
+    await assert.rejects(knock(), /申請を出しました/);
+    const [req] = await db.withTenant(T, (q) => listRequests(q, manager));
+    const results = await Promise.allSettled([
+      db.withTenant(T, (q) => approveRequest(q, manager, req!.id, { storeId: STORE_A })),
+      db.withTenant(T, (q) => approveRequest(q, hq, req!.id, { storeId: STORE_A })),
+    ]);
+    assert.equal(results.filter((x) => x.status === 'fulfilled').length, 1);
+    const users = await db.withTenant(T, (q) => q.query(`SELECT 1 FROM users WHERE email = 'tanaka@kdenki.example.co.jp'`));
+    assert.equal(users.length, 1);
+    await clean();
+  });
+
   it('同じ申請を2回決められない', async () => {
     await setup();
     await assert.rejects(knock(), /申請を出しました/);

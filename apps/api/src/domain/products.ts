@@ -194,12 +194,15 @@ export async function registerProduct(db: Db, actor: Actor, storeId: string, inp
   await assertArea(db, storeId, input.areaId);
 
   const trusted = isTrusted(actor);
-  const p = await one<{ id: string }>(
-    db,
+  // 確認と挿入の間に同じ JAN が入ると UNIQUE 違反で 500 になるので、衝突は conflict に寄せる
+  const inserted = await db.query<{ id: string }>(
     `INSERT INTO products (tenant_id, jan_code, name, maker, state, origin_store_id, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (tenant_id, jan_code) DO NOTHING RETURNING id`,
     [actor.tenantId, input.janCode, input.name.trim(), input.maker?.trim() || null, trusted ? 'active' : 'pending', storeId, actor.userId],
   );
+  assert(inserted.length === 1, 'conflict', 'この商品はすでに登録されています');
+  const p = inserted[0]!;
   const tagIds = await resolveTags(db, actor, input.tagNames);
   await setTags(db, actor, p.id, tagIds);
   await setStoreProduct(db, actor, storeId, p.id, input.areaId ?? null, input.note ?? null);
@@ -285,7 +288,7 @@ export async function updateProduct(db: Db, actor: Actor, storeId: string, produ
 export async function approveProductChange(db: Db, actor: Actor, requestId: string) {
   const r = await maybeOne<{ store_id: string; entity_id: string; payload: ProductPatch; requested_by: string; state: string }>(
     db,
-    `SELECT store_id, entity_id, payload, requested_by, state FROM change_requests WHERE id = $1 AND entity_type = 'product'`,
+    `SELECT store_id, entity_id, payload, requested_by, state FROM change_requests WHERE id = $1 AND entity_type = 'product' FOR UPDATE`,
     [requestId],
   );
   assert(r !== undefined, 'not_found', '依頼が見つかりません');
@@ -294,7 +297,13 @@ export async function approveProductChange(db: Db, actor: Actor, requestId: stri
   const exists = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [r.entity_id]);
   assert(exists !== undefined, 'not_found', '商品が削除されています');
   await applyPatch(db, actor, r.store_id, r.entity_id, r.payload, r.requested_by);
-  await db.query(`UPDATE change_requests SET state = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, [requestId, actor.userId]);
+  // 同時に2人が承認すると applyPatch が2回走る。行ロックで待たせた上で、pending のときだけ確定する
+  const done = await db.query(
+    `UPDATE change_requests SET state = 'approved', decided_by = $2, decided_at = now()
+      WHERE id = $1 AND state = 'pending' RETURNING id`,
+    [requestId, actor.userId],
+  );
+  assert(done.length === 1, 'conflict', 'この依頼は処理済みです');
   return { productId: r.entity_id };
 }
 

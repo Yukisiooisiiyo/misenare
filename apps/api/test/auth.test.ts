@@ -50,6 +50,11 @@ describe('招待と端末セッション', () => {
     assert.ok(rows.every((r) => /^[0-9a-f]{64}$/.test(r.token_hash) && !hqToken.includes(r.token_hash)));
   });
 
+  it('既存の利用者への招待でも、名前を付けるなら40文字まで', async () => {
+    const r = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, userId: hq.userId, name: 'あ'.repeat(41) });
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+  });
+
   it('ログインしていない・形の違うトークン・存在しないトークンは 401', async () => {
     assert.equal((await call(null, 'GET', '/me')).status, 401);
     assert.equal((await call('garbage', 'GET', '/me')).status, 401);

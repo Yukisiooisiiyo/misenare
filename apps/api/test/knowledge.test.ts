@@ -12,7 +12,7 @@ import {
   rejectVersion,
   revertToVersion,
 } from '../src/domain/knowledge.ts';
-import { search, zeroHitQueries } from '../src/domain/search.ts';
+import { recordSearchFeedback, search, zeroHitQueries } from '../src/domain/search.ts';
 import { exportDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, hq, manager, otherTenant, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
@@ -179,6 +179,14 @@ describe('検索の範囲と並び順', () => {
     const r = await run((q) => search(q, tokenizer, trusted, STORE_A, 'テレビ'));
     assert.ok(!ids(r).includes(b.id));
     await rejects(run((q) => search(q, tokenizer, trusted, STORE_B, 'テレビ')), 'forbidden');
+  });
+
+  it('入れない店舗のナレッジを、開いた記録に結びつけられない', async () => {
+    const b = await db.withTenant(T, (q) => createKnowledge(q, tokenizer, storeBStaff, {
+      storeId: STORE_B, title: '駅前店の鍵の保管', body: '事務所の金庫。', tagNames: ['#鍵'],
+    }));
+    // 自社のナレッジなので存在確認は通るが、STORE_A の人は STORE_B に入れない
+    await rejects(run((q) => recordSearchFeedback(q, trusted, 1, { openedKnowledgeId: b.id })), 'forbidden');
   });
 
   it('他社のデータは行レベルセキュリティで見えない', async () => {
