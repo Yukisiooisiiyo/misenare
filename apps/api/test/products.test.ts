@@ -183,3 +183,20 @@ describe('商品情報の編集と履歴', () => {
     assert.equal(after.status === 'found' && after.product.name, '東芝 冷凍冷蔵庫 GR-W600');
   });
 });
+
+describe('変更依頼の二重承認', () => {
+  it('同じ依頼を2人が同時に承認しても、反映されるのは1回だけ', async () => {
+    const r = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, FRIDGE));
+    if (r.status !== 'found') throw new Error('not found');
+    const req = await run((q) => updateProduct(q, visitor, STORE_A, r.product.id, { maker: '二重承認の試し' }));
+    const results = await Promise.allSettled([
+      run((q) => approveProductChange(q, manager, req.requestId!)),
+      run((q) => approveProductChange(q, hq, req.requestId!)),
+    ]);
+    assert.equal(results.filter((x) => x.status === 'fulfilled').length, 1);
+    const lost = results.find((x) => x.status === 'rejected') as PromiseRejectedResult;
+    assert.ok(lost.reason instanceof DomainError && lost.reason.code === 'conflict');
+    const h = await run((q) => productHistory(q, trusted, STORE_A, r.product.id));
+    assert.equal(h.filter((x) => x.field === 'maker' && x.after === '二重承認の試し').length, 1, '履歴が2重に残っている');
+  });
+});

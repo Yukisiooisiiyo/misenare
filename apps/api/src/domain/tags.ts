@@ -46,12 +46,19 @@ export async function resolveTags(db: Db, actor: Actor, names: string[]): Promis
       ids.push(...(await canonicalTagIds(db, [row.id])));
       continue;
     }
+    // 確認と挿入の間に同じ名前が入ると UNIQUE 違反で 500 になるので、衝突したら入った方を引き直す
     const created = await db.query<{ id: string }>(
       `INSERT INTO hashtags (tenant_id, name, state, created_by)
-       VALUES ($1, $2, $3, $4) RETURNING id`,
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tenant_id, name) DO NOTHING RETURNING id`,
       [actor.tenantId, name, isTrusted(actor) ? 'active' : 'pending', actor.userId],
     );
-    ids.push(created[0]!.id);
+    if (created[0]) {
+      ids.push(created[0].id);
+      continue;
+    }
+    const raced = await db.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = $1`, [name]);
+    ids.push(...(await canonicalTagIds(db, [raced[0]!.id])));
   }
   return [...new Set(ids)];
 }

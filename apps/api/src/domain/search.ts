@@ -187,8 +187,10 @@ export async function recordSearchFeedback(
 ) {
   // 外部キーの検査は行レベルセキュリティを無視するので、自社のIDかを先に確かめる
   if (feedback.openedKnowledgeId) {
-    const k = await db.query(`SELECT 1 FROM knowledge WHERE id = $1`, [feedback.openedKnowledgeId]);
+    const k = await db.query<{ store_id: string }>(`SELECT store_id FROM knowledge WHERE id = $1`, [feedback.openedKnowledgeId]);
     assert(k.length === 1, 'not_found', 'ナレッジが見つかりません');
+    // 自社のナレッジでも、入れない店舗のものを検索ログに結びつけさせない
+    assert(canAccessStore(actor, k[0]!.store_id), 'forbidden', 'この店舗のナレッジは扱えません');
   }
   const tagIds = [feedback.suggestedTagId, feedback.pickedTagId].filter((x): x is string => typeof x === 'string');
   if (tagIds.length > 0) {

@@ -137,7 +137,7 @@ export async function approveRequest(
   }>(
     db,
     `SELECT provider_id, subject, email, claimed_name, tenant_id
-       FROM access_requests WHERE id = $1 AND status = 'pending'`,
+       FROM access_requests WHERE id = $1 AND status = 'pending' FOR UPDATE`,
     [id],
   );
   if (!row) throw new DomainError('not_found', 'この申請は見つかりません（すでに決まっているかもしれません）');
@@ -170,11 +170,13 @@ export async function approveRequest(
      ON CONFLICT (provider_id, subject) DO UPDATE SET user_id = EXCLUDED.user_id`,
     [row.tenant_id, row.provider_id, row.subject, userId, row.email],
   );
-  await db.query(
+  // 行ロックで待たされた側がここで pending でなくなっていれば、2重承認なので止める
+  const done = await db.query(
     `UPDATE access_requests SET status = 'approved', decided_at = now(), decided_by = $2, user_id = $3
-      WHERE id = $1`,
+      WHERE id = $1 AND status = 'pending' RETURNING id`,
     [id, actor.userId, userId],
   );
+  assert(done.length === 1, 'conflict', 'この申請はすでに処理されています');
   return { userId };
 }
 

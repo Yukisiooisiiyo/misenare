@@ -128,17 +128,36 @@ const MAX_DEVICE_NAME = 60;
 const MAX_TAGS = 20;
 /** 1件に結びつけられる売場の数 */
 const MAX_AREAS = 50;
+/** 取り込むファイル名の長さ */
+const MAX_IMPORT_NAME = 200;
+/** タグの読みの確定で一度に送れる件数。ドメイン側の重複除去後の検査より前に、本文の大きさで止める */
+const MAX_READINGS_PER_REQUEST = 20;
+/** パスキーの値（base64 の塊）の長さ。正当な値は数KBなので十分な余裕を取った上限 */
+const MAX_PASSKEY_FIELD = 65536;
+const MAX_EMAIL = 254;
+const MAX_DOMAIN = 253;
+const MAX_ISSUER = 500;
+
+/** 文字列の長さを HTTP 層で止める（DB や外部への問い合わせまで長い値を通さないため） */
+function checkLength(label: string, v: string, max: number): void {
+  if (v.length > max) throw new HttpError(400, `${label} は${max}文字までにしてください`);
+}
 
 /** 日時の文字列として受け取れるか（Date.parse だけでは '2024-13-45' のような形も通ってしまい、DB のキャストで 500 になる） */
 function isDateTime(v: unknown): v is string {
   if (typeof v !== 'string' || v.length > 40) return false;
   const t = Date.parse(v);
-  return !Number.isNaN(t) && Math.abs(t) < 8.64e15;
+  if (Number.isNaN(t) || Math.abs(t) >= 8.64e15) return false;
+  // PostgreSQL の timestamptz は西暦 1〜9999 年まで。範囲外（0000年・+010000年）は DB のキャストで 500 になる
+  const y = new Date(t).getUTCFullYear();
+  return y >= 1 && y <= 9999;
 }
 
 /** YYYY-MM-DD として実在する日付か */
 function isDateOnly(v: unknown): v is string {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  // 0000年は PostgreSQL の date に無く、::date で 500 になる
+  if (v.slice(0, 4) === '0000') return false;
   const d = new Date(`${v}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
@@ -191,7 +210,9 @@ function optionalString(b: Record<string, unknown>, key: string): void {
 
 function productPatchBody(v: unknown): ProductPatch {
   const b = (v ?? {}) as Record<string, unknown>;
-  for (const k of ['name', 'maker', 'note']) optionalString(b, k);
+  for (const k of ['maker', 'note']) optionalString(b, k);
+  // name は null を許さない（ドメイン側で trim() するため、null だと TypeError で 500 になる）
+  if (b.name !== undefined && typeof b.name !== 'string') throw new HttpError(400, '商品名は空にできません');
   if (b.areaId !== undefined && b.areaId !== null && !(typeof b.areaId === 'string' && UUID.test(b.areaId))) {
     throw new HttpError(400, 'areaId が正しくありません');
   }
@@ -483,6 +504,8 @@ function routes(): Router<Ctx> {
   r.post('/stores/:storeId/imports', async (c, req, p) => {
     const name = new URL(req.url).searchParams.get('name') ?? '';
     if (!name) throw new HttpError(400, 'name（ファイル名）が必要です');
+    // 名前は記録に残り画面にも出るので、長すぎるものは受けない
+    if (name.length > MAX_IMPORT_NAME) throw new HttpError(400, `name は${MAX_IMPORT_NAME}文字までにしてください`);
     const body = Buffer.from(await req.arrayBuffer());
     if (body.byteLength > MAX_IMPORT_BYTES) throw new HttpError(413, 'ファイルが大きすぎます');
     return json(await importManual(c.db, c.actor, p.storeId!, name, body), 201);
@@ -512,6 +535,7 @@ function routes(): Router<Ctx> {
     if (!Array.isArray(raw) || raw.some((x) => typeof x !== 'string')) {
       throw new HttpError(400, 'readings は文字列の配列です');
     }
+    if (raw.length > MAX_READINGS_PER_REQUEST) throw new HttpError(400, `readings は${MAX_READINGS_PER_REQUEST}個までにしてください`);
     return json(await confirmReading(c.db, c.actor, p.tagId!, raw as string[]));
   });
   r.post('/tags/merge', async (c, req) => {
@@ -533,6 +557,7 @@ function routes(): Router<Ctx> {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     for (const key of ['clientDataJSON', 'attestationObject']) {
       if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+      checkLength(key, b[key] as string, MAX_PASSKEY_FIELD);
     }
     return json(await finishRegistration(c.db, c.actor, site, {
       clientDataJSON: b.clientDataJSON as string,
@@ -553,6 +578,10 @@ function routes(): Router<Ctx> {
       throw new HttpError(400, 'domains（メールアドレスのドメイン）が必要です');
     }
     if (b.domains.length > 20) throw new HttpError(400, 'ドメインは20個までにしてください');
+    checkLength('issuer', b.issuer, MAX_ISSUER);
+    checkLength('clientId', b.clientId, 200);
+    if (typeof b.clientSecret === 'string') checkLength('clientSecret', b.clientSecret, 4000);
+    for (const d of b.domains as string[]) checkLength('domains の各要素', d, MAX_DOMAIN);
     if (b.defaultStoreId !== undefined && b.defaultStoreId !== null && !(typeof b.defaultStoreId === 'string' && UUID.test(b.defaultStoreId))) {
       throw new HttpError(400, 'defaultStoreId が正しくありません');
     }
@@ -577,6 +606,7 @@ function routes(): Router<Ctx> {
     }
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.domain !== 'string') throw new HttpError(400, 'domain が必要です');
+    checkLength('domain', b.domain, MAX_DOMAIN);
     return json(await verifyDomain(c.db, c.actor, b.domain, (name) => dnsResolveTxt(name)));
   });
   // つなぎを確かめる。外に取りに行くので、本部の管理者だけ・回数も止める
@@ -587,6 +617,7 @@ function routes(): Router<Ctx> {
     }
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.issuer !== 'string') throw new HttpError(400, 'issuer が必要です');
+    checkLength('issuer', b.issuer, MAX_ISSUER);
     return json(await checkConnection(c.oidc, c.actor, b.issuer));
   });
 
@@ -737,6 +768,7 @@ export function createApp(deps: AppDeps) {
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       for (const key of ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature', 'userHandle']) {
         if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+        checkLength(key, b[key] as string, MAX_PASSKEY_FIELD);
       }
       try {
         const result = await loginWithPasskey(deps.database, site, {
@@ -764,6 +796,7 @@ export function createApp(deps: AppDeps) {
       const site = requireSsoSite();
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       if (typeof b.email !== 'string') throw new HttpError(400, 'メールアドレスが必要です');
+      checkLength('email', b.email, MAX_EMAIL);
       return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo }));
     }
     if (url.pathname === '/auth/sso/callback' && req.method === 'GET') {
