@@ -192,6 +192,9 @@ export async function finishRegistration(
     throw new DomainError('invalid', err instanceof Error ? err.message : String(err));
   }
 
+  // 上限は start で見ているが、start を何度も呼んで合言葉を貯めれば finish で超えられるので、入れる直前にも見る
+  const count = await one<{ n: number }>(db, `SELECT count(*)::int AS n FROM webauthn_credentials WHERE user_id = $1 AND disabled_at IS NULL`, [actor.userId]);
+  assert(count.n < MAX_CREDENTIALS, 'conflict', `パスキーは${MAX_CREDENTIALS}個までです`);
   const row = await one<{ id: string }>(
     db,
     `INSERT INTO webauthn_credentials (tenant_id, user_id, credential_id, public_key, algorithm, sign_count, name)

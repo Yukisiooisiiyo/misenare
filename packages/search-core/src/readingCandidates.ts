@@ -206,10 +206,19 @@ function score(chosen: Option[], parts: Part[]): number {
  * 読みの候補を、確からしい順に返す。
  * 表に無い漢字が混ざる語では空を返す（そのときは候補を出さず、入力欄だけ見せる）。
  */
+/**
+ * 組み立てる途中で見る葉（末端）の数の上限。
+ * trim() は部品ごとの選択肢の積を抑えるが、連濁・半濁・促音便の分岐はその外で掛け算になる。
+ * 訓読みの漢字が続く語では字数に対して指数で増え、20字で9秒かかった。
+ * 読みの候補は「当てられない語では黙って空を返す」方針なので、超えたら空でよい。
+ */
+const MAX_LEAVES = 20_000;
+
 export function readingCandidates(word: string, limit = 5): string[] {
   const parts = split(word.trim(), kanjiReadings());
   if (parts === null || parts.length === 0) return [];
   trim(parts);
+  let leaves = 0;
 
   // 候補は「読み方の種類」ごとに分けて持つ。音読みで揃う形・訓読みで揃う形・
   // 混ざる形の3通りで、どれになるかは語によって違い、こちらからは決められない。
@@ -219,7 +228,9 @@ export function readingCandidates(word: string, limit = 5): string[] {
   // 前の語の末尾が決まらないと促音便（ハツ＋チュウ → ハッチュウ）を決められないので、
   // 組み立てながら音を変えていく。変えた形も変えない形も残す。
   const walk = (i: number, text: string): void => {
+    if (leaves > MAX_LEAVES) return;
     if (i === parts.length) {
+      leaves++;
       const s = score(chosen, parts);
       const prev = best.get(text);
       if (prev === undefined || prev.score < s) best.set(text, { score: s, kind: kindOf(chosen) });
@@ -256,6 +267,7 @@ export function readingCandidates(word: string, limit = 5): string[] {
     }
   };
   walk(0, '');
+  if (leaves > MAX_LEAVES) return []; // 組み合わせが多すぎる語。候補は出さず、入力欄だけ見せる
 
   // 採り方は3つの決まりで絞る。どれも「5つの枠を無駄にしない」ための工夫。
   //

@@ -122,22 +122,29 @@ export async function sweepRateLimits(raw: Raw, keepHours = 1): Promise<number> 
 }
 
 export const RULES = {
-  /** 招待の受け取り：10分で10回まで */
-  acceptInvitation: { limit: 10, windowMs: 10 * 60_000 },
+  /** 招待の受け取りの**失敗**：10分で20回まで（成功は数えない。店舗の端末は同じ回線から来る） */
+  acceptInvitation: { limit: 20, windowMs: 10 * 60_000 },
   /** 無効なトークンでのアクセス：10分で30回まで（超えたら、その接続元からの認証付きリクエストを止める） */
   failedAuth: { limit: 30, windowMs: 10 * 60_000 },
   /**
-   * パスキーで入る：10分で20回まで。
+   * パスキーで入る：10分で60回まで（start で数え、finish は失敗だけ数える）。
+   * 店舗の端末は同じ回線から来るので、朝礼前の一斉ログインが通る数にしておく。
    * ログイン前に呼べる経路なので、総当たりの的になる。パスキーは署名を破れないが、
    * 1回ごとに chall を作って鍵を引くので、数を打たれると台が重くなる。
    */
-  passkeyLogin: { limit: 20, windowMs: 10 * 60_000 },
+  passkeyLogin: { limit: 60, windowMs: 10 * 60_000 },
   /**
-   * 会社アカウントで入る：10分で20回まで。
+   * 会社アカウントで入る：10分で40回まで（start で数え、戻りは失敗だけ数える）。
    * 入口（/auth/sso/start）は打たれたアドレスでドメインの登録を引くので、
    * 数を打てば「どの会社が導入しているか」を外から数えられる。そこを鈍らせる。
    */
-  ssoLogin: { limit: 20, windowMs: 10 * 60_000 },
+  ssoLogin: { limit: 40, windowMs: 10 * 60_000 },
+  /**
+   * ログイン後の重い読み取り（検索・バーコード・辞書の同期・読みの案）：1人あたり1分に120回まで。
+   * 1回ごとにタグ辞書を読み直すので、人が打てる速さを超える連打だけを止める。
+   * 鍵は利用者なので、店舗の回線で誰かの巻き添えにはならない。
+   */
+  heavyRead: { limit: 120, windowMs: 60_000 },
 } satisfies Record<string, RateRule>;
 
 /** node:http のアダプタが付ける、接続元の IP のヘッダー（外から来た同名のヘッダーは上書きする） */

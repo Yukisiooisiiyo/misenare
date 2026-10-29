@@ -350,7 +350,10 @@ export async function approveProduct(db: Db, actor: Actor, productId: string) {
 export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: string, productId: string) {
   const k = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM knowledge WHERE id = $1`, [knowledgeId]);
   assert(k !== undefined, 'not_found', 'ナレッジが見つかりません');
-  assert(canModerate(actor, k.store_id) || (isTrusted(actor) && canAccessStore(actor, k.store_id)), 'forbidden', '紐づける権限がありません');
+  // 本文を直せる人と同じ：店舗は trusted 以上、全店共通は本部だけ
+  // （canAccessStore(actor, null) は常に true なので、全店共通は別に見る）
+  assert(isTrusted(actor) && canAccessStore(actor, k.store_id), 'forbidden', '紐づける権限がありません');
+  if (k.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジに商品を紐づけられるのは本部のみです');
   const p = await maybeOne<{ state: string }>(db, `SELECT state FROM products WHERE id = $1`, [productId]);
   assert(p !== undefined, 'not_found', '商品が見つかりません');
   assert(p.state === 'active', 'conflict', '承認待ちの商品には紐づけられません');

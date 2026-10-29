@@ -139,6 +139,14 @@ describe('編集と版', () => {
     assert.ok(forOwner.some((v) => v.state === 'rejected'), '書いた本人には見える');
   });
 
+  it('一度も公開されていない投稿の版は、書いた本人と承認者にしか見えない（getKnowledge と同じ）', async () => {
+    const draft = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '下書き', body: '誰にも見せない本文', tagNames: ['#下書き'] }));
+    const stranger = { ...visitor, userId: '40000000-0000-0000-0000-000000000002', trustLevel: 'visitor' as const };
+    await rejects(run((q) => listVersions(q, stranger, draft.id)), 'forbidden');
+    assert.ok((await run((q) => listVersions(q, visitor, draft.id))).length === 1, '本人は見える');
+    assert.ok((await run((q) => listVersions(q, trusted, draft.id))).length === 1, '承認者は見える');
+  });
+
   it('承認待ち・却下の案には「戻す」で公開できない', async () => {
     const pend = (await run((q) => listVersions(q, trusted, id))).find((v) => v.state === 'pending')!;
     await rejects(run((q) => revertToVersion(q, tokenizer, trusted, id, pend.version)), 'conflict');

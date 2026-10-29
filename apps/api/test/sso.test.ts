@@ -38,7 +38,7 @@ async function setup(over: Partial<Parameters<typeof addProvider>[2]> = {}) {
   }));
   // ドメインは DNS に印を置くまで入口で使われない（なりすまし対策）。
   // ここでは置けたことにする。印そのものの試験は「ドメインの持ち主…」の節。
-  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
+  await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now() WHERE tenant_id = $1`, [T]));
   return added;
 }
 
@@ -88,6 +88,43 @@ describe('設定の管理', () => {
       await assert.rejects(addProvider(q, hq, {
         issuer: 'https://idp2.example.com', clientId: 'x', domains: ['b.example.com'], jitEnabled: true,
       }), /配属先/);
+    });
+  });
+
+  it('他社が未確認のまま置いたドメインは、持ち主の会社の登録を塞がない', async () => {
+    // 他社（または間違えた誰か）が kdenki.example.co.jp を未確認のまま登録している
+    await db.withTenant(OTHER_T, (q) => addProvider(q, otherTenant, {
+      issuer: 'https://idp-other.example.com', clientId: 'o', domains: ['kdenki.example.co.jp'],
+    }));
+    // 本物の会社は登録できる（確かめられるのは DNS に印を置ける持ち主だけ）
+    const mine = await setup();
+    assert.ok(mine.id);
+    // 確かめ済みになったあとは、他社は同じドメインを登録できない
+    await assert.rejects(
+      db.withTenant(OTHER_T, (q) => addProvider(q, otherTenant, {
+        issuer: 'https://idp-other2.example.com', clientId: 'o2', domains: ['kdenki.example.co.jp'],
+      })),
+      /すでに登録されています/,
+    );
+    // 自社の中で同じドメインを2つの設定に付けることもできない
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(addProvider(q, hq, { issuer: 'https://idp-dup.example.com', clientId: 'd', domains: ['kdenki.example.co.jp'] }), /すでに登録されています/);
+    });
+    for (const t of [OTHER_T, T]) {
+      await db.withTenant(t, async (q) => { await q.query(`DELETE FROM sso_domains`); await q.query(`DELETE FROM sso_providers`); });
+    }
+  });
+
+  it('同じ発行元と client_id で作り直すと、500 ではなく断る', async () => {
+    await setup();
+    await db.withTenant(T, async (q) => {
+      await assert.rejects(addProvider(q, hq, { issuer: idp.issuer, clientId: idp.clientId, domains: ['another.example.com'] }), /すでにあります/);
+      // 配属先の店舗は自社のもの
+      await assert.rejects(addProvider(q, hq, {
+        issuer: 'https://idp-x.example.com', clientId: 'x', domains: ['x.example.com'], defaultStoreId: '00000000-0000-0000-0000-00000000dead',
+      }), /店舗が見つかりません/);
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
     });
   });
 
@@ -491,13 +528,13 @@ describe('ドメインの持ち主であることを確かめる', () => {
     // ここが塞げていないと、先に登録した会社が他社の社員の行き先を決められる。
     // 本物に似せた入力欄に送れば、合言葉を取られる。
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL WHERE tenant_id = $1`, [T]));
     await assert.rejects(
       startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' }),
       /まだ用意されていません/,
     );
     // 確かめ済みにすれば使える
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now()`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now() WHERE tenant_id = $1`, [T]));
     const okay = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
     assert.ok(okay.authorizeUrl);
     await clean();
@@ -505,7 +542,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('DNS に印が置けていれば、確かめ済みになる', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     const [row] = await db.withTenant(T, (q) => q.query<{ verify_token: string }>(
       `SELECT verify_token FROM sso_domains WHERE domain = $1`, ['kdenki.example.co.jp']));
     const token = row!.verify_token;
@@ -525,13 +562,13 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('印が違えば、確かめ済みにしない', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     const wrong = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
       async () => [['misenare-verify=ちがう印']]));
     assert.equal(wrong.verified, false);
     assert.ok(wrong.detail?.includes('別の値'), wrong.detail ?? '');
 
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET checked_at = NULL WHERE tenant_id = $1`, [T]));
     const missing = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp', async () => []));
     assert.equal(missing.verified, false);
     assert.ok(missing.detail?.includes('見つかりません'), missing.detail ?? '');
@@ -540,7 +577,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('他社が登録したドメインは、確かめることも印を見ることもできない', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     const [row] = await db.withTenant(T, (q) => q.query<{ verify_token: string }>(
       `SELECT verify_token FROM sso_domains WHERE domain = $1`, ['kdenki.example.co.jp']));
     // 他社の本部管理者が、自社の登録済みドメインを確かめようとする
@@ -557,7 +594,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('引けなくても落ちない（置いた直後は反映待ち）', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     const result = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
       async () => { throw new Error('ENOTFOUND'); }));
     assert.equal(result.verified, false);
@@ -567,7 +604,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('連打しても DNS を叩き続けない', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     let asked = 0;
     const ask = () => db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp',
       async () => { asked++; return []; }));
@@ -580,7 +617,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
 
   it('置き場所と値を返す（画面に出して、情報システム部に頼むため）', async () => {
     await setup();
-    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL`));
+    await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL, checked_at = NULL WHERE tenant_id = $1`, [T]));
     const result = await db.withTenant(T, (q) => verifyDomain(q, hq, 'kdenki.example.co.jp', async () => []));
     assert.equal(result.record.name, '_misenare-verify.kdenki.example.co.jp');
     assert.equal(result.record.type, 'TXT');

@@ -9,6 +9,7 @@
 // 既定はこちら。1万人を先に登録してもらう必要はなく、知らない人も勝手には入れない。
 
 import { maybeOne, one, type Db } from '../db/db.ts';
+import { assertStore } from './scope.ts';
 import { looksLikeEmail } from '../mail/mailer.ts';
 import { assert, DomainError, type Actor, type TrustLevel } from './actor.ts';
 
@@ -141,8 +142,8 @@ export async function approveRequest(
   );
   if (!row) throw new DomainError('not_found', 'この申請は見つかりません（すでに決まっているかもしれません）');
 
-  const store = await maybeOne<{ id: string }>(db, `SELECT id FROM stores WHERE id = $1`, [input.storeId]);
-  assert(store !== null, 'not_found', '店舗が見つかりません');
+  // maybeOne は無いとき undefined を返す（null ではない）。一周目でここを直したつもりで直っていなかった
+  await assertStore(db, input.storeId);
 
   const name = (input.name ?? row.claimed_name ?? row.email.split('@')[0]!).trim().slice(0, 60);
   assert(name !== '', 'invalid', '名前を入れてください');
