@@ -13,7 +13,7 @@ import {
   revertToVersion,
 } from '../src/domain/knowledge.ts';
 import { search, zeroHitQueries } from '../src/domain/search.ts';
-import { exportDictionary } from '../src/domain/tags.ts';
+import { exportDictionary, invalidateDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, hq, manager, otherTenant, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
@@ -200,6 +200,8 @@ describe('検索の範囲と並び順', () => {
        SELECT $1, 'synonym', a.id, c.id, 'approved' FROM hashtags a, hashtags c WHERE a.name = 'エアコン' AND c.name = 'クーラー'`,
       [T],
     ));
+    // SQL で直接書いたので、辞書のキャッシュは自分で捨てる（画面の操作なら承認の関数が捨てる）
+    invalidateDictionary(T);
     const after = await run((q) => search(q, tokenizer, trusted, STORE_A, '#エアコン'));
     assert.ok(ids(after).includes(k.id));
     assert.equal(after.hits[0]!.title, 'エアコンの掃除', '直接タグが付いたものが上');

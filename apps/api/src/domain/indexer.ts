@@ -37,7 +37,7 @@ export async function indexKnowledge(db: Db, tokenizer: Tokenizer, knowledgeId: 
     `SELECT id, name FROM hashtags WHERE id = ANY($1::uuid[]) AND state = 'active'`,
     [await canonicalTagIds(db, doc.tag_ids)],
   );
-  const dictionary = await loadDictionary(db);
+  const dictionary = await loadDictionary(db, doc.tenant_id);
   const analyzed = analyzeDocument(
     { title: doc.title, body: doc.body, tagNames: tagRows.map((t) => t.name) },
     { tokenizer, dictionary },

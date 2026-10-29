@@ -5,6 +5,7 @@
 
 import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
+import { matchesEtag } from './router.ts';
 
 const TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -38,7 +39,7 @@ const SECURITY_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
 
 export function staticFiles(dir: string) {
   const rootDir = normalize(dir).replace(/[\\/]+$/, '');
-  return async (pathname: string): Promise<Response> => {
+  return async (pathname: string, req?: Request): Promise<Response> => {
     const rel = pathname.replace(/^\/app\/?/, '') || 'index.html';
     let decoded: string;
     try {
@@ -52,10 +53,16 @@ export function staticFiles(dir: string) {
     try {
       const st = await stat(file);
       if (!st.isFile()) throw new Error('not a file');
-      const body = await readFile(file);
       const type = TYPES[extname(file)] ?? 'application/octet-stream';
       const cache = extname(file) === '.html' ? 'no-cache' : 'public, max-age=300';
-      return new Response(body, { headers: { 'content-type': type, 'cache-control': cache, ...SECURITY_HEADERS } });
+      // 中身を読まずに決められる弱い ETag（大きさと更新時刻）。期限が切れた再取得や no-cache の index.html が、
+      // 変わっていなければ 304 で済み、本文を送り直さない
+      const etag = `W/"${st.size}-${Math.floor(st.mtimeMs)}"`;
+      if (matchesEtag(req?.headers.get('if-none-match') ?? null, etag)) {
+        return new Response(null, { status: 304, headers: { etag, 'cache-control': cache, ...SECURITY_HEADERS } });
+      }
+      const body = await readFile(file);
+      return new Response(body, { headers: { 'content-type': type, 'cache-control': cache, etag, ...SECURITY_HEADERS } });
     } catch {
       return new Response('Not Found', { status: 404, headers: SECURITY_HEADERS });
     }
@@ -71,7 +78,7 @@ export function createSite(api: (req: Request) => Promise<Response>, webDir: str
     }
     if (url.pathname.startsWith('/app/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method Not Allowed', { status: 405 });
-      return files(url.pathname);
+      return files(url.pathname, req);
     }
     if (url.pathname.startsWith('/api/')) {
       const inner = new URL(req.url);

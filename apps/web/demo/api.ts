@@ -218,6 +218,11 @@ function notInDemo(): never {
   throw new ApiError(400, 'デモではこの操作はできません。本物の環境でお試しください。');
 }
 
+/** 本物は ETag で 304 を扱う辞書の取得。デモには転送が無いので、そのまま取る */
+export function fetchDictionary(storeId: string): Promise<Dictionary> {
+  return api<Dictionary>('GET', `/stores/${storeId}/tags/dictionary`);
+}
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   // 本物のサーバーらしく、少しだけ待つ
   await new Promise((r) => setTimeout(r, 40));

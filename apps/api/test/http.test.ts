@@ -94,4 +94,33 @@ describe('HTTP API', () => {
     assert.ok(r.body.tags.some((t: { name: string }) => t.name === '電子レンジ'));
     assert.ok(Object.keys(r.body.cooccurrence).length > 0);
   });
+
+  it('辞書は ETag を付け、変わっていなければ 304 で本文を返さない', async () => {
+    const path = `/stores/${STORE_A}/tags/dictionary`;
+    const headers = (actor: Actor, extra: Record<string, string> = {}) =>
+      ({ 'x-dev-tenant-id': actor.tenantId, 'x-dev-user-id': actor.userId, ...extra });
+    const first = await app(new Request(`http://localhost${path}`, { headers: headers(visitor) }));
+    assert.equal(first.status, 200);
+    const etag = first.headers.get('etag') ?? '';
+    assert.match(etag, /^"[0-9a-f]{16}"$/);
+    assert.ok(JSON.parse(await first.text()).tags.length > 0);
+
+    const same = await app(new Request(`http://localhost${path}`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(same.status, 304);
+    assert.equal(await same.text(), '');
+    assert.equal(same.headers.get('etag'), etag);
+
+    // 辞書が変わったら ETag も変わり、古い ETag では 200 で新しい本文が返る
+    await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, {
+      title: '辞書の ETag の確認', body: '新しいタグを足す。', tagNames: ['#etag確認用'],
+    });
+    const changed = await app(new Request(`http://localhost${path}`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(changed.status, 200);
+    assert.notEqual(changed.headers.get('etag'), etag);
+    assert.ok(JSON.parse(await changed.text()).tags.some((t: { name: string }) => t.name === 'etag確認用'));
+
+    // ETag が一致しても、権限の確認は先に済んでいる（入れない店舗の辞書は 304 にならず 403）
+    const other = await app(new Request(`http://localhost/stores/${STORE_B}/tags/dictionary`, { headers: headers(visitor, { 'if-none-match': etag }) }));
+    assert.equal(other.status, 403);
+  });
 });

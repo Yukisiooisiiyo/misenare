@@ -156,7 +156,7 @@ export async function search(
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗のナレッジは検索できません');
   assert(query.trim().length > 0 && query.length <= 200, 'invalid', '検索語は1〜200文字で入力してください');
   await assertStore(db, storeId);
-  const dictionary = await loadDictionary(db);
+  const dictionary = await loadDictionary(db, actor.tenantId);
   const analyzed = analyzeQuery(query, { tokenizer, dictionary });
   const ranked = await rankByGroups(db, storeId, analyzed.groups, { limit: options.limit ?? 20 });
   const hits = await describeHits(db, ranked);

@@ -1,7 +1,7 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
 // 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
 
-import { api, ApiError, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
+import { api, ApiError, fetchDictionary, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
@@ -47,16 +47,16 @@ async function boot(): Promise<void> {
   }
   if (me.stores.length === 0) return renderFatal(new Error('所属している店舗がありません。店長に確認してください。'));
   if (!session.storeId || !me.stores.some((s) => s.id === session.storeId)) session.storeId = me.stores[0]!.id;
-  await loadDictionary();
+  // 辞書と数は互いに待つ必要が無いので、同時に取る（どちらも失敗を中で受けるので、片方の失敗で止まらない）。
   // 数は最初に1回取る。ホーム以外から開いた人にも、上の帯に申請の数が出るようにするため
-  await refreshBadges();
+  await Promise.all([loadDictionary(), refreshBadges()]);
   window.addEventListener('hashchange', route);
   route();
 }
 
 async function loadDictionary(): Promise<void> {
   try {
-    dict = new LocalDictionary(await api<Dictionary>('GET', `/stores/${session.storeId}/tags/dictionary`));
+    dict = new LocalDictionary(await fetchDictionary(session.storeId!));
   } catch {
     dict = null; // 辞書が取れなくても検索と投稿はできる（候補が出ないだけ）
   }
@@ -260,6 +260,9 @@ function navLink(href: string, label: string, active: boolean, count = 0): HTMLE
 
 /** 連絡タブに出す数（未読＋未確認＋残っている引き継ぎ） */
 let badges: Badges | null = null;
+/** badges を取った時刻。起動直後のホームが同じ数をもう一度取らないために持つ */
+let badgesAt = 0;
+let badgesStore = '';
 function badgeCount(): number {
   if (!badges) return 0;
   return badges.notices.unread + badges.notices.needsAck + badges.handovers.open;
@@ -276,11 +279,18 @@ function updateManageCount(): void {
   }
 }
 
-/** 数を取り直して、タブの表示を更新する */
-async function refreshBadges(): Promise<void> {
+/**
+ * 数を取り直して、タブの表示を更新する。
+ * maxAgeMs を渡すと、それより新しく取れていれば取り直さない（起動の直後にホームが開くときだけ使う）。
+ */
+async function refreshBadges(maxAgeMs = 0): Promise<void> {
   if (!me || !session.storeId) return;
+  // 店舗を切り替えた直後は、新しい店舗の数を取る（古い店舗の数を5秒使い回さない）
+  if (badges && badgesStore === storeId() && Date.now() - badgesAt < maxAgeMs) return;
   try {
     badges = await api<Badges>('GET', `/stores/${storeId()}/badges`);
+    badgesAt = Date.now();
+    badgesStore = storeId();
   } catch {
     badges = null;
   }
@@ -328,8 +338,9 @@ async function renderHome(): Promise<void> {
       : null,
     h('p', { class: 'home-foot' }, h('a', { href: '#/device' }, 'この端末の設定')),
   ));
-  // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）
-  await refreshBadges();
+  // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）。
+  // 起動で取ったばかり（5秒以内）なら、もう一度は取らない。画面を移ってきたときは今までどおり取り直す
+  await refreshBadges(5000);
   const parts: string[] = [];
   if (badges) {
     if (badges.notices.needsAck > 0) parts.push(`確認がまだの連絡が${badges.notices.needsAck}件`);

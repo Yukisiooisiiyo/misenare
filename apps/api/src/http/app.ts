@@ -97,13 +97,13 @@ import {
   addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActor, type Authenticator, type Identity } from './auth.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
-import { HttpError, json, readJson, Router } from './router.ts';
+import { HttpError, json, matchesEtag, readJson, Router } from './router.ts';
 
 interface Ctx {
   actor: Actor;
@@ -351,7 +351,16 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // 端末に同期するタグ辞書（候補表示と「もしかして」は端末内で計算する）
-  r.get('/stores/:storeId/tags/dictionary', async (c, _req, p) => { await heavy(c); return json(await exportDictionary(c.db, c.actor, p.storeId!)); });
+  // 辞書は書き換わることが少ないのに、端末は起動のたびに取り直す。応答の指紋を ETag にして、
+  // 変わっていなければ 304（本文なし）で返す。権限の確認は exportDictionary の中で済んでいるので、
+  // ETag が一致しても他店の辞書が見えることはない
+  r.get('/stores/:storeId/tags/dictionary', async (c, req, p) => {
+    await heavy(c);
+    const text = JSON.stringify(await exportDictionary(c.db, c.actor, p.storeId!));
+    const etag = `"${createHash('sha256').update(text).digest('hex').slice(0, 16)}"`;
+    if (matchesEtag(req.headers.get('if-none-match'), etag)) return new Response(null, { status: 304, headers: { etag } });
+    return new Response(text, { headers: { 'content-type': 'application/json; charset=utf-8', etag } });
+  });
 
   // --- バーコード ----------------------------------------------------------
   r.get('/stores/:storeId/barcode/:jan', async (c, _req, p) => {

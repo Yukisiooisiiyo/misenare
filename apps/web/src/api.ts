@@ -57,6 +57,32 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   return data as T;
 }
 
+// 辞書は起動のたびに取るが、中身はめったに変わらない。前回の ETag を覚えて If-None-Match で送り、
+// 304 なら前回の辞書をそのまま使う（本文の転送と解析を省く）。メモリだけで持つので、画面を開き直せば取り直す。
+// 店舗ごとに辞書が違うので、店舗 ID を鍵にする。
+const dictionaryMemo = new Map<string, { etag: string; dictionary: Dictionary }>();
+
+export async function fetchDictionary(storeId: string): Promise<Dictionary> {
+  const known = dictionaryMemo.get(storeId);
+  const headers: Record<string, string> = {};
+  if (session.token) headers.authorization = `Bearer ${session.token}`;
+  if (known) headers['if-none-match'] = known.etag;
+  let res: Response;
+  try {
+    res = await fetch(`/api/stores/${storeId}/tags/dictionary`, { method: 'GET', headers });
+  } catch {
+    throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
+  }
+  if (res.status === 304 && known) return known.dictionary;
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) throw new ApiError(res.status, (data && data.message) || `エラーが発生しました（${res.status}）`);
+  const etag = res.headers.get('etag');
+  if (etag) dictionaryMemo.set(storeId, { etag, dictionary: data as Dictionary });
+  else dictionaryMemo.delete(storeId);
+  return data as Dictionary;
+}
+
 // --- API の型（サーバーの戻り値に合わせる） -----------------------------------
 
 export interface Me {
