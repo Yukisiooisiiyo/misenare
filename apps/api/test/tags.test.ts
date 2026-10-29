@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it, mock } from 'node:test';
 import { one, type Db } from '../src/db/db.ts';
 import { DomainError } from '../src/domain/actor.ts';
-import { createKnowledge } from '../src/domain/knowledge.ts';
+import { createKnowledge, editKnowledge, revertToVersion } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
 import { confirmReading, decideRelation, listReadingProposals, listRelations, mergeTags, proposeRelation } from '../src/domain/tagAdmin.ts';
 import { canonicalTagIds, clearDictionaryCache, exportDictionary, invalidateDictionary, loadDictionary, resolveTags } from '../src/domain/tags.ts';
@@ -97,6 +97,25 @@ describe('タグの統合', () => {
       `SELECT h.name FROM knowledge_tags kt JOIN hashtags h ON h.id = kt.hashtag_id WHERE kt.knowledge_id = $1`, [k.id],
     ));
     assert.deepEqual(tagged.map((t) => t.name), ['長期保証']);
+  });
+});
+
+describe('統合したタグと過去版', () => {
+  it('統合の前の版へ戻すと、新しい版のタグは統合先になる', async () => {
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, {
+      storeId: STORE_A, title: '統合前の版', body: '誤字のタグで書いた。', tagNames: ['#統合元の誤字']
+    }));
+    const oldTag = (await run((q) => q.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = '統合元の誤字'`)))[0]!.id;
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '統合前の版', body: '本文を直した。', tagNames: ['#統合元の誤字'] }));
+    await run((q) => mergeTags(q, tokenizer, manager, '統合元の誤字', '長期保証'));
+    // 版1のタグ列は統合元のまま残っている（履歴は書き換えない）
+    const v1 = await run((q) => q.query<{ tag_ids: string[] }>(`SELECT tag_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = 1`, [k.id]));
+    assert.deepEqual(v1[0]!.tag_ids, [oldTag]);
+    const r = await run((q) => revertToVersion(q, tokenizer, trusted, k.id, 1));
+    const now = await run((q) => q.query<{ tag_ids: string[] }>(`SELECT tag_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`, [k.id, r.version]));
+    const [canonical] = await run((q) => canonicalTagIds(q, [oldTag]));
+    assert.deepEqual(now[0]!.tag_ids, [canonical], '戻した版のタグが統合先になっていること');
+    assert.notEqual(canonical, oldTag);
   });
 });
 

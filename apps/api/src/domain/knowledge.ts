@@ -8,7 +8,7 @@ import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './ac
 import { indexKnowledge } from './indexer.ts';
 import { assertStore } from './scope.ts';
 import { syncApprovalNotice } from './notices.ts';
-import { activateTags, invalidateDictionary, resolveTags } from './tags.ts';
+import { activateTags, canonicalTagIds, invalidateDictionary, resolveTags } from './tags.ts';
 
 export interface KnowledgeInput {
   /** null なら全店共通（本部のみ作成可） */
@@ -261,13 +261,16 @@ export async function editKnowledge(
 export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number) {
   const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '承認する権限がありません');
-  const v = await maybeOne<{ state: string; base_version: number | null }>(
+  const v = await maybeOne<{ state: string; base_version: number | null; expired: boolean }>(
     db,
-    `SELECT state, base_version FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
+    `SELECT state, base_version, (expires_at IS NOT NULL AND expires_at <= now()) AS expired
+       FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
     [id, version],
   );
   assert(v !== undefined, 'not_found', '版が見つかりません');
   assert(v.state === 'pending', 'conflict', 'この版は承認待ちではありません');
+  // 公開してもすぐ expired になるだけなので、期限を直してもらってから通す
+  assert(!v.expired, 'conflict', 'この案は有効期限が過ぎています。期限を直してから承認してください');
   // 承認待ちの間に新しい版が公開されていたら、古い修正案で上書きしない
   assert(k.current_version === null || version > k.current_version, 'conflict', 'より新しい版が公開済みです。修正案を作り直してください');
   // **土台が古い案は通さない。** 承認待ちの間に別の案が公開されていると、
@@ -318,7 +321,9 @@ export async function revertToVersion(db: Db, tokenizer: Tokenizer, actor: Actor
   assert(old.state === 'superseded' || old.state === 'published', 'conflict', '一度も公開されていない版には戻せません');
   const next = await nextVersion(db, id);
   await insertVersion(db, actor, id, next, {
-    title: old.title, body: old.body, tagIds: old.tag_ids, areaIds: old.area_ids, expiresAt: old.expires_at,
+    title: old.title, body: old.body,
+    // 統合済みのタグは統合先に置き換える。そのまま戻すと詳細に統合元の古い名前が出る
+    tagIds: await canonicalTagIds(db, old.tag_ids), areaIds: old.area_ids, expiresAt: old.expires_at,
   }, k.current_version);
   // 戻すと、いま承認待ちの案は閉じられる。approveVersion と同じく、閉じた案を返して黙って消さない
   const closing = await db.query<{ version: number; editor: string | null }>(
