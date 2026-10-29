@@ -170,6 +170,17 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(newbieToken, 'GET', '/me')).status, 401);
   });
 
+  it('無効化された人が作った招待は受け取れない（初期設定の招待は通る）', async () => {
+    const boss = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: '辞める店長', trustLevel: 'trusted', adminScope: 'store' });
+    const bossAccepted = await call(null, 'POST', '/auth/accept', { token: boss.body.token, deviceName: '辞める店長のスマホ' });
+    const inv = await call(bossAccepted.body.sessionToken, 'POST', '/invitations', { storeId: STORE_A, name: '残った招待' });
+    assert.equal(inv.status, 201);
+    await db.withTenant(T, (q) => q.query(`UPDATE users SET status = 'disabled' WHERE id = $1`, [bossAccepted.body.userId]));
+    const r = await call(null, 'POST', '/auth/accept', { token: inv.body.token });
+    assert.equal(r.status, 409, JSON.stringify(r.body));
+    assert.match(r.body.error?.message ?? r.body.message ?? JSON.stringify(r.body), /作った人は無効化/);
+  });
+
   it('ログアウトするとその端末のトークンだけが失効する', async () => {
     assert.equal((await call(managerToken, 'POST', '/auth/logout')).status, 200);
     assert.equal((await call(managerToken, 'GET', '/me')).status, 401);

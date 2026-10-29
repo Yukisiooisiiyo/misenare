@@ -324,7 +324,10 @@ export function productPanel(storeId: string): HTMLElement {
           h('a', { href: `#/scan?jan=${x.jan_code}` }, x.name),
           h('span', { class: 'hint' }, `${x.created_by}さん・${relativeDate(x.created_at)}`),
           h('span', { class: 'row-actions' },
-            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); remove(); })))),
+            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); remove(); }),
+            confirmAction('却下する', 'secondary small', `${x.name} の登録を取り消します（商品ごと消えます）。`, async () => {
+              await api('POST', `/products/${x.id}/reject`); toast('却下しました'); remove();
+            })))),
       ...countedList('修正', p.changes, (c, remove) =>
         h('li', { class: 'row' },
           h('span', {}, h('strong', {}, c.name), `（${Object.keys(c.payload).map((k) => FIELD_LABEL[k] ?? k).join('、')}）`),

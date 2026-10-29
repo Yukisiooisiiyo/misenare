@@ -19,6 +19,7 @@ import {
 import {
   approveProduct,
   approveProductChange,
+  rejectProduct,
   deleteProduct,
   linkKnowledgeToProduct,
   listPendingProducts,
@@ -409,6 +410,8 @@ function routes(): Router<Ctx> {
     json(await productHistory(c.db, c.actor, p.storeId!, p.productId!)));
   r.post('/products/:productId/approve', async (c, _req, p) =>
     json(await approveProduct(c.db, c.actor, p.productId!)));
+  r.post('/products/:productId/reject', async (c, _req, p) =>
+    json(await rejectProduct(c.db, c.actor, p.productId!)));
   r.post('/product-changes/:requestId/approve', async (c, _req, p) =>
     json(await approveProductChange(c.db, c.actor, p.requestId!)));
   r.post('/product-changes/:requestId/reject', async (c, _req, p) =>

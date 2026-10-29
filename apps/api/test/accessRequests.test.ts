@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
+import { DomainError } from '../src/domain/actor.ts';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import { approveRequest, getNotifySettings, listRequests, pendingDigest, rejectRequest, requestBadge, setNotifyEmail } from '../src/domain/accessRequests.ts';
 import { runNightly } from '../src/batch/nightly.ts';
@@ -103,6 +104,19 @@ describe('利用の申請', () => {
 
     // 一覧からは消える
     assert.equal((await db.withTenant(T, (q) => listRequests(q, manager))).length, 0);
+    await clean();
+  });
+
+  it('同じメールの既存の利用者が無効化されていたら、承認しても結びつけない', async () => {
+    await setup();
+    await assert.rejects(knock(), /申請を出しました/);
+    await db.withTenant(T, (q) => q.query(
+      `INSERT INTO users (tenant_id, name, trust_level, email, status) VALUES ($1, '辞めた田中', 'visitor', 'tanaka@kdenki.example.co.jp', 'disabled')`, [T]));
+    const [req] = await db.withTenant(T, (q) => listRequests(q, manager));
+    await assert.rejects(
+      db.withTenant(T, (q) => approveRequest(q, manager, req!.id, { storeId: STORE_A })),
+      (e: unknown) => e instanceof DomainError && e.code === 'conflict' && /無効化されています/.test(e.message));
+    assert.equal((await db.withTenant(T, (q) => listRequests(q, manager))).length, 1, '申請は残る');
     await clean();
   });
 

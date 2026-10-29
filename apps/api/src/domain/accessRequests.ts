@@ -149,9 +149,12 @@ export async function approveRequest(
   assert(name !== '', 'invalid', '名前を入れてください');
 
   // 同じアドレスの人がすでにいれば、作らずにその人に結びつける
-  const already = await maybeOne<{ id: string }>(
-    db, `SELECT id FROM users WHERE lower(email) = lower($1)`, [row.email],
+  const already = await maybeOne<{ id: string; status: string }>(
+    db, `SELECT id, status FROM users WHERE lower(email) = lower($1)`, [row.email],
   );
+  // 無効化された人に結びつけると、承認したのに入れない（sessions も弾かれる）申請が出来上がる
+  assert(already === undefined || already.status === 'active', 'conflict',
+    'このメールアドレスの利用者は無効化されています。有効に戻してから承認してください');
   const userId = already?.id ?? (await one<{ id: string }>(
     db,
     `INSERT INTO users (tenant_id, name, trust_level, employment_type, email)

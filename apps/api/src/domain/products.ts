@@ -355,6 +355,19 @@ export async function approveProduct(db: Db, actor: Actor, productId: string) {
   return { productId };
 }
 
+/** visitor が登録した承認待ちの商品を却下する（消す）。間違った登録が店長の一覧に残り続けないように */
+export async function rejectProduct(db: Db, actor: Actor, productId: string) {
+  const p = await maybeOne<{ origin_store_id: string | null }>(db, `SELECT origin_store_id FROM products WHERE id = $1`, [productId]);
+  assert(p !== undefined, 'not_found', '商品が見つかりません');
+  assert(canModerate(actor, p.origin_store_id), 'forbidden', '却下する権限がありません');
+  const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
+  // product_tags などは CASCADE で消える。承認済みの商品はここでは消さない
+  const rows = await db.query(`DELETE FROM products WHERE id = $1 AND state = 'pending' RETURNING id`, [productId]);
+  assert(rows.length === 1, 'conflict', 'この商品は承認待ちではありません');
+  await refreshUseCounts(db, tags.map((t) => t.hashtag_id));
+  return { productId };
+}
+
 /** ナレッジと商品を直接紐づける（trusted 以上）。 */
 export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: string, productId: string) {
   const k = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM knowledge WHERE id = $1`, [knowledgeId]);
@@ -400,6 +413,8 @@ export async function deleteProduct(db: Db, actor: Actor, storeId: string, produ
   const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
   const rows = await db.query(`DELETE FROM products WHERE id = $1 RETURNING id`, [productId]);
   assert(rows.length === 1, 'not_found', '商品が見つかりません');
+  // change_requests には商品への FK が無く、残ると依頼者の承認待ちの枠を占有し続ける
+  await db.query(`DELETE FROM change_requests WHERE entity_type = 'product' AND entity_id = $1 AND state = 'pending'`, [productId]);
   await refreshUseCounts(db, tags.map((t) => t.hashtag_id));
   return { removed: 'tenant' as const };
 }

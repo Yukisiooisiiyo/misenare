@@ -8,9 +8,11 @@ import {
   approveProductChange,
   deleteProduct,
   isValidJan,
+  listPendingProducts,
   linkKnowledgeToProduct,
   productHistory,
   registerProduct,
+  rejectProduct,
   rejectProductChange,
   scanBarcode,
   updateProduct,
@@ -171,6 +173,38 @@ describe('商品情報の編集と履歴', () => {
     await rejects(run((q) => approveProduct(q, storeBStaff, mine.product.id)), 'forbidden');
     await run((q) => approveProduct(q, trusted, mine.product.id));
     assert.equal((await run((q) => scanBarcode(q, tokenizer, storeBStaff, STORE_B, code))).status, 'found');
+  });
+
+  it('商品を会社から消すと、その商品への承認待ちの変更依頼も消える', async () => {
+    const code = jan('490000000004');
+    await run((q) => registerProduct(q, trusted, STORE_A, { janCode: code, name: '消す商品', tagNames: ['#消す商品'] }));
+    const r = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, code));
+    if (r.status !== 'found') throw new Error('not found');
+    await run((q) => updateProduct(q, visitor, STORE_A, r.product.id, { maker: '依頼だけ残る' }));
+    const count = () => run((q) => q.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM change_requests WHERE entity_type = 'product' AND entity_id = $1 AND state = 'pending'`, [r.product.id]));
+    assert.equal((await count())[0]!.n, 1);
+    await run((q) => deleteProduct(q, hq, STORE_A, r.product.id));
+    assert.equal((await count())[0]!.n, 0, '依頼者の枠を占有し続けないこと');
+  });
+
+  it('承認待ちの商品は却下でき、一覧から消える。他店舗の店長や、承認済みの商品は却下できない', async () => {
+    const code = jan('490000000005');
+    await run((q) => registerProduct(q, visitor, STORE_A, { janCode: code, name: '間違えた登録', tagNames: ['#間違い'] }));
+    const mine = await run((q) => scanBarcode(q, tokenizer, visitor, STORE_A, code));
+    if (mine.status !== 'found') throw new Error('not found');
+    const listed = async () => (await run((q) => listPendingProducts(q, manager, STORE_A))).products.some((p) => p.id === mine.product.id);
+    assert.equal(await listed(), true);
+    await rejects(run((q) => rejectProduct(q, visitor, mine.product.id)), 'forbidden');
+    await rejects(run((q) => rejectProduct(q, storeBStaff, mine.product.id)), 'forbidden');
+    await run((q) => rejectProduct(q, manager, mine.product.id));
+    assert.equal(await listed(), false);
+    assert.equal((await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, code))).status, 'unknown');
+    await rejects(run((q) => rejectProduct(q, manager, mine.product.id)), 'not_found');
+    // 承認済みの商品は消せない
+    const active = await run((q) => scanBarcode(q, tokenizer, trusted, STORE_A, FRIDGE));
+    if (active.status !== 'found') throw new Error('not found');
+    await rejects(run((q) => rejectProduct(q, manager, active.product.id)), 'conflict');
   });
 
   it('visitor の商品編集は却下でき、却下後は反映されない', async () => {
