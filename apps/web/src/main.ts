@@ -442,6 +442,8 @@ async function renderSearch(initial: string): Promise<void> {
   const suggest = h('div', { class: 'suggest', hidden: true });
   const results = h('div', { class: 'results', 'aria-live': 'polite' });
   let pendingPick: { suggestedTagId: string; pickedTagId: string } | null = null;
+  // 確定して記録済みの検索語とそのログID。二重記録を防ぐために持つ。
+  let logged: { q: string; id: number } | null = null;
   let timer: number | undefined;
   // 入力中の自動検索と Enter の検索の応答が前後しても、最後に投げた検索の結果だけを描く
   let seq = 0;
@@ -462,19 +464,22 @@ async function renderSearch(initial: string): Promise<void> {
     if (e.maybeFor && e.tag.id) pendingPick = { suggestedTagId: e.maybeFor, pickedTagId: e.tag.id };
     suggest.hidden = true;
     input.focus();
-    void run();
+    void run(true);
   };
-  const run = async () => {
+  const run = async (record: boolean) => {
     const q = input.value.trim();
     history.replaceState(null, '', `#/search?q=${encodeURIComponent(q)}`);
     const mine = ++seq;
     if (!q) { clear(results); return; }
     try {
-      const r = await api<SearchResult>('GET', `/stores/${storeId()}/search?q=${encodeURIComponent(q)}`);
+      // 入力中のライブ検索は記録しない（record=0）。打ちかけの語で 0件ワードを汚さない。
+      const url = `/stores/${storeId()}/search?q=${encodeURIComponent(q)}${record ? '' : '&record=0'}`;
+      const r = await api<SearchResult>('GET', url);
       if (mine !== seq) return;
+      if (record && r.logId != null) logged = { q, id: r.logId };
       results.dataset.query = q;
-      renderResults(results, r, q, (tag) => { input.value = `${input.value.trim()} #${tag} `; void run(); });
-      if (pendingPick) {
+      renderResults(results, r, q, (tag) => { input.value = `${input.value.trim()} #${tag} `; void run(true); }, openResult);
+      if (pendingPick && r.logId != null) {
         void api('POST', `/search-logs/${r.logId}/feedback`, pendingPick).catch(() => {});
         pendingPick = null;
       }
@@ -484,13 +489,30 @@ async function renderSearch(initial: string): Promise<void> {
       results.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
   };
+  // 確定した検索語を1回だけ記録する。直近の記録と同じ語ならそのIDを使い回す。
+  const commitLog = async (): Promise<number | null> => {
+    const q = input.value.trim();
+    if (!q) return null;
+    if (logged && logged.q === q) return logged.id;
+    try {
+      const r = await api<SearchResult>('GET', `/stores/${storeId()}/search?q=${encodeURIComponent(q)}`);
+      if (r.logId != null) logged = { q, id: r.logId };
+      return r.logId;
+    } catch { return null; }
+  };
+  // 結果を開いたとき：その検索語を記録してから「開いた」を紐づける。
+  const openResult = (knowledgeId: string) => {
+    void commitLog().then((id) => {
+      if (id != null) void api('POST', `/search-logs/${id}/feedback`, { openedKnowledgeId: knowledgeId }).catch(() => {});
+    });
+  };
   input.addEventListener('input', () => {
     updateSuggest();
     window.clearTimeout(timer);
-    timer = window.setTimeout(() => void run(), 450);
+    timer = window.setTimeout(() => void run(false), 450);
   });
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') { e.preventDefault(); window.clearTimeout(timer); suggest.hidden = true; void run(); }
+    if (e.key === 'Enter') { e.preventDefault(); window.clearTimeout(timer); suggest.hidden = true; void run(true); }
   });
 
   shell('search', h('section', { class: 'page' },
@@ -500,10 +522,10 @@ async function renderSearch(initial: string): Promise<void> {
     results,
   ));
   input.focus();
-  if (initial) await run();
+  if (initial) await run(true);
 }
 
-function renderResults(container: HTMLElement, r: SearchResult, q: string, addTag: (tag: string) => void): void {
+function renderResults(container: HTMLElement, r: SearchResult, q: string, addTag: (tag: string) => void, onOpen: (knowledgeId: string) => void): void {
   clear(container);
   if (r.hits.length === 0) {
     container.append(h('div', { class: 'empty' },
@@ -515,16 +537,16 @@ function renderResults(container: HTMLElement, r: SearchResult, q: string, addTa
   if (r.chips.length > 0) {
     container.append(h('div', { class: 'tag-row chips' }, ...r.chips.map((c) => tagChip(`${c.name}`, { onClick: () => addTag(c.name), quiet: true }))));
   }
-  container.append(hitList(r.hits, r.logId));
+  container.append(hitList(r.hits, onOpen));
 }
 
-function hitList(hits: Hit[], logId?: number): HTMLElement {
+function hitList(hits: Hit[], onOpen?: (knowledgeId: string) => void): HTMLElement {
   return h('ol', { class: 'hits' }, ...hits.map((hit) =>
     h('li', {},
       h('a', {
         href: `#/k/${hit.id}`,
         class: 'hit',
-        onclick: () => { if (logId) void api('POST', `/search-logs/${logId}/feedback`, { openedKnowledgeId: hit.id }).catch(() => {}); },
+        onclick: () => onOpen?.(hit.id),
       },
         h('span', { class: 'hit-title' }, hit.linked ? h('span', { class: 'linked' }, 'この商品の') : null, hit.title),
         h('span', { class: 'hit-snippet' }, hit.snippet),

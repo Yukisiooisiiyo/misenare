@@ -139,7 +139,7 @@ export interface Hit {
 export interface SearchResult {
   hits: Hit[];
   chips: Array<{ name: string; count: number }>;
-  logId: number;
+  logId: number | null;
 }
 
 export interface Knowledge {
