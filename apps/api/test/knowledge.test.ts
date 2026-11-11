@@ -227,6 +227,14 @@ describe('検索の範囲と並び順', () => {
     const z = await run((q) => zeroHitQueries(q, trusted, STORE_A));
     assert.deepEqual(z.map((x) => [x.query, x.times]).slice(0, 1), [['食洗機 分岐水栓', 2]]);
   });
+
+  it('記録しない検索（入力中のライブ検索）は 0件ワードに残さない', async () => {
+    // record:false は打ちかけの語なので、ログID も付けず集計にも出さない
+    const r = await run((q) => search(q, tokenizer, visitor, STORE_A, 'ぜったいにでてこない語', { record: false }));
+    assert.equal(r.logId, null, '記録しない検索はログIDを返さない');
+    const z = await run((q) => zeroHitQueries(q, trusted, STORE_A));
+    assert.ok(!z.some((x) => x.query === 'ぜったいにでてこない語'), '記録しない検索は0件ワードに出ない');
+  });
 });
 
 describe('「古い」の日数は1か所で決める', () => {

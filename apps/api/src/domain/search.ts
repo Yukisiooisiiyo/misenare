@@ -33,8 +33,8 @@ export interface SearchResult {
   hits: SearchHit[];
   /** 結果に付いているタグ（件数付き）。絞り込みチップに使う */
   chips: Array<{ name: string; count: number }>;
-  /** 検索ログのID。結果を開いたら openedResult に渡す */
-  logId: number;
+  /** 検索ログのID。結果を開いたら openedResult に渡す。記録しない検索（入力中のライブ検索）では null */
+  logId: number | null;
 }
 
 /** 検索対象のナレッジ（公開中・期限内・この店舗または全店共通） */
@@ -151,7 +151,7 @@ export async function search(
   actor: Actor,
   storeId: string,
   query: string,
-  options: { limit?: number } = {},
+  options: { limit?: number; record?: boolean } = {},
 ): Promise<SearchResult> {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗のナレッジは検索できません');
   assert(query.trim().length > 0 && query.length <= 200, 'invalid', '検索語は1〜200文字で入力してください');
@@ -170,12 +170,18 @@ export async function search(
     .slice(0, 8)
     .map(([name, count]) => ({ name, count }));
 
-  const log = await db.query<{ id: number }>(
-    `INSERT INTO search_logs (tenant_id, store_id, user_id, query, result_count)
-     VALUES ($1, $2, $3, $4, $5) RETURNING id::int AS id`,
-    [actor.tenantId, storeId, actor.userId, query, hits.length],
-  );
-  return { hits, chips, logId: log[0]!.id };
+  // 入力1文字ごとのライブ検索（record:false）は記録しない。打ちかけの語が
+  // 0件ワードの一覧を埋め尽くすのを防ぐため、記録するのは確定した検索だけにする。
+  let logId: number | null = null;
+  if (options.record !== false) {
+    const log = await db.query<{ id: number }>(
+      `INSERT INTO search_logs (tenant_id, store_id, user_id, query, result_count)
+       VALUES ($1, $2, $3, $4, $5) RETURNING id::int AS id`,
+      [actor.tenantId, storeId, actor.userId, query, hits.length],
+    );
+    logId = log[0]!.id;
+  }
+  return { hits, chips, logId };
 }
 
 /** 検索結果を開いた・「もしかして」で別のタグを選んだ、を記録する（辞書を育てる元データ） */

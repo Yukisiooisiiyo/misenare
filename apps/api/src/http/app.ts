@@ -368,8 +368,11 @@ function routes(): Router<Ctx> {
   };
   r.get('/stores/:storeId/search', async (c, req, p) => {
     await heavy(c);
-    const q = new URL(req.url).searchParams.get('q') ?? '';
-    return json(await search(c.db, c.tokenizer, c.actor, p.storeId!, q));
+    const params = new URL(req.url).searchParams;
+    const q = params.get('q') ?? '';
+    // record=0 のときだけ記録しない（入力中のライブ検索）。既定は記録する。
+    const record = params.get('record') !== '0';
+    return json(await search(c.db, c.tokenizer, c.actor, p.storeId!, q, { record }));
   });
   r.post('/search-logs/:logId/feedback', async (c, req, p) => {
     const raw = (await readJson<Record<string, unknown>>(req)) ?? {};
