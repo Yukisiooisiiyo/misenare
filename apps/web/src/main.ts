@@ -164,7 +164,7 @@ function renderWelcome(error?: string): void {
   });
 
   shell(null, h('section', { class: 'page welcome' },
-    h('h1', { class: 'brand' }, 'ミセナレ'),
+    h('h1', { class: 'brand' }, 'ツギガミ'),
     h('p', { class: 'lead' }, '店のやり方を、接客の合間にすぐ探せます。'),
     problem,
     passkeySupported() ? h('div', { class: 'welcome-signin' },
