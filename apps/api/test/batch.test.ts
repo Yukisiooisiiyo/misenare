@@ -122,6 +122,23 @@ describe('夜間バッチ', () => {
     assert.equal((await run((q) => listStale(q, trusted, STORE_A))).length, 0);
   });
 
+  it('31日前の使用済み・期限切れの招待は捨て、最近の招待は残す', async () => {
+    const { hashToken, issueToken } = await import('../src/domain/users.ts');
+    const add = (label: string, createdAgo: string, used: boolean, expiresIn: string) => run((q) => q.query(
+      `INSERT INTO invitations (tenant_id, token_hash, name, created_at, expires_at, used_at)
+       VALUES ($1, $2, $3, now() - $4::interval, now() + $5::interval, ${used ? `now() - $4::interval` : 'NULL'})`,
+      [T, hashToken(issueToken(T)), label, createdAgo, expiresIn],
+    ));
+    await add('古い使用済み', '31 days', true, '-30 days');
+    await add('古い期限切れ', '40 days', false, '-35 days');
+    await add('昨日の未使用', '1 day', false, '6 days');
+    await add('昨日の使用済み', '1 day', true, '6 days');
+    const [report] = await runNightly(db, tokenizer);
+    assert.equal(report!.sweptInvitations, 2);
+    const left = await run((q) => q.query<{ name: string }>(`SELECT name FROM invitations WHERE name IN ('古い使用済み', '古い期限切れ', '昨日の未使用', '昨日の使用済み') ORDER BY name`));
+    assert.deepEqual(left.map((r) => r.name), ['昨日の使用済み', '昨日の未使用']);
+  });
+
   it('別の1本が動いている間は始めない。置き去りの鍵は奪う', async () => {
     // 別の1本が鍵を持っている
     await db.raw(`INSERT INTO batch_locks (name, locked_at) VALUES ('nightly', now())`);

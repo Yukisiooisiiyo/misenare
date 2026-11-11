@@ -137,7 +137,7 @@ export async function approveRequest(
   }>(
     db,
     `SELECT provider_id, subject, email, claimed_name, tenant_id
-       FROM access_requests WHERE id = $1 AND status = 'pending'`,
+       FROM access_requests WHERE id = $1 AND status = 'pending' FOR UPDATE`,
     [id],
   );
   if (!row) throw new DomainError('not_found', 'この申請は見つかりません（すでに決まっているかもしれません）');
@@ -149,9 +149,12 @@ export async function approveRequest(
   assert(name !== '', 'invalid', '名前を入れてください');
 
   // 同じアドレスの人がすでにいれば、作らずにその人に結びつける
-  const already = await maybeOne<{ id: string }>(
-    db, `SELECT id FROM users WHERE lower(email) = lower($1)`, [row.email],
+  const already = await maybeOne<{ id: string; status: string }>(
+    db, `SELECT id, status FROM users WHERE lower(email) = lower($1)`, [row.email],
   );
+  // 無効化された人に結びつけると、承認したのに入れない（sessions も弾かれる）申請が出来上がる
+  assert(already === undefined || already.status === 'active', 'conflict',
+    'このメールアドレスの利用者は無効化されています。有効に戻してから承認してください');
   const userId = already?.id ?? (await one<{ id: string }>(
     db,
     `INSERT INTO users (tenant_id, name, trust_level, employment_type, email)
@@ -170,11 +173,13 @@ export async function approveRequest(
      ON CONFLICT (provider_id, subject) DO UPDATE SET user_id = EXCLUDED.user_id`,
     [row.tenant_id, row.provider_id, row.subject, userId, row.email],
   );
-  await db.query(
+  // 行ロックで待たされた側がここで pending でなくなっていれば、2重承認なので止める
+  const done = await db.query(
     `UPDATE access_requests SET status = 'approved', decided_at = now(), decided_by = $2, user_id = $3
-      WHERE id = $1`,
+      WHERE id = $1 AND status = 'pending' RETURNING id`,
     [id, actor.userId, userId],
   );
+  assert(done.length === 1, 'conflict', 'この申請はすでに処理されています');
   return { userId };
 }
 

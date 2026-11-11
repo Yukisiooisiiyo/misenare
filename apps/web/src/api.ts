@@ -38,12 +38,43 @@ export class ApiError extends Error {
   }
 }
 
+// 401（セッション切れ・無効な利用者）の戻り先。api.ts から main.ts を読むと循環するので、
+// main.ts の boot() が登録する。どの画面の要求でも、ここ1か所で招待画面へ戻せる。
+let unauthorizedHandler: (() => void) | null = null;
+
+export function onUnauthorized(fn: () => void): void {
+  unauthorizedHandler = fn;
+}
+
+const UNREADABLE = '応答を読めませんでした。電波の状態を確かめて、もう一度お試しください';
+
+/**
+ * 応答の本文を JSON として読む。HTML のエラーページや店舗 Wi-Fi のログイン画面（200 で返ることもある）、
+ * 途中で切れた本文は ApiError にする。SyntaxError のままだと、ブラウザ固有の英語が画面に出てしまう。
+ * 401 は本文が読めなくても扱う。sent は要求に付けたトークンで、同じトークンのうちは1回だけ戻す
+ * （並列の要求がまとめて 401 になっても招待画面を何度も描かない／新しく登録し直した後の古い応答で追い出さない）。
+ */
+async function readBody(res: Response, sent: string | null): Promise<any> {
+  let data: any = null;
+  let readable = true;
+  try {
+    const text = await res.text();
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    readable = false;
+  }
+  if (res.status === 401 && sent !== null && session.token === sent) unauthorizedHandler?.();
+  if (!readable) throw new ApiError(res.status, UNREADABLE);
+  return data;
+}
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   // ファイルの中身（ArrayBuffer）はそのまま送る。それ以外は JSON にする
   const raw = body instanceof ArrayBuffer || body instanceof Blob;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers['content-type'] = raw ? 'application/octet-stream' : 'application/json';
-  if (session.token) headers.authorization = `Bearer ${session.token}`;
+  const sent = session.token;
+  if (sent) headers.authorization = `Bearer ${sent}`;
   let res: Response;
   try {
     const payload = body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) };
@@ -51,10 +82,35 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   } catch {
     throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
   }
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  const data = await readBody(res, sent);
   if (!res.ok) throw new ApiError(res.status, (data && data.message) || `エラーが発生しました（${res.status}）`);
   return data as T;
+}
+
+// 辞書は起動のたびに取るが、中身はめったに変わらない。前回の ETag を覚えて If-None-Match で送り、
+// 304 なら前回の辞書をそのまま使う（本文の転送と解析を省く）。メモリだけで持つので、画面を開き直せば取り直す。
+// 店舗ごとに辞書が違うので、店舗 ID を鍵にする。
+const dictionaryMemo = new Map<string, { etag: string; dictionary: Dictionary }>();
+
+export async function fetchDictionary(storeId: string): Promise<Dictionary> {
+  const known = dictionaryMemo.get(storeId);
+  const headers: Record<string, string> = {};
+  const sent = session.token;
+  if (sent) headers.authorization = `Bearer ${sent}`;
+  if (known) headers['if-none-match'] = known.etag;
+  let res: Response;
+  try {
+    res = await fetch(`/api/stores/${storeId}/tags/dictionary`, { method: 'GET', headers });
+  } catch {
+    throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
+  }
+  if (res.status === 304 && known) return known.dictionary;
+  const data = await readBody(res, sent);
+  if (!res.ok) throw new ApiError(res.status, (data && data.message) || `エラーが発生しました（${res.status}）`);
+  const etag = res.headers.get('etag');
+  if (etag) dictionaryMemo.set(storeId, { etag, dictionary: data as Dictionary });
+  else dictionaryMemo.delete(storeId);
+  return data as Dictionary;
 }
 
 // --- API の型（サーバーの戻り値に合わせる） -----------------------------------

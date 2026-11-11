@@ -101,7 +101,9 @@ export async function listNotices(db: Db, actor: Actor, storeId: string, include
             u.name AS author, n.created_at::text AS created_at,
             r.read_at::text AS read_at, r.acked_at::text AS acked_at,
             CASE WHEN n.requires_ack THEN (
-              SELECT count(*)::int FROM memberships m
+              SELECT count(DISTINCT m.user_id)::int FROM memberships m
+               -- 無効化された人は確認しようが無い。数えると永遠に「未確認」で残る
+               JOIN users mu ON mu.id = m.user_id AND mu.status = 'active'
                WHERE (n.store_id IS NULL OR m.store_id = n.store_id)
                  AND NOT EXISTS (
                    SELECT 1 FROM notice_reads nr

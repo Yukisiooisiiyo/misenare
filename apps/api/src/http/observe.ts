@@ -141,7 +141,8 @@ export class Alerts {
     this.quietMs = options.quietMs ?? 5 * 60_000;
     this.now = options.now ?? (() => Date.now());
     this.send = options.send ?? (async (url, body) => {
-      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
+      // 受け側が詰まっても待ち続けない（notify は void で呼ばれるので、溜まると接続が残る）
+      const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, signal: AbortSignal.timeout(5000) });
       if (!res.ok) throw new Error(`webhook ${res.status}`);
     });
   }

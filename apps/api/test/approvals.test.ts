@@ -73,6 +73,22 @@ describe('誰が承認したかを残す', () => {
   });
 });
 
+describe('期限が過ぎた案', () => {
+  it('有効期限が過ぎた案は承認できず、期限を直せば通る', async () => {
+    await clean();
+    const k = await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '期間限定の案内', body: '今月だけ。', tagNames: ['#期間限定'],
+      expiresAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
+    }));
+    // 承認待ちの間に期限が過ぎた
+    await run((q) => q.query(`UPDATE knowledge_versions SET expires_at = now() - interval '1 minute' WHERE knowledge_id = $1`, [k.id]));
+    await assert.rejects(run((q) => approveVersion(q, tokenizer, trusted, k.id, 1)),
+      (e: unknown) => e instanceof DomainError && e.code === 'conflict' && /有効期限が過ぎています/.test(e.message));
+    await run((q) => q.query(`UPDATE knowledge_versions SET expires_at = now() + interval '1 day' WHERE knowledge_id = $1`, [k.id]));
+    await run((q) => approveVersion(q, tokenizer, trusted, k.id, 1));
+  });
+});
+
 describe('承認待ちの知らせ（連絡事項に出す）', () => {
   // メールではなく連絡事項に出す。**招待QRで入った人にメールアドレスは無い**ので、
   // 承認するベテランの大半にはメールが届かない。毎日開くアプリの中が唯一確実な場所。
@@ -215,6 +231,19 @@ describe('同じナレッジを2人が同時に直したとき', () => {
     }));
     return { k, a, b };
   }
+
+  it('同じ人が同じナレッジを続けて直すと、その人の案は最新の1つだけ残る。他の人の案は残る', async () => {
+    const { k, b } = await twoProposals();
+    const c = await run((q) => editKnowledge(q, tokenizer, visitor, k.id, {
+      title: '搬入の手順', body: '玄関の幅を測る。エレベーターの寸法と、台車の有無も確かめる。', tagNames: ['#搬入'],
+    }));
+    const pending = await run((q) => q.query<{ version: number; edited_by: string }>(
+      `SELECT version, edited_by FROM knowledge_versions WHERE knowledge_id = $1 AND state = 'pending' ORDER BY version`, [k.id]));
+    assert.deepEqual(pending.map((p) => p.version), [b.version, c.version]);
+    assert.deepEqual(pending.map((p) => p.edited_by), [visitor2.userId, visitor.userId]);
+    const view = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.equal(view.pendingEdits.length, 2);
+  });
 
   it('お互いの案が見える（誰の案かも分かる）', async () => {
     const { k } = await twoProposals();

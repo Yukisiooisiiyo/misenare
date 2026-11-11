@@ -4,7 +4,7 @@
 // 引き継ぎ … その日のメモ。承認はなく、誰でも書けて誰でも片付けられる
 
 import { api } from './api.ts';
-import { clear, h, relativeDate, toast } from './dom.ts';
+import { clear, h, relativeDate, submitOnce, toast } from './dom.ts';
 import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
@@ -90,12 +90,17 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
   if (!n.readAt) {
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((e) => e.isIntersecting)) return;
-      observer.disconnect();
+      observer.unobserve(card); // 送っている間に重ねて送らない
       void api('POST', `/notices/${n.id}/read`).then(() => {
+        observer.disconnect();
         n.readAt = new Date().toISOString();
         card.classList.remove('notice-unread');
         onChange();
-      }).catch(() => {});
+      }).catch(() => {
+        // 電波が悪くて記録できなかったときは、見張りを戻して、もう一度見えたときに送り直す。
+        // 戻した瞬間にまだ見えていると即座に再送になり、通信できない間は叩き続けてしまうので、少し置く
+        setTimeout(() => observer.observe(card), 3000);
+      });
     }, { threshold: 0.5 });
     observer.observe(card);
   }
@@ -111,8 +116,7 @@ function noticeForm(storeId: string, onPosted: () => void): HTMLElement {
   const until = h('input', { id: 'nuntil', type: 'date' });
   const message = h('p', { class: 'error', role: 'alert', hidden: true });
 
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
     message.hidden = true;
     try {
       await api('POST', `/stores/${storeId}/notices`, {
@@ -136,16 +140,16 @@ function noticeForm(storeId: string, onPosted: () => void): HTMLElement {
     }
   };
 
-  return h('details', { class: 'panel' },
-    h('summary', {}, '連絡事項を出す'),
-    h('form', { class: 'write panel-body', onsubmit: submit },
-      h('label', { for: 'ntitle' }, '件名'), title,
-      h('label', { for: 'nbody' }, '本文'), body,
-      h('label', { class: 'check' }, important, '重要（いちばん上に出す）'),
-      h('label', { class: 'check' }, ack, '読んだら「確認しました」を押してもらう'),
-      h('label', { for: 'nuntil' }, 'いつまで出すか（空なら期限なし）'), until,
-      message,
-      h('button', { type: 'submit', class: 'primary' }, '出す')));
+  const form = h('form', { class: 'write panel-body' },
+    h('label', { for: 'ntitle' }, '件名'), title,
+    h('label', { for: 'nbody' }, '本文'), body,
+    h('label', { class: 'check' }, important, '重要（いちばん上に出す）'),
+    h('label', { class: 'check' }, ack, '読んだら「確認しました」を押してもらう'),
+    h('label', { for: 'nuntil' }, 'いつまで出すか（空なら期限なし）'), until,
+    message,
+    h('button', { type: 'submit', class: 'primary' }, '出す'));
+  submitOnce(form, submit); // 連打で同じ連絡が2件出ないように
+  return h('details', { class: 'panel' }, h('summary', {}, '連絡事項を出す'), form);
 }
 
 // --- 引き継ぎ -----------------------------------------------------------------------
@@ -161,13 +165,13 @@ function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HT
         await api('POST', `/handovers/${item.id}/done`);
         toast('片付けました');
         redraw();
-      }),
+      }, redraw),
       ...(canDelete
         ? [confirmAction('消す', 'secondary small', '消しますか？（履歴から戻せます）', async () => {
             await api('DELETE', `/handovers/${item.id}`);
             toast('消しました（履歴から戻せます）');
             redraw();
-          })]
+          }, undefined, redraw)]
         : [])),
   );
   return row;
@@ -182,7 +186,9 @@ function historyPanel(storeId: string, onChange: () => void): HTMLElement {
   const list = h('div');
   const tabs = h('div', { class: 'scope-tabs', role: 'tablist' });
 
+  let drawSeq = 0; // 切り替えを続けたとき、最後の応答だけを描く
   const draw = async () => {
+    const mine = ++drawSeq;
     clear(tabs);
     for (const [value, label] of [['actions', '操作された分'], ['all', 'すべて']] as const) {
       const on = scope === value;
@@ -196,6 +202,7 @@ function historyPanel(storeId: string, onChange: () => void): HTMLElement {
     list.append(h('p', { class: 'hint' }, '読み込んでいます…'));
     try {
       const items = await api<HandoverHistoryItem[]>('GET', `/stores/${storeId}/handovers/history?scope=${scope}`);
+      if (mine !== drawSeq) return;
       clear(list);
       if (items.length === 0) {
         list.append(h('p', { class: 'hint' }, scope === 'actions' ? 'まだ誰も操作していません。' : '引き継ぎはまだありません。'));
@@ -203,6 +210,7 @@ function historyPanel(storeId: string, onChange: () => void): HTMLElement {
       }
       list.append(h('ul', { class: 'rows' }, ...items.map((item) => historyRow(item, () => { void draw(); onChange(); }))));
     } catch (e) {
+      if (mine !== drawSeq) return;
       clear(list);
       list.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
@@ -233,7 +241,7 @@ function historyRow(item: HandoverHistoryItem, redraw: () => void): HTMLElement 
           await api('POST', `/handovers/${item.id}/restore`);
           toast('戻しました');
           redraw();
-        }))]
+        }, redraw))]
       : []),
   );
 }
@@ -247,24 +255,34 @@ export function renderNotices(
   const handoverList = h('div');
   const input = h('textarea', { id: 'hbody', rows: 2, maxlength: 1000, placeholder: '次の人に伝えること（例：冷蔵庫の在庫が1台。発注済み）' });
 
+  // 取り直しが重なったら、最後に呼んだものだけを描く。
+  // 先に消してから待つと、2回分の応答がどちらも追記されて二重に並ぶので、消すのは届いたあと（追記の直前）にする
+  let noticeSeq = 0;
   const loadNotices = async () => {
-    clear(noticeList);
+    const mine = ++noticeSeq;
     try {
       const list = await api<Notice[]>('GET', `/stores/${options.storeId}/notices`);
+      if (mine !== noticeSeq) return;
+      clear(noticeList);
       if (list.length === 0) {
         noticeList.append(h('p', { class: 'hint' }, '今の連絡事項はありません。'));
         return;
       }
       for (const n of list) noticeList.append(noticeCard(n, options.isTrusted, () => options.onBadges?.()));
     } catch (e) {
+      if (mine !== noticeSeq) return;
+      clear(noticeList);
       noticeList.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
   };
 
+  let handoverSeq = 0;
   const loadHandovers = async () => {
-    clear(handoverList);
+    const mine = ++handoverSeq;
     try {
       const list = await api<Handover[]>('GET', `/stores/${options.storeId}/handovers`);
+      if (mine !== handoverSeq) return;
+      clear(handoverList);
       const open = list.filter((x) => x.state === 'open');
       handoverList.append(...countedList('残っている引き継ぎ', open, (item) =>
         handoverRow(item, options.isTrusted || item.createdBy === options.userName, () => {
@@ -284,15 +302,16 @@ export function renderNotices(
                   await api('POST', `/handovers/${item.id}/reopen`);
                   void loadHandovers();
                   options.onBadges?.();
-                })))))));
+                }, () => { void loadHandovers(); options.onBadges?.(); })))))));
       }
     } catch (e) {
+      if (mine !== handoverSeq) return;
+      clear(handoverList);
       handoverList.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
   };
 
-  const addSubmit = async (e: Event) => {
-    e.preventDefault();
+  const addSubmit = async () => {
     const text = input.value.trim();
     if (!text) return;
     try {
@@ -306,6 +325,12 @@ export function renderNotices(
     }
   };
 
+  const handoverForm = h('form', { class: 'write handover-form' },
+    input,
+    h('button', { type: 'submit', class: 'primary' }, '書く'));
+  // 送っている間は押し直せない。入力は応答のあとに空にするので、連打すると同じ本文が2回入ってしまう
+  submitOnce(handoverForm, addSubmit);
+
   container.append(
     h('h1', {}, '連絡'),
     h('h2', {}, '連絡事項'),
@@ -313,9 +338,7 @@ export function renderNotices(
     ...(options.isTrusted ? [noticeForm(options.storeId, () => void loadNotices())] : []),
     h('h2', {}, '引き継ぎ'),
     h('p', { class: 'hint' }, '承認はありません。誰でも書けて、誰でも片付けられます。片付かないものは次の日に持ち越します。'),
-    h('form', { class: 'write handover-form', onsubmit: addSubmit },
-      input,
-      h('button', { type: 'submit', class: 'primary' }, '書く')),
+    handoverForm,
     handoverList,
     historyPanel(options.storeId, () => { void loadHandovers(); options.onBadges?.(); }),
   );

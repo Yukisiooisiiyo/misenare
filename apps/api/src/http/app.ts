@@ -19,6 +19,7 @@ import {
 import {
   approveProduct,
   approveProductChange,
+  rejectProduct,
   deleteProduct,
   linkKnowledgeToProduct,
   listPendingProducts,
@@ -97,13 +98,13 @@ import {
   addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
-import { loadActor, type Authenticator, type Identity } from './auth.ts';
+import { loadActorIn, type Authenticator, type Identity } from './auth.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
-import { HttpError, json, readJson, Router } from './router.ts';
+import { HttpError, json, matchesEtag, readJson, Router } from './router.ts';
 
 interface Ctx {
   actor: Actor;
@@ -128,17 +129,51 @@ const MAX_DEVICE_NAME = 60;
 const MAX_TAGS = 20;
 /** 1件に結びつけられる売場の数 */
 const MAX_AREAS = 50;
+/** 取り込むファイル名の長さ */
+const MAX_IMPORT_NAME = 200;
+/** タグの読みの確定で一度に送れる件数。ドメイン側の重複除去後の検査より前に、本文の大きさで止める */
+const MAX_READINGS_PER_REQUEST = 20;
+/** パスキーの値（base64 の塊）の長さ。正当な値は数KBなので十分な余裕を取った上限 */
+const MAX_PASSKEY_FIELD = 65536;
+const MAX_EMAIL = 254;
+const MAX_DOMAIN = 253;
+const MAX_ISSUER = 500;
+
+/** 文字列の長さを HTTP 層で止める（DB や外部への問い合わせまで長い値を通さないため） */
+function checkLength(label: string, v: string, max: number): void {
+  if (v.length > max) throw new HttpError(400, `${label} は${max}文字までにしてください`);
+}
 
 /** 日時の文字列として受け取れるか（Date.parse だけでは '2024-13-45' のような形も通ってしまい、DB のキャストで 500 になる） */
 function isDateTime(v: unknown): v is string {
   if (typeof v !== 'string' || v.length > 40) return false;
   const t = Date.parse(v);
-  return !Number.isNaN(t) && Math.abs(t) < 8.64e15;
+  if (Number.isNaN(t) || Math.abs(t) >= 8.64e15) return false;
+  // PostgreSQL の timestamptz は西暦 1〜9999 年まで。範囲外（0000年・+010000年）は DB のキャストで 500 になる
+  const y = new Date(t).getUTCFullYear();
+  return y >= 1 && y <= 9999;
+}
+
+/**
+ * 日時にタイムゾーン（Z か ±hh:mm）が付いているか。
+ * 付いていないと Date.parse も PostgreSQL もサーバーの TZ（多くは UTC）で読み、日本時間と 9 時間ずれる。
+ * Web は toISOString() で Z 付きを送るので、ずれるのは外から直接呼んだときだけ。
+ */
+function hasOffset(v: string): boolean {
+  return /[T ]\d{1,2}:\d{2}(:\d{2}(\.\d+)?)?\s?(Z|[+-]\d{2}(:?\d{2})?)$/i.test(v);
+}
+
+/** 日時の入力を確かめる。形が悪ければ message、オフセットが無ければその旨を 400 で返す */
+function checkDateTime(v: unknown, message: string): void {
+  if (!isDateTime(v)) throw new HttpError(400, message);
+  if (!hasOffset(v)) throw new HttpError(400, '日時にはタイムゾーン（Z か +09:00）を付けてください');
 }
 
 /** YYYY-MM-DD として実在する日付か */
 function isDateOnly(v: unknown): v is string {
   if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return false;
+  // 0000年は PostgreSQL の date に無く、::date で 500 になる
+  if (v.slice(0, 4) === '0000') return false;
   const d = new Date(`${v}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
 }
@@ -169,9 +204,7 @@ function knowledgeBody(v: unknown): Omit<KnowledgeInput, 'storeId'> {
     throw new HttpError(400, 'areaIds が正しくありません');
   }
   if (Array.isArray(b.areaIds) && b.areaIds.length > MAX_AREAS) throw new HttpError(400, `売場は${MAX_AREAS}か所までにしてください`);
-  if (b.expiresAt !== undefined && b.expiresAt !== null && !isDateTime(b.expiresAt)) {
-    throw new HttpError(400, 'expiresAt は日時の文字列か null にしてください');
-  }
+  if (b.expiresAt !== undefined && b.expiresAt !== null) checkDateTime(b.expiresAt, 'expiresAt は日時の文字列か null にしてください');
   if (b.baseVersion !== undefined && b.baseVersion !== null && !(Number.isInteger(b.baseVersion) && (b.baseVersion as number) >= 1)) {
     throw new HttpError(400, 'baseVersion は 1 以上の整数か null にしてください');
   }
@@ -191,7 +224,9 @@ function optionalString(b: Record<string, unknown>, key: string): void {
 
 function productPatchBody(v: unknown): ProductPatch {
   const b = (v ?? {}) as Record<string, unknown>;
-  for (const k of ['name', 'maker', 'note']) optionalString(b, k);
+  for (const k of ['maker', 'note']) optionalString(b, k);
+  // name は null を許さない（ドメイン側で trim() するため、null だと TypeError で 500 になる）
+  if (b.name !== undefined && typeof b.name !== 'string') throw new HttpError(400, '商品名は空にできません');
   if (b.areaId !== undefined && b.areaId !== null && !(typeof b.areaId === 'string' && UUID.test(b.areaId))) {
     throw new HttpError(400, 'areaId が正しくありません');
   }
@@ -258,9 +293,7 @@ function noticeBody(v: unknown): NoticeInput {
   if (b.requiresAck !== undefined && typeof b.requiresAck !== 'boolean') throw new HttpError(400, 'requiresAck は true か false です');
   for (const key of ['startsAt', 'endsAt']) {
     const v2 = b[key];
-    if (v2 !== undefined && v2 !== null && !isDateTime(v2)) {
-      throw new HttpError(400, `${key} は日時の文字列か null にしてください`);
-    }
+    if (v2 !== undefined && v2 !== null) checkDateTime(v2, `${key} は日時の文字列か null にしてください`);
   }
   return {
     title: b.title,
@@ -351,7 +384,16 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   // 端末に同期するタグ辞書（候補表示と「もしかして」は端末内で計算する）
-  r.get('/stores/:storeId/tags/dictionary', async (c, _req, p) => { await heavy(c); return json(await exportDictionary(c.db, c.actor, p.storeId!)); });
+  // 辞書は書き換わることが少ないのに、端末は起動のたびに取り直す。応答の指紋を ETag にして、
+  // 変わっていなければ 304（本文なし）で返す。権限の確認は exportDictionary の中で済んでいるので、
+  // ETag が一致しても他店の辞書が見えることはない
+  r.get('/stores/:storeId/tags/dictionary', async (c, req, p) => {
+    await heavy(c);
+    const text = JSON.stringify(await exportDictionary(c.db, c.actor, p.storeId!));
+    const etag = `"${createHash('sha256').update(text).digest('hex').slice(0, 16)}"`;
+    if (matchesEtag(req.headers.get('if-none-match'), etag)) return new Response(null, { status: 304, headers: { etag } });
+    return new Response(text, { headers: { 'content-type': 'application/json; charset=utf-8', etag } });
+  });
 
   // --- バーコード ----------------------------------------------------------
   r.get('/stores/:storeId/barcode/:jan', async (c, _req, p) => {
@@ -368,6 +410,8 @@ function routes(): Router<Ctx> {
     json(await productHistory(c.db, c.actor, p.storeId!, p.productId!)));
   r.post('/products/:productId/approve', async (c, _req, p) =>
     json(await approveProduct(c.db, c.actor, p.productId!)));
+  r.post('/products/:productId/reject', async (c, _req, p) =>
+    json(await rejectProduct(c.db, c.actor, p.productId!)));
   r.post('/product-changes/:requestId/approve', async (c, _req, p) =>
     json(await approveProductChange(c.db, c.actor, p.requestId!)));
   r.post('/product-changes/:requestId/reject', async (c, _req, p) =>
@@ -483,6 +527,8 @@ function routes(): Router<Ctx> {
   r.post('/stores/:storeId/imports', async (c, req, p) => {
     const name = new URL(req.url).searchParams.get('name') ?? '';
     if (!name) throw new HttpError(400, 'name（ファイル名）が必要です');
+    // 名前は記録に残り画面にも出るので、長すぎるものは受けない
+    if (name.length > MAX_IMPORT_NAME) throw new HttpError(400, `name は${MAX_IMPORT_NAME}文字までにしてください`);
     const body = Buffer.from(await req.arrayBuffer());
     if (body.byteLength > MAX_IMPORT_BYTES) throw new HttpError(413, 'ファイルが大きすぎます');
     return json(await importManual(c.db, c.actor, p.storeId!, name, body), 201);
@@ -512,6 +558,7 @@ function routes(): Router<Ctx> {
     if (!Array.isArray(raw) || raw.some((x) => typeof x !== 'string')) {
       throw new HttpError(400, 'readings は文字列の配列です');
     }
+    if (raw.length > MAX_READINGS_PER_REQUEST) throw new HttpError(400, `readings は${MAX_READINGS_PER_REQUEST}個までにしてください`);
     return json(await confirmReading(c.db, c.actor, p.tagId!, raw as string[]));
   });
   r.post('/tags/merge', async (c, req) => {
@@ -533,6 +580,7 @@ function routes(): Router<Ctx> {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     for (const key of ['clientDataJSON', 'attestationObject']) {
       if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+      checkLength(key, b[key] as string, MAX_PASSKEY_FIELD);
     }
     return json(await finishRegistration(c.db, c.actor, site, {
       clientDataJSON: b.clientDataJSON as string,
@@ -553,6 +601,10 @@ function routes(): Router<Ctx> {
       throw new HttpError(400, 'domains（メールアドレスのドメイン）が必要です');
     }
     if (b.domains.length > 20) throw new HttpError(400, 'ドメインは20個までにしてください');
+    checkLength('issuer', b.issuer, MAX_ISSUER);
+    checkLength('clientId', b.clientId, 200);
+    if (typeof b.clientSecret === 'string') checkLength('clientSecret', b.clientSecret, 4000);
+    for (const d of b.domains as string[]) checkLength('domains の各要素', d, MAX_DOMAIN);
     if (b.defaultStoreId !== undefined && b.defaultStoreId !== null && !(typeof b.defaultStoreId === 'string' && UUID.test(b.defaultStoreId))) {
       throw new HttpError(400, 'defaultStoreId が正しくありません');
     }
@@ -577,6 +629,7 @@ function routes(): Router<Ctx> {
     }
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.domain !== 'string') throw new HttpError(400, 'domain が必要です');
+    checkLength('domain', b.domain, MAX_DOMAIN);
     return json(await verifyDomain(c.db, c.actor, b.domain, (name) => dnsResolveTxt(name)));
   });
   // つなぎを確かめる。外に取りに行くので、本部の管理者だけ・回数も止める
@@ -587,6 +640,7 @@ function routes(): Router<Ctx> {
     }
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.issuer !== 'string') throw new HttpError(400, 'issuer が必要です');
+    checkLength('issuer', b.issuer, MAX_ISSUER);
     return json(await checkConnection(c.oidc, c.actor, b.issuer));
   });
 
@@ -648,12 +702,14 @@ export interface AppDeps {
   alerts?: Alerts;
   /** 相手の IdP とのやり取り（試験では偽の IdP を差し込む） */
   oidc?: OidcDirectory;
+  /** 上限の差し替え（試験で回数を小さくするため。本番では指定しない） */
+  userWriteRule?: RateRule;
 }
 
 export function createApp(deps: AppDeps) {
   const router = routes();
   // RATE_LIMIT=db なら台をまたいで共有する。既定はサーバーの記憶の中（1台向け）
-  const limiter = deps.limiter
+  const limiter: Limiter = deps.limiter
     ?? (process.env.RATE_LIMIT === 'db' ? new DatabaseRateLimiter((sql, params) => deps.database.raw(sql, params)) : new MemoryRateLimiter());
   const storage = deps.storage ?? storageFromEnv();
   const metrics = deps.metrics ?? new Metrics();
@@ -735,6 +791,7 @@ export function createApp(deps: AppDeps) {
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       for (const key of ['credentialId', 'clientDataJSON', 'authenticatorData', 'signature', 'userHandle']) {
         if (typeof b[key] !== 'string') throw new HttpError(400, `${key} が必要です`);
+        checkLength(key, b[key] as string, MAX_PASSKEY_FIELD);
       }
       try {
         const result = await loginWithPasskey(deps.database, site, {
@@ -762,6 +819,7 @@ export function createApp(deps: AppDeps) {
       const site = requireSsoSite();
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       if (typeof b.email !== 'string') throw new HttpError(400, 'メールアドレスが必要です');
+      checkLength('email', b.email, MAX_EMAIL);
       return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo }));
     }
     if (url.pathname === '/auth/sso/callback' && req.method === 'GET') {
@@ -802,16 +860,12 @@ export function createApp(deps: AppDeps) {
     // 切れたトークンで鳴き続けただけで店舗全員が締め出されてはいけない。
     const failKey = clientKey(req, 'authfail');
     const blocked = await limiter.blocked(failKey, RULES.failedAuth);
-    const identity = await deps.auth.identify(req);
-    if (!identity) {
-      if (blocked) return tooMany();
-      if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
-      throw new HttpError(401, 'ログインしてください');
-    }
-    const actor = await loadActor(deps.database, identity);
-    if (!actor) throw new HttpError(401, 'この利用者は無効です');
-
-    return await deps.database.withTenant(actor.tenantId, (db) =>
+    // 利用者の確認・権限の読み込み・ハンドラを、**同じ取引1回**の中で流す。
+    // 以前は identify・loadActor・ハンドラで取引を3回開き、BEGIN / set_config ×2 / COMMIT が毎回3組走っていた。
+    // テナントはトークンから DB なしで分かるので、先に取引を開ける。
+    const isWrite = req.method !== 'GET' && req.method !== 'HEAD';
+    const writeRule = deps.userWriteRule ?? RULES.userWrite;
+    const runHandler = (db: Db, actor: Actor, identity: Identity) =>
       matched.handler(
         {
           actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
@@ -820,8 +874,40 @@ export function createApp(deps: AppDeps) {
         },
         req,
         matched.params,
-      ),
-    );
+      );
+    type Outcome =
+      | { kind: 'done'; response: Response }
+      | { kind: 'no_identity' }
+      | { kind: 'inactive' }
+      | { kind: 'limited' }
+      | { kind: 'continue'; actor: Actor; identity: Identity };
+    const tenantId = deps.auth.tenantOf(req);
+    const outcome: Outcome = tenantId === null ? { kind: 'no_identity' } : await deps.database.withTenant(tenantId, async (db): Promise<Outcome> => {
+      const identity = await deps.auth.identifyIn(db, req);
+      if (!identity || identity.tenantId !== tenantId) return { kind: 'no_identity' };
+      const actor = await loadActorIn(db, identity);
+      if (!actor) return { kind: 'inactive' };
+      if (isWrite) {
+        // 書き込みは利用者ごとに共通の上限を掛ける。個々の経路で回数の穴を塞ぐのではなく、ここ1か所で止める。
+        // 記憶の中で数える上限は取引の中でも安全。DB で数える上限は別の接続を取りに行くので、取引を閉じてから数える
+        if (!limiter.local) return { kind: 'continue', actor, identity };
+        if (!(await limiter.take(`write:user:${actor.userId}`, writeRule))) return { kind: 'limited' };
+      }
+      return { kind: 'done', response: await runHandler(db, actor, identity) };
+    });
+
+    // 失敗したときの回数の数え取りは、取引の外で（DB で数える上限が接続を取り合わないように）
+    if (outcome.kind === 'no_identity') {
+      if (blocked) return tooMany();
+      if (req.headers.has('authorization') || req.headers.has('x-dev-user-id')) await limiter.take(failKey, RULES.failedAuth);
+      throw new HttpError(401, 'ログインしてください');
+    }
+    if (outcome.kind === 'inactive') throw new HttpError(401, 'この利用者は無効です');
+    if (outcome.kind === 'limited') return tooMany();
+    if (outcome.kind === 'done') return outcome.response;
+
+    if (!(await limiter.take(`write:user:${outcome.actor.userId}`, writeRule))) return tooMany();
+    return await deps.database.withTenant(outcome.actor.tenantId, (db) => runHandler(db, outcome.actor, outcome.identity));
   }
 
   return async function handle(req: Request): Promise<Response> {

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { after, before, describe, it } from 'node:test';
+import { after, before, describe, it, mock } from 'node:test';
 import { one, type Db } from '../src/db/db.ts';
 import { DomainError } from '../src/domain/actor.ts';
-import { createKnowledge } from '../src/domain/knowledge.ts';
+import { createKnowledge, editKnowledge, revertToVersion } from '../src/domain/knowledge.ts';
 import { search } from '../src/domain/search.ts';
 import { confirmReading, decideRelation, listReadingProposals, listRelations, mergeTags, proposeRelation } from '../src/domain/tagAdmin.ts';
-import { exportDictionary } from '../src/domain/tags.ts';
-import { TagDictionary } from '@misenare/search-core';
-import { freshDatabase, manager, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
+import { canonicalTagIds, clearDictionaryCache, exportDictionary, invalidateDictionary, loadDictionary, resolveTags } from '../src/domain/tags.ts';
+import { readingCandidatesCacheStats, TagDictionary } from '@misenare/search-core';
+import { freshDatabase, manager, OTHER_T, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -97,6 +97,25 @@ describe('タグの統合', () => {
       `SELECT h.name FROM knowledge_tags kt JOIN hashtags h ON h.id = kt.hashtag_id WHERE kt.knowledge_id = $1`, [k.id],
     ));
     assert.deepEqual(tagged.map((t) => t.name), ['長期保証']);
+  });
+});
+
+describe('統合したタグと過去版', () => {
+  it('統合の前の版へ戻すと、新しい版のタグは統合先になる', async () => {
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, {
+      storeId: STORE_A, title: '統合前の版', body: '誤字のタグで書いた。', tagNames: ['#統合元の誤字']
+    }));
+    const oldTag = (await run((q) => q.query<{ id: string }>(`SELECT id FROM hashtags WHERE name = '統合元の誤字'`)))[0]!.id;
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '統合前の版', body: '本文を直した。', tagNames: ['#統合元の誤字'] }));
+    await run((q) => mergeTags(q, tokenizer, manager, '統合元の誤字', '長期保証'));
+    // 版1のタグ列は統合元のまま残っている（履歴は書き換えない）
+    const v1 = await run((q) => q.query<{ tag_ids: string[] }>(`SELECT tag_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = 1`, [k.id]));
+    assert.deepEqual(v1[0]!.tag_ids, [oldTag]);
+    const r = await run((q) => revertToVersion(q, tokenizer, trusted, k.id, 1));
+    const now = await run((q) => q.query<{ tag_ids: string[] }>(`SELECT tag_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`, [k.id, r.version]));
+    const [canonical] = await run((q) => canonicalTagIds(q, [oldTag]));
+    assert.deepEqual(now[0]!.tag_ids, [canonical], '戻した版のタグが統合先になっていること');
+    assert.notEqual(canonical, oldTag);
   });
 });
 
@@ -227,5 +246,131 @@ describe('タグの読みの確認', () => {
     await db.withTenant(T, async (q) => {
       await assert.rejects(listReadingProposals(q, tokenizer, visitor), /trusted 以上/);
     });
+  });
+});
+
+describe('辞書のキャッシュ', () => {
+  // loadDictionary が hashtags を読んだ回数を数える（db.query を包む）
+  let reads = 0;
+  const counted = <R>(tenantId: string, fn: (q: Db) => Promise<R>): Promise<R> =>
+    db.withTenant(tenantId, (q) => fn({
+      query: (sql, params) => {
+        if (/FROM hashtags WHERE state = 'active'/.test(sql)) reads++;
+        return q.query(sql, params);
+      },
+    }));
+
+  it('同じテナントの2回目は DB を読まず、同じ辞書を返す', async () => {
+    clearDictionaryCache();
+    reads = 0;
+    const first = await counted(T, (q) => loadDictionary(q, T));
+    assert.equal(reads, 1);
+    const second = await counted(T, (q) => loadDictionary(q, T));
+    assert.equal(reads, 1, '2回目は読んでいない');
+    assert.equal(second, first);
+  });
+
+  it('検索も、2回目からは辞書を読み直さない', async () => {
+    clearDictionaryCache();
+    reads = 0;
+    await counted(T, (q) => search(q, tokenizer, trusted, STORE_A, '長期保証'));
+    await counted(T, (q) => search(q, tokenizer, trusted, STORE_A, 'レジ'));
+    assert.equal(reads, 1);
+  });
+
+  it('invalidateDictionary のあとは読み直す。ほかのテナントには効かない', async () => {
+    clearDictionaryCache();
+    await counted(T, (q) => loadDictionary(q, T));
+    await counted(OTHER_T, (q) => loadDictionary(q, OTHER_T));
+    reads = 0;
+    invalidateDictionary(T);
+    await counted(OTHER_T, (q) => loadDictionary(q, OTHER_T));
+    assert.equal(reads, 0, '別のテナントの辞書は残っている');
+    await counted(T, (q) => loadDictionary(q, T));
+    assert.equal(reads, 1);
+  });
+
+  it('30秒たつと読み直す', async () => {
+    clearDictionaryCache();
+    await counted(T, (q) => loadDictionary(q, T));
+    reads = 0;
+    const real = Date.now();
+    const clock = mock.method(Date, 'now', () => real + 29_000);
+    try {
+      await counted(T, (q) => loadDictionary(q, T));
+      assert.equal(reads, 0, '29秒ではまだ覚えている');
+      clock.mock.mockImplementation(() => real + 31_000);
+      await counted(T, (q) => loadDictionary(q, T));
+      assert.equal(reads, 1);
+    } finally {
+      clock.mock.restore();
+    }
+  });
+
+  it('関係を承認すると、すぐ辞書に載る（TTL を待たない）', async () => {
+    clearDictionaryCache();
+    const before = await run((q) => loadDictionary(q, T));
+    await run((q) => proposeRelation(q, trusted, { kind: 'alias', fromText: '映らない', toTag: '#レジ' }));
+    reads = 0;
+    const after = await counted(T, (q) => loadDictionary(q, T));
+    assert.equal(reads, 1, '承認で捨てられたので読み直した');
+    assert.notEqual(after, before);
+  });
+
+  it('新しいタグを作ると、すぐ辞書に載る', async () => {
+    clearDictionaryCache();
+    const before = await run((q) => loadDictionary(q, T));
+    await run((q) => createKnowledge(q, tokenizer, trusted, {
+      storeId: STORE_A, title: '新しいタグの確認', body: 'キャッシュの試験。', tagNames: ['#キャッシュ確認用'],
+    }));
+    const after = await run((q) => loadDictionary(q, T));
+    const has = (d: TagDictionary) => [...d.tags.values()].some((t) => t.name === 'キャッシュ確認用');
+    assert.ok(!has(before));
+    assert.ok(has(after));
+  });
+});
+
+describe('読み候補の覚え書き（GET /tag-readings の中身）', () => {
+  it('2回目は、候補の計算をやり直さない', async () => {
+    await db.withTenant(T, async (q) => {
+      for (const name of ['転倒防止', '品出し']) {
+        await q.query(`INSERT INTO hashtags (tenant_id, name) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [T, name]);
+      }
+      const first = await listReadingProposals(q, tokenizer, manager);
+      assert.ok(first.length >= 2);
+      const computed = readingCandidatesCacheStats().computed;
+      const second = await listReadingProposals(q, tokenizer, manager);
+      assert.equal(readingCandidatesCacheStats().computed, computed, '2回目は計算していない');
+      assert.deepEqual(second, first);
+    });
+  });
+});
+
+describe('タグの解決の SQL 本数', () => {
+  it('既存のタグ3つの解決は、名前の検索1本＋統合先の検索1本で済む', async () => {
+    const seen: string[] = [];
+    const ids = await db.withTenant(T, (q) => resolveTags({
+      query: (sql, params) => { seen.push(sql); return q.query(sql, params); },
+    }, trusted, ['#長期保証', '#レジ', '#延長保証']));
+    assert.equal(ids.length, 3);
+    assert.equal(seen.filter((x) => /FROM hashtags WHERE name/.test(x)).length, 1);
+    assert.equal(seen.filter((x) => /WITH RECURSIVE/.test(x)).length, 1);
+    assert.equal(seen.length, 2, seen.join('\n'));
+  });
+
+  it('新しいタグが混ざっても、検索は1本のまま。順序と統合先への置き換えは変わらない', async () => {
+    const seen: string[] = [];
+    const [ids, canonical] = await db.withTenant(T, async (q) => {
+      const counted = { query: (sql: string, params?: readonly unknown[]) => { seen.push(sql); return q.query(sql, params); } } as Db;
+      const out = await resolveTags(counted, trusted, ['#まとめて確認', '#長期保障', '#レジ']);
+      return [out, await canonicalTagIds(q, out)] as const;
+    });
+    assert.equal(seen.filter((x) => /FROM hashtags WHERE name/.test(x)).length, 1);
+    assert.equal(seen.filter((x) => /INSERT INTO hashtags/.test(x)).length, 1);
+    assert.equal(ids.length, 3);
+    // 先頭が新しいタグ、2番目は #長期保障 の統合先（統合済みのときは統合先の id）
+    const names = await db.withTenant(T, (q) => q.query<{ id: string; name: string }>(`SELECT id, name FROM hashtags WHERE id = ANY($1::uuid[])`, [ids]));
+    assert.equal(names.find((n) => n.id === ids[0])!.name, 'まとめて確認');
+    assert.deepEqual(canonical, ids, '返ってきた id は、すでに統合先');
   });
 });

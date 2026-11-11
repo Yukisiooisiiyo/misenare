@@ -51,6 +51,9 @@ export type ScanResult =
   | { status: 'unknown'; janCode: string }
   | { status: 'found'; product: ProductCard; related: Hit[] };
 
+/** 本物の api.ts と同じ口。デモには 401 が無いので、登録しても何も起きない */
+export function onUnauthorized(_fn: () => void): void { /* デモでは何もしない */ }
+
 /** デモでは、ログイン状態は常に「入っている」 */
 export const session = {
   get token(): string | null { return 'demo'; },
@@ -216,6 +219,11 @@ function badges() {
 /** デモでは触れない機能を、画面が壊れない形で断る */
 function notInDemo(): never {
   throw new ApiError(400, 'デモではこの操作はできません。本物の環境でお試しください。');
+}
+
+/** 本物は ETag で 304 を扱う辞書の取得。デモには転送が無いので、そのまま取る */
+export function fetchDictionary(storeId: string): Promise<Dictionary> {
+  return api<Dictionary>('GET', `/stores/${storeId}/tags/dictionary`);
 }
 
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {

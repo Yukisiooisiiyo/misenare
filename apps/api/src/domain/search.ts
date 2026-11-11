@@ -156,7 +156,7 @@ export async function search(
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗のナレッジは検索できません');
   assert(query.trim().length > 0 && query.length <= 200, 'invalid', '検索語は1〜200文字で入力してください');
   await assertStore(db, storeId);
-  const dictionary = await loadDictionary(db);
+  const dictionary = await loadDictionary(db, actor.tenantId);
   const analyzed = analyzeQuery(query, { tokenizer, dictionary });
   const ranked = await rankByGroups(db, storeId, analyzed.groups, { limit: options.limit ?? 20 });
   const hits = await describeHits(db, ranked);
@@ -187,8 +187,10 @@ export async function recordSearchFeedback(
 ) {
   // 外部キーの検査は行レベルセキュリティを無視するので、自社のIDかを先に確かめる
   if (feedback.openedKnowledgeId) {
-    const k = await db.query(`SELECT 1 FROM knowledge WHERE id = $1`, [feedback.openedKnowledgeId]);
+    const k = await db.query<{ store_id: string }>(`SELECT store_id FROM knowledge WHERE id = $1`, [feedback.openedKnowledgeId]);
     assert(k.length === 1, 'not_found', 'ナレッジが見つかりません');
+    // 自社のナレッジでも、入れない店舗のものを検索ログに結びつけさせない
+    assert(canAccessStore(actor, k[0]!.store_id), 'forbidden', 'この店舗のナレッジは扱えません');
   }
   const tagIds = [feedback.suggestedTagId, feedback.pickedTagId].filter((x): x is string => typeof x === 'string');
   if (tagIds.length > 0) {

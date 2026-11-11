@@ -3,7 +3,8 @@
 //   node apps/web/build.mjs --watch
 
 import { build, context } from 'esbuild';
-import { cpSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -25,11 +26,32 @@ const options = {
   legalComments: 'none',
 };
 
+/**
+ * app.js / styles.css を内容のハッシュ付きの名前（app.1a2b3c4d.js）でも出し、index.html をその名前に向ける。
+ * ハッシュ付きの名前は中身が変われば名前も変わるので、サーバーが1年キャッシュしてよい（site.ts）。
+ * 元の名前も残す（古い index.html を持った端末が壊れないように）。
+ */
+function hashAssets() {
+  // 前のビルドのハッシュ付きファイルが溜まらないようにする
+  for (const f of readdirSync(outdir)) {
+    if (/^(app|styles)\.[0-9a-f]{8}\.(js|css|js\.map)$/.test(f)) rmSync(`${outdir}/${f}`);
+  }
+  let html = readFileSync(`${outdir}/index.html`, 'utf8');
+  for (const [name, stem, ext] of [['app.js', 'app', 'js'], ['styles.css', 'styles', 'css']]) {
+    const body = readFileSync(`${outdir}/${name}`);
+    const hashed = `${stem}.${createHash('sha256').update(body).digest('hex').slice(0, 8)}.${ext}`;
+    writeFileSync(`${outdir}/${hashed}`, body);
+    html = html.replace(`"${name}"`, `"${hashed}"`);
+  }
+  writeFileSync(`${outdir}/index.html`, html);
+}
+
 if (process.argv.includes('--watch')) {
   const ctx = await context(options);
   await ctx.watch();
   console.log('watching apps/web/src …');
 } else {
   await build(options);
+  hashAssets();
   console.log(`built ${outdir}/app.js`);
 }

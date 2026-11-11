@@ -1,10 +1,14 @@
 // 承認・管理の画面の部品：タグ辞書、商品の承認待ち、スタッフ。
 
-import { api } from './api.ts';
-import { clear, h, relativeDate, tagChip, toast } from './dom.ts';
+import { api, ApiError } from './api.ts';
+import { clear, h, relativeDate, submitOnce, tagChip, toast } from './dom.ts';
 
-/** ボタンの処理を実行し、失敗したらその理由を知らせる。実行中はボタンを押せなくする */
-export function action(label: string, cls: string, fn: () => Promise<void>): HTMLButtonElement {
+/**
+ * ボタンの処理を実行し、失敗したらその理由を知らせる。実行中はボタンを押せなくする。
+ * 409（他の人が先に操作していた）のときは、知らせたあとに onConflict を呼ぶ。
+ * 押した行がもう古いので、一覧を取り直して今の状態に合わせるために使う。
+ */
+export function action(label: string, cls: string, fn: () => Promise<void>, onConflict?: () => void | Promise<void>): HTMLButtonElement {
   const btn = h('button', { type: 'button', class: cls }, label);
   btn.addEventListener('click', async () => {
     btn.disabled = true;
@@ -12,6 +16,9 @@ export function action(label: string, cls: string, fn: () => Promise<void>): HTM
       await fn();
     } catch (e) {
       toast(e instanceof Error ? e.message : String(e));
+      if (onConflict && e instanceof ApiError && e.status === 409) {
+        try { await onConflict(); } catch { /* 取り直せなくても、知らせは出したあと */ }
+      }
     } finally {
       btn.disabled = false;
     }
@@ -25,6 +32,7 @@ export function action(label: string, cls: string, fn: () => Promise<void>): HTM
  */
 export function confirmAction(
   label: string, cls: string, question: string, fn: () => Promise<void>, ariaLabel?: string,
+  onConflict?: () => void | Promise<void>,
 ): HTMLElement {
   const wrap = h('span', { class: 'confirm' });
   const draw = (asking: boolean): void => {
@@ -37,7 +45,7 @@ export function confirmAction(
     }
     wrap.append(
       h('span', { class: 'confirm-q' }, question),
-      action('はい', 'primary small', fn),
+      action('はい', 'primary small', fn, onConflict),
       h('button', { type: 'button', class: 'secondary small', onclick: () => draw(false) }, 'やめる'),
     );
   };
@@ -261,8 +269,7 @@ function relationForm(): HTMLElement {
     from.placeholder = kind.value === 'alias' ? '例：映らない' : kind.value === 'includes' ? '例：冷蔵庫' : '例：エアコン';
     to.placeholder = kind.value === 'alias' ? '例：修理' : kind.value === 'includes' ? '例：冷凍冷蔵庫' : '例：クーラー';
   });
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
     try {
       const body = kind.value === 'alias'
         ? { kind: 'alias', fromText: from.value, toTag: to.value }
@@ -275,19 +282,20 @@ function relationForm(): HTMLElement {
       toast(err instanceof Error ? err.message : String(err));
     }
   };
-  return h('form', { class: 'write', onsubmit: submit },
+  const form = h('form', { class: 'write' },
     h('h3', {}, '関係を追加する'),
     h('label', { for: 'rkind' }, '種類'), kind,
     fromLabel, from,
     h('label', { for: 'rto' }, 'タグ'), to,
     h('button', { type: 'submit', class: 'primary' }, '追加する'));
+  submitOnce(form, submit);
+  return form;
 }
 
 function mergeForm(): HTMLElement {
   const from = h('input', { id: 'mfrom', type: 'text', placeholder: '例：長期保障', autocomplete: 'off' });
   const into = h('input', { id: 'minto', type: 'text', placeholder: '例：長期保証', autocomplete: 'off' });
-  const submit = async (e: Event) => {
-    e.preventDefault();
+  const submit = async () => {
     try {
       const r = await api<{ reindexed: number }>('POST', '/tags/merge', { from: from.value, into: into.value });
       toast(`統合しました（${r.reindexed}件のナレッジを付け替え）`);
@@ -297,13 +305,15 @@ function mergeForm(): HTMLElement {
       toast(err instanceof Error ? err.message : String(err));
     }
   };
-  return h('form', { class: 'write', onsubmit: submit },
+  const form = h('form', { class: 'write' },
     h('h3', {}, '表記ゆれのタグを統合する'),
     h('p', { class: 'hint' }, '全店舗の検索に効きます。統合元の名前で検索・投稿しても、統合先として扱われます。'),
     h('label', { for: 'mfrom' }, '統合元（なくすタグ）'), from,
     h('label', { for: 'minto' }, '統合先（残すタグ）'), into,
     h('p', { class: 'hint' }, '統合元のタグは使えなくなり、別名として残ります。'),
     h('button', { type: 'submit', class: 'primary' }, '統合する'));
+  submitOnce(form, submit); // 統合は付け替えが重いので、二重に走らせない
+  return form;
 }
 
 // --- 商品の承認待ち ----------------------------------------------------------------------
@@ -315,23 +325,38 @@ interface PendingProducts {
 
 const FIELD_LABEL: Record<string, string> = { name: '商品名', maker: 'メーカー', areaId: '売場', note: '売場のメモ', tagNames: 'タグ' };
 
+/** 一覧を取り直して描き直す。他の人が先に操作していた（409）あとに使う。失敗は枠に赤字で出す */
+async function refill(body: HTMLElement, load: (body: HTMLElement) => Promise<void>): Promise<void> {
+  try {
+    await load(body);
+  } catch (e) {
+    clear(body);
+    body.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+  }
+}
+
 export function productPanel(storeId: string): HTMLElement {
-  return panel('商品の承認待ち', async (body) => {
+  return panel('商品の承認待ち', async function load(body: HTMLElement): Promise<void> {
     const p = await api<PendingProducts>('GET', `/stores/${storeId}/pending-products`);
+    const reload = () => refill(body, load);
+    clear(body); // 取り直しのときは、取れてから入れ替える（先に消すと、失敗したとき何も残らない）
     body.append(
       ...countedList('登録', p.products, (x, remove) =>
         h('li', { class: 'row' },
           h('a', { href: `#/scan?jan=${x.jan_code}` }, x.name),
           h('span', { class: 'hint' }, `${x.created_by}さん・${relativeDate(x.created_at)}`),
           h('span', { class: 'row-actions' },
-            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); remove(); })))),
+            action('承認する', 'primary small', async () => { await api('POST', `/products/${x.id}/approve`); toast('承認しました'); remove(); }, reload),
+            confirmAction('却下する', 'secondary small', `${x.name} の登録を取り消します（商品ごと消えます）。`, async () => {
+              await api('POST', `/products/${x.id}/reject`); toast('却下しました'); remove();
+            }, undefined, reload)))),
       ...countedList('修正', p.changes, (c, remove) =>
         h('li', { class: 'row' },
           h('span', {}, h('strong', {}, c.name), `（${Object.keys(c.payload).map((k) => FIELD_LABEL[k] ?? k).join('、')}）`),
           h('span', { class: 'hint' }, `${c.requested_by}さん・${relativeDate(c.requested_at)}`),
           h('span', { class: 'row-actions' },
-            action('反映する', 'primary small', async () => { await api('POST', `/product-changes/${c.id}/approve`); toast('反映しました'); remove(); }),
-            action('却下する', 'secondary small', async () => { await api('POST', `/product-changes/${c.id}/reject`); toast('却下しました'); remove(); })))),
+            action('反映する', 'primary small', async () => { await api('POST', `/product-changes/${c.id}/approve`); toast('反映しました'); remove(); }, reload),
+            action('却下する', 'secondary small', async () => { await api('POST', `/product-changes/${c.id}/reject`); toast('却下しました'); remove(); }, reload)))),
     );
   });
 }
@@ -491,8 +516,10 @@ export function accessRequestPanel(
   /** 決めたあとに数を取り直す（上の帯に出ている件数を合わせるため） */
   onDecided: () => void = () => {},
 ): HTMLElement {
-  return panel('利用の申請', async (body) => {
+  return panel('利用の申請', async function load(body: HTMLElement): Promise<void> {
     const rows = await api<AccessRequestRow[]>('GET', '/access-requests');
+    const reload = async () => { await refill(body, load); onDecided(); }; // 申請の数も合わせる
+    clear(body);
     body.append(...countedList('承認を待っている人', rows, (r, remove) => {
       const name = h('input', { type: 'text', value: r.claimedName ?? '', placeholder: '名前',
         'aria-label': `${r.email} の名前` });
@@ -518,14 +545,14 @@ export function accessRequestPanel(
             toast(`${value}さんを登録しました`);
             remove();
             onDecided();
-          }),
+          }, reload),
           confirmAction('断る', 'secondary small', `${r.email} の申請を断ります。`,
             async () => {
               await api('POST', `/access-requests/${r.id}/reject`);
               toast('断りました');
               remove();
               onDecided();
-            })));
+            }, undefined, reload)));
     }, 'h3'));
   });
 }

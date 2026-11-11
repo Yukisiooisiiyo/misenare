@@ -3,6 +3,7 @@
 // 店長・ベテラン（trusted）・新人（visitor）の招待リンクを表示する。
 
 import { SegmenterTokenizer } from '@misenare/search-core';
+import { appTimeZone, todayIn } from '../config.ts';
 import { one } from '../db/db.ts';
 import type { Actor } from '../domain/actor.ts';
 import { addHandover } from '../domain/handovers.ts';
@@ -83,7 +84,8 @@ const links = await database.withTenant(T, async (db) => {
     requiresAck: true,
   });
   await addHandover(db, veteran, main.id, '冷蔵庫（GR-W600）の在庫が1台になりました。発注済みで入荷は明後日です。');
-  const yesterday = new Date(Date.now() - 24 * 3600_000).toISOString().slice(0, 10);
+  // 昨日も日本時間で数える（UTC だと 0:00〜8:59 に「今日」になってしまう）
+  const yesterday = todayIn(appTimeZone(), new Date(Date.now() - 24 * 3600_000));
   await addHandover(db, veteran, main.id, 'レジ横の忘れ物（傘）を預かっています。', yesterday);
 
   // 招待

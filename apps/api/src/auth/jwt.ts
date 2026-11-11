@@ -59,8 +59,9 @@ const EC_ALGS: Record<string, { hash: string; crv: string }> = {
 function toKey(jwk: Jwk): KeyObject {
   try {
     return createPublicKey({ key: jwk as never, format: 'jwk' });
-  } catch (err) {
-    throw new JwtError(`鍵を読めません: ${err instanceof Error ? err.message : String(err)}`);
+  } catch {
+    // 例外文は内部の事情（OpenSSL の文面など）なので画面に出る文面には入れない
+    throw new JwtError('鍵を読めません');
   }
 }
 

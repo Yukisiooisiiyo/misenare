@@ -66,6 +66,13 @@ export function json(body: unknown, status = 200): Response {
   });
 }
 
+/** If-None-Match が etag に一致するか。弱い比較（W/ の有無は無視）で、カンマ区切りの複数と * も受ける。 */
+export function matchesEtag(header: string | null, etag: string): boolean {
+  if (header === null) return false;
+  const bare = (v: string) => v.trim().replace(/^W\//, '');
+  return header.split(',').some((v) => v.trim() === '*' || bare(v) === bare(etag));
+}
+
 export async function readJson<T>(req: Request): Promise<T> {
   try {
     return (await req.json()) as T;

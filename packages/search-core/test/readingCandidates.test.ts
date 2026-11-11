@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { readingCandidates } from '../src/readingCandidates.ts';
+import { clearReadingCandidatesCache, readingCandidates, readingCandidatesCacheStats } from '../src/readingCandidates.ts';
 
 /**
  * ここで測るのは「1位が当たるか」ではなく「**候補に入っているか**」。
@@ -97,5 +97,41 @@ describe('読みの候補', () => {
     }
     // ふつうの語は今までどおり当たる
     assert.ok(readingCandidates('下取').includes('シタドリ'));
+  });
+});
+
+describe('結果の覚え書き', () => {
+  it('同じ語・同じ件数の2回目は、計算し直さずに同じ答えを返す', () => {
+    clearReadingCandidatesCache();
+    const first = readingCandidates('空気清浄機', 5);
+    assert.equal(readingCandidatesCacheStats().computed, 1);
+    const second = readingCandidates('空気清浄機', 5);
+    assert.equal(readingCandidatesCacheStats().computed, 1, '2回目は計算していない');
+    assert.deepEqual(second, first);
+    // 件数が違えば答えも違いうるので、別の鍵として計算する
+    readingCandidates('空気清浄機', 1);
+    assert.equal(readingCandidatesCacheStats().computed, 2);
+  });
+
+  it('返した配列を書き換えても、覚えてある中身は変わらない', () => {
+    clearReadingCandidatesCache();
+    const first = readingCandidates('冷蔵庫');
+    first.length = 0;
+    assert.ok(readingCandidates('冷蔵庫').includes('レイゾウコ'));
+  });
+
+  it('2,000語を超えたら、使われていない語から捨てる', () => {
+    clearReadingCandidatesCache();
+    readingCandidates('冷蔵庫'); // 最初に入れる。この後で引き直して「最近使った」にする
+    for (let i = 0; i < 1999; i++) readingCandidates(`ぽ${i}`);
+    readingCandidates('冷蔵庫');
+    assert.equal(readingCandidatesCacheStats().size, 2000);
+    for (let i = 0; i < 5; i++) readingCandidates(`ぴ${i}`);
+    assert.equal(readingCandidatesCacheStats().size, 2000, '上限を超えて増えない');
+    const computed = readingCandidatesCacheStats().computed;
+    readingCandidates('冷蔵庫');
+    assert.equal(readingCandidatesCacheStats().computed, computed, '最近使った語は残っている');
+    readingCandidates('ぽ0');
+    assert.equal(readingCandidatesCacheStats().computed, computed + 1, '古い語は捨てられて、計算し直した');
   });
 });

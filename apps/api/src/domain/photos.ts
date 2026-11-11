@@ -198,7 +198,8 @@ export async function finishPhotoUpload(db: Db, storage: Storage, actor: Actor, 
   const stored = await storage.head(p.storage_key);
   assert(stored !== null, 'conflict', '写真の中身がまだ届いていません。先に送ってください');
   if (stored.bytes > MAX_PHOTO_BYTES) {
-    await storage.remove(p.storage_key).catch(() => undefined);
+    // 実体が消せなかった場合に備え、キーと理由を残す（後から掃除できるように）
+    await storage.remove(p.storage_key).catch((err) => console.warn('写真の実体を消せませんでした', { key: p.storage_key, err }));
     await db.query(`DELETE FROM knowledge_photos WHERE id = $1`, [photoId]);
     throw new DomainError('invalid', '写真が大きすぎます');
   }
@@ -254,7 +255,8 @@ export async function deletePhoto(db: Db, storage: Storage, actor: Actor, photoI
   assert(p.created_by === actor.userId || canModerate(actor, p.store_id), 'forbidden', 'この写真は消せません');
   await db.query(`DELETE FROM knowledge_photos WHERE id = $1`, [photoId]);
   // 保存先から消せなくても、一覧からは消えている。残骸は夜間バッチで片付ける
-  await storage.remove(p.storage_key).catch(() => {});
+  // 行は消えるので、実体だけが残る。あとから追えるようにキーと理由を残す
+  await storage.remove(p.storage_key).catch((err) => console.warn('写真の実体を消せませんでした', { key: p.storage_key, err }));
   return { ok: true };
 }
 
@@ -266,6 +268,7 @@ export async function sweepAbandonedPhotos(db: Db, storage: Storage, olderThanHo
       RETURNING id, storage_key`,
     [String(olderThanHours)],
   );
-  for (const r of rows) await storage.remove(r.storage_key).catch(() => {});
+  // 行は消えるので、実体だけが残る。あとから追えるようにキーと理由を残す
+  for (const r of rows) await storage.remove(r.storage_key).catch((err) => console.warn('写真の実体を消せませんでした', { key: r.storage_key, err }));
   return rows.length;
 }

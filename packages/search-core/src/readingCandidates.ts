@@ -214,7 +214,7 @@ function score(chosen: Option[], parts: Part[]): number {
  */
 const MAX_LEAVES = 20_000;
 
-export function readingCandidates(word: string, limit = 5): string[] {
+function computeReadingCandidates(word: string, limit: number): string[] {
   const parts = split(word.trim(), kanjiReadings());
   if (parts === null || parts.length === 0) return [];
   trim(parts);
@@ -306,3 +306,37 @@ export function readingCandidates(word: string, limit = 5): string[] {
   return picked.map((c) => c.reading);
 }
 
+// 同じ語の候補を何度も作り直さないための覚え書き。
+// 総当たりは漢字4字以上の語で 50ms ほどかかり、GET /tag-readings は確認待ちのタグ50件ぶんを毎回計算していた。
+// 結果は語と件数だけで決まる（乱数も時刻も使わない）ので、覚えて返しても答えは変わらない。
+// 上限を超えたら、使われていない語から捨てる（Map の挿入順を使った LRU）。
+const MAX_CACHED_WORDS = 2_000;
+const memo = new Map<string, string[]>();
+let computedCount = 0;
+
+export function readingCandidates(word: string, limit = 5): string[] {
+  // limit が違えば結果も違う（最後の1枠の入れ替えが limit に依る）ので、鍵に含める
+  const key = `${limit}\u0000${word}`;
+  const hit = memo.get(key);
+  if (hit !== undefined) {
+    memo.delete(key); // 取り出して入れ直し、いちばん新しい位置にする
+    memo.set(key, hit);
+    return [...hit]; // 呼び出し側が配列を書き換えても、覚えてある中身は変えない
+  }
+  computedCount++;
+  const result = computeReadingCandidates(word, limit);
+  memo.set(key, result);
+  if (memo.size > MAX_CACHED_WORDS) memo.delete(memo.keys().next().value!);
+  return [...result];
+}
+
+/** 覚え書きの状態（試験用）。computed は、覚えてあるものを返さず実際に計算した回数。 */
+export function readingCandidatesCacheStats(): { size: number; computed: number } {
+  return { size: memo.size, computed: computedCount };
+}
+
+/** 覚え書きを空にする（試験用） */
+export function clearReadingCandidatesCache(): void {
+  memo.clear();
+  computedCount = 0;
+}

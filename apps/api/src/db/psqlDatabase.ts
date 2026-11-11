@@ -3,6 +3,7 @@
 // パラメータは文字列リテラルに展開するため、本番では使わないこと（PgDatabase を使う）。
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { appTimeZone } from '../config.ts';
 import type { Database, Db } from './db.ts';
 
 function literal(v: unknown): string {
@@ -53,6 +54,9 @@ export class PsqlDatabase implements Database {
   private buffer = '';
   private waiter: ((chunk: string) => void) | undefined;
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly timeZone = appTimeZone();
+  /** 流した SQL 文の本数（BEGIN / COMMIT を含む）。1リクエストの取引の数を試験で確かめるために数える */
+  statements = 0;
 
   constructor(connectionString: string) {
     if (process.env.NODE_ENV === 'production') {
@@ -82,6 +86,7 @@ export class PsqlDatabase implements Database {
 
   /** 1文を実行して行を返す。SELECT と RETURNING 付きの文は JSON で受け取る。 */
   private run(sql: string, params?: readonly unknown[]): Promise<unknown[]> {
+    this.statements++;
     const text = interpolate(sql, params).trim().replace(/;\s*$/, '');
     const returnsRows = /^(select|with)\b/i.test(text) || /\breturning\b/i.test(text);
     const statement = returnsRows
@@ -127,6 +132,8 @@ export class PsqlDatabase implements Database {
       this.inTransaction = true;
       try {
         await this.run("SELECT set_config('app.tenant_id', $1, true)", [tenantId]);
+        // current_date / now()::date を日本時間で評価させる（サーバーは UTC のことが多い）。これも取引の中だけ
+        await this.run("SELECT set_config('TimeZone', $1, true)", [this.timeZone]);
         const result = await fn(db);
         await this.run('COMMIT');
         return result;

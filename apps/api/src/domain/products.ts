@@ -70,7 +70,7 @@ async function card(db: Db, productId: string, storeId: string): Promise<Product
  *   1. その商品に直接紐づいたナレッジ（最上位）
  *   2. 商品のタグ・商品名・メーカーを検索語にした BM25F の結果（同義・包含の展開込み）
  */
-async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, product: ProductCard, limit = 10) {
+async function relatedKnowledge(db: Db, tokenizer: Tokenizer, tenantId: string, storeId: string, product: ProductCard, limit = 10) {
   const linked = await db.query<{ id: string }>(
     `SELECT k.id FROM knowledge_products kp JOIN knowledge k ON k.id = kp.knowledge_id
       WHERE kp.product_id = $1 AND k.status = 'published'
@@ -81,7 +81,7 @@ async function relatedKnowledge(db: Db, tokenizer: Tokenizer, storeId: string, p
   );
   const linkedHits = await describeHits(db, linked.map((l) => ({ id: l.id, score: 0, matchedTerms: [] })));
 
-  const dictionary = await loadDictionary(db);
+  const dictionary = await loadDictionary(db, tenantId);
   // search() と同じ上限。保存された文字列がそのまま解析に流れるので、ここでも切る
   const queryText = [...product.tags.map((t) => `#${t}`), product.name, product.maker ?? ''].join(' ').slice(0, 200);
   const { groups } = analyzeQuery(queryText, { tokenizer, dictionary });
@@ -110,7 +110,7 @@ export async function scanBarcode(db: Db, tokenizer: Tokenizer, actor: Actor, st
     return { status: 'unknown', janCode };
   }
   const product = await card(db, p.id, storeId);
-  return { status: 'found', product, related: await relatedKnowledge(db, tokenizer, storeId, product) };
+  return { status: 'found', product, related: await relatedKnowledge(db, tokenizer, actor.tenantId, storeId, product) };
 }
 
 export interface ProductInput {
@@ -194,12 +194,15 @@ export async function registerProduct(db: Db, actor: Actor, storeId: string, inp
   await assertArea(db, storeId, input.areaId);
 
   const trusted = isTrusted(actor);
-  const p = await one<{ id: string }>(
-    db,
+  // 確認と挿入の間に同じ JAN が入ると UNIQUE 違反で 500 になるので、衝突は conflict に寄せる
+  const inserted = await db.query<{ id: string }>(
     `INSERT INTO products (tenant_id, jan_code, name, maker, state, origin_store_id, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (tenant_id, jan_code) DO NOTHING RETURNING id`,
     [actor.tenantId, input.janCode, input.name.trim(), input.maker?.trim() || null, trusted ? 'active' : 'pending', storeId, actor.userId],
   );
+  assert(inserted.length === 1, 'conflict', 'この商品はすでに登録されています');
+  const p = inserted[0]!;
   const tagIds = await resolveTags(db, actor, input.tagNames);
   await setTags(db, actor, p.id, tagIds);
   await setStoreProduct(db, actor, storeId, p.id, input.areaId ?? null, input.note ?? null);
@@ -285,7 +288,7 @@ export async function updateProduct(db: Db, actor: Actor, storeId: string, produ
 export async function approveProductChange(db: Db, actor: Actor, requestId: string) {
   const r = await maybeOne<{ store_id: string; entity_id: string; payload: ProductPatch; requested_by: string; state: string }>(
     db,
-    `SELECT store_id, entity_id, payload, requested_by, state FROM change_requests WHERE id = $1 AND entity_type = 'product'`,
+    `SELECT store_id, entity_id, payload, requested_by, state FROM change_requests WHERE id = $1 AND entity_type = 'product' FOR UPDATE`,
     [requestId],
   );
   assert(r !== undefined, 'not_found', '依頼が見つかりません');
@@ -294,7 +297,13 @@ export async function approveProductChange(db: Db, actor: Actor, requestId: stri
   const exists = await maybeOne(db, `SELECT 1 FROM products WHERE id = $1`, [r.entity_id]);
   assert(exists !== undefined, 'not_found', '商品が削除されています');
   await applyPatch(db, actor, r.store_id, r.entity_id, r.payload, r.requested_by);
-  await db.query(`UPDATE change_requests SET state = 'approved', decided_by = $2, decided_at = now() WHERE id = $1`, [requestId, actor.userId]);
+  // 同時に2人が承認すると applyPatch が2回走る。行ロックで待たせた上で、pending のときだけ確定する
+  const done = await db.query(
+    `UPDATE change_requests SET state = 'approved', decided_by = $2, decided_at = now()
+      WHERE id = $1 AND state = 'pending' RETURNING id`,
+    [requestId, actor.userId],
+  );
+  assert(done.length === 1, 'conflict', 'この依頼は処理済みです');
   return { productId: r.entity_id };
 }
 
@@ -346,6 +355,19 @@ export async function approveProduct(db: Db, actor: Actor, productId: string) {
   return { productId };
 }
 
+/** visitor が登録した承認待ちの商品を却下する（消す）。間違った登録が店長の一覧に残り続けないように */
+export async function rejectProduct(db: Db, actor: Actor, productId: string) {
+  const p = await maybeOne<{ origin_store_id: string | null }>(db, `SELECT origin_store_id FROM products WHERE id = $1`, [productId]);
+  assert(p !== undefined, 'not_found', '商品が見つかりません');
+  assert(canModerate(actor, p.origin_store_id), 'forbidden', '却下する権限がありません');
+  const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
+  // product_tags などは CASCADE で消える。承認済みの商品はここでは消さない
+  const rows = await db.query(`DELETE FROM products WHERE id = $1 AND state = 'pending' RETURNING id`, [productId]);
+  assert(rows.length === 1, 'conflict', 'この商品は承認待ちではありません');
+  await refreshUseCounts(db, tags.map((t) => t.hashtag_id));
+  return { productId };
+}
+
 /** ナレッジと商品を直接紐づける（trusted 以上）。 */
 export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: string, productId: string) {
   const k = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM knowledge WHERE id = $1`, [knowledgeId]);
@@ -391,6 +413,8 @@ export async function deleteProduct(db: Db, actor: Actor, storeId: string, produ
   const tags = await db.query<{ hashtag_id: string }>(`SELECT hashtag_id FROM product_tags WHERE product_id = $1`, [productId]);
   const rows = await db.query(`DELETE FROM products WHERE id = $1 RETURNING id`, [productId]);
   assert(rows.length === 1, 'not_found', '商品が見つかりません');
+  // change_requests には商品への FK が無く、残ると依頼者の承認待ちの枠を占有し続ける
+  await db.query(`DELETE FROM change_requests WHERE entity_type = 'product' AND entity_id = $1 AND state = 'pending'`, [productId]);
   await refreshUseCounts(db, tags.map((t) => t.hashtag_id));
   return { removed: 'tenant' as const };
 }

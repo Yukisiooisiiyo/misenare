@@ -8,6 +8,7 @@
 //   ・削除は印を付けるだけで、行は消さない（戻せる）
 //   ・書いた・片付けた・やり直した・消した・戻した を1件ずつ記録する
 
+import { todayIn } from '../config.ts';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, type Actor } from './actor.ts';
 import { assertStore } from './scope.ts';
@@ -102,7 +103,7 @@ export async function listHandovers(db: Db, actor: Actor, storeId: string, date?
       ORDER BY (h.state = 'done'), h.for_date, h.created_at`,
     [storeId, date ?? null, CARRY_OVER_DAYS],
   );
-  const today = rows[0]?.today ?? (date ?? new Date().toISOString().slice(0, 10));
+  const today = rows[0]?.today ?? (date ?? todayIn());
   return rows.map((r) => view(r, today));
 }
 

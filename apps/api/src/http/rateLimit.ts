@@ -17,6 +17,8 @@ export interface RateRule {
 }
 
 export interface Limiter {
+  /** DB を使わず記憶の中だけで数える（取引の中から呼んでも接続を取り合わない）。DB で数える版は付けない */
+  readonly local?: boolean;
   /** 上限に達していれば false。達していなければ1回数えて true。 */
   take(key: string, rule: RateRule): Promise<boolean>;
   /** 上限に達しているかだけを見る（数えない） */
@@ -24,6 +26,7 @@ export interface Limiter {
 }
 
 export class MemoryRateLimiter implements Limiter {
+  readonly local = true;
   private readonly hits = new Map<string, number[]>();
 
   constructor(private readonly now: () => number = () => Date.now()) {}
@@ -145,6 +148,12 @@ export const RULES = {
    * 鍵は利用者なので、店舗の回線で誰かの巻き添えにはならない。
    */
   heavyRead: { limit: 120, windowMs: 60_000 },
+  /**
+   * 認証後の書き込み（GET・HEAD 以外）すべてに掛かる、利用者ごとの上限：10分で300回まで。
+   * 人が操作できる速さをはるかに超える連打だけを止める。
+   * 鍵が利用者なので店舗の回線で巻き添えにならない。
+   */
+  userWrite: { limit: 300, windowMs: 10 * 60_000 },
 } satisfies Record<string, RateRule>;
 
 /** node:http のアダプタが付ける、接続元の IP のヘッダー（外から来た同名のヘッダーは上書きする） */
