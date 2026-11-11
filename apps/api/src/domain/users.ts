@@ -7,6 +7,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAdminister, DomainError, type Actor, type AdminScope, type TrustLevel } from './actor.ts';
 import { assertStore } from './scope.ts';
+import { looksLikeEmail, type Mailer } from '../mail/mailer.ts';
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const INVITATION_TTL_HOURS = 72;
@@ -90,6 +91,35 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
     [actor.tenantId, hashToken(token), input.storeId, input.userId ?? null, input.name?.trim() ?? null, trustLevel, adminScope, actor.userId, INVITATION_TTL_HOURS],
   );
   return { invitationId: row.id, token, expiresAt: row.expires_at };
+}
+
+/** 招待リンク（マジックリンク）を任意のメールアドレスに送る。QR と同じ招待を、
+ *  メールで届けるだけ。パスワードは作らない。権限の確認は createInvitation に任せる。 */
+export async function inviteByEmail(
+  db: Db,
+  actor: Actor,
+  mailer: Mailer,
+  appUrl: string,
+  input: InvitationInput & { email: string },
+): Promise<{ sent: boolean; expiresAt: string }> {
+  const email = input.email.trim();
+  assert(looksLikeEmail(email), 'invalid', 'メールアドレスの形が正しくありません');
+  const { token, expiresAt } = await createInvitation(db, actor, input);
+  const link = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
+  const who = input.name?.trim();
+  const sent = await mailer.send({
+    to: [email],
+    subject: '【ツギガミ】店舗ナレッジへのご招待',
+    text: [
+      `${who ? who + 'さん、' : ''}店舗ナレッジ「ツギガミ」への招待が届きました。`,
+      '',
+      '下のリンクをスマホで開くと、この端末で使い始められます（1回限り・72時間以内）。',
+      link,
+      '',
+      'このメールに心当たりがない場合は、そのまま破棄してください。リンクは開かなければ無効のままです。',
+    ].join('\n'),
+  });
+  return { sent, expiresAt };
 }
 
 /**
