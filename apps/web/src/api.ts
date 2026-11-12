@@ -118,6 +118,7 @@ export async function fetchDictionary(storeId: string): Promise<Dictionary> {
 export interface Me {
   id: string;
   name: string;
+  email: string | null;
   trustLevel: 'visitor' | 'trusted';
   adminScope: 'none' | 'store' | 'tenant';
   stores: Array<{ id: string; name: string }>;
