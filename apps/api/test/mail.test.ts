@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { compose, encodeHeader, looksLikeEmail, mailerFromEnv, SmtpMailer } from '../src/mail/mailer.ts';
+import { addressOnly, compose, encodeHeader, looksLikeEmail, mailerFromEnv, SmtpMailer } from '../src/mail/mailer.ts';
 import { sendSmtp, smtpFromEnv, stuff } from '../src/mail/smtp.ts';
 import { fakeSmtp, type FakeSmtp } from './smtpHelper.ts';
 
@@ -70,6 +70,15 @@ describe('メールの組み立て', () => {
     assert.ok(!looksLikeEmail('tanaka'));
     assert.ok(!looksLikeEmail('tanaka@example'));
     assert.ok(!looksLikeEmail('a b@example.com'));
+  });
+
+  it('封筒(MAIL FROM)には表示名を外してアドレスだけ渡す', () => {
+    // 表示名つきをそのまま渡すと MAIL FROM:<Tsugigami <invite@...>> になり 501 で落ちる
+    assert.equal(addressOnly('Tsugigami <invite@tsugigami.app>'), 'invite@tsugigami.app');
+    assert.equal(addressOnly('invite@tsugigami.app'), 'invite@tsugigami.app');
+    // 前後に空白があっても trim される
+    assert.equal(addressOnly('  Tsugigami <invite@tsugigami.app>  '), 'invite@tsugigami.app');
+    assert.equal(addressOnly('  invite@tsugigami.app  '), 'invite@tsugigami.app');
   });
 });
 
