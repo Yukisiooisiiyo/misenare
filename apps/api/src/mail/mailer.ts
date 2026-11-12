@@ -45,6 +45,12 @@ export function looksLikeEmail(value: string): boolean {
   return /^[^\s@,;:<>"]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(value.trim());
 }
 
+/** "Name <addr>" からアドレス部分だけ取り出す。山括弧が無ければ入力をそのまま返す。封筒(MAIL FROM/RCPT)はアドレスだけを渡す必要がある。 */
+export function addressOnly(value: string): string {
+  const m = /<([^>]+)>/.exec(value);
+  return (m ? m[1] : value).trim();
+}
+
 /** base64 を76文字ごとに折る（決まり） */
 function wrap(base64: string): string {
   return (base64.match(/.{1,76}/g) ?? []).join('\r\n');
@@ -89,7 +95,7 @@ export class SmtpMailer implements Mailer {
     const to = mail.to.map((t) => t.trim()).filter((t) => looksLikeEmail(t));
     if (to.length === 0) return false;
     await sendSmtp(this.config, {
-      from: this.from,
+      from: addressOnly(this.from),
       to,
       message: compose({
         ...mail, to, from: this.from, replyTo: this.replyTo,
