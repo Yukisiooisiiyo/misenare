@@ -1059,11 +1059,31 @@ function inviteForm(): HTMLElement {
       out.append(h('p', { class: 'error', role: 'alert' }, err instanceof Error ? err.message : String(err)));
     }
   };
+  const email = h('input', { id: 'iemail', type: 'email', autocomplete: 'off', placeholder: 'you@example.co.jp' });
+  // QR を見せる代わりに、同じ招待リンクをメールで送る。パスワードは作らない。
+  const sendMail = async () => {
+    clear(out);
+    try {
+      const r = await api<{ sent: boolean }>('POST', '/invitations/email', {
+        storeId: storeId(), name: name.value, trustLevel: trusted.checked ? 'trusted' : 'visitor', email: email.value,
+      });
+      if (r.sent) {
+        out.append(h('p', {}, `${email.value} に招待リンクを送りました（1回限り・72時間有効）。`));
+        name.value = ''; email.value = '';
+      } else {
+        out.append(h('p', { class: 'error', role: 'alert' }, '送信できませんでした。サーバーのメール設定を確かめてください。'));
+      }
+    } catch (err) {
+      out.append(h('p', { class: 'error', role: 'alert' }, err instanceof Error ? err.message : String(err)));
+    }
+  };
   const form = h('form', { class: 'write' },
     h('h2', {}, 'スタッフを招待する'),
     h('label', { for: 'iname' }, '名前'), name,
     h('label', { class: 'check' }, trusted, '最初から trusted にする（投稿がすぐ公開される）'),
-    h('button', { type: 'submit', class: 'primary' }, '招待リンクを作る'),
+    h('button', { type: 'submit', class: 'primary' }, 'QR・招待リンクを作る'),
+    h('label', { for: 'iemail' }, 'メールで送る場合の宛先（任意）'), email,
+    h('button', { type: 'button', class: 'secondary', onclick: () => void sendMail() }, 'メールで招待を送る'),
     out);
   submitOnce(form, submit); // 連打で招待が何本もできないように
   return form;

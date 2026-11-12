@@ -81,6 +81,7 @@ import { exportDictionary } from '../domain/tags.ts';
 import {
   acceptInvitation,
   createInvitation,
+  inviteByEmail,
   listStoreUsers,
   me,
   parseToken,
@@ -678,6 +679,21 @@ function routes(): Router<Ctx> {
     return json({ ok: true });
   });
   r.post('/invitations', async (c, req) => json(await createInvitation(c.db, c.actor, invitationBody(await readJson(req))), 201));
+  r.post('/invitations/email', async (c, req) => {
+    // 乱用（スパム送信）を防ぐため、管理者1人あたりの送信回数を抑える
+    if (!(await c.limitUser('invite-email', { limit: 20, windowMs: 10 * 60 * 1000 }))) {
+      throw new HttpError(429, '招待メールの送信が多すぎます。少し待ってからお試しください');
+    }
+    const raw = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const body = invitationBody(raw);
+    const email = typeof raw.email === 'string' ? raw.email : '';
+    const mailer = mailerFromEnv();
+    if (mailer === noMailer) throw new HttpError(400, 'メール送信が設定されていません（サーバーの SMTP HOST と MAIL FROM が必要です）');
+    // 招待リンクの土台。APP_URL を優先し、無ければ WEBAUTHN_ORIGINS の先頭で代用する。
+    const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
+    if (!appUrl) throw new HttpError(500, 'APP_URL（または WEBAUTHN_ORIGINS）が設定されていないため、招待リンクを作れません');
+    return json(await inviteByEmail(c.db, c.actor, mailer, appUrl, { ...body, email }), 201);
+  });
   r.get('/stores/:storeId/users', async (c, _req, p) => json(await listStoreUsers(c.db, c.actor, p.storeId!)));
   r.patch('/users/:userId', async (c, req, p) => json(await updateUser(c.db, c.actor, p.userId!, userPatchBody(await readJson(req)))));
   r.delete('/sessions/:sessionId', async (c, _req, p) => {
