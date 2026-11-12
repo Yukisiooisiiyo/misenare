@@ -93,6 +93,29 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
   return { invitationId: row.id, token, expiresAt: row.expires_at };
 }
 
+/** 別端末ログイン用URLの有効期限（短め。発行してすぐ使う想定）。 */
+export const DEVICE_LINK_TTL_MINUTES = 30;
+
+/**
+ * 自分の今のアカウントに、別の端末を一時URLで足すためのワンタイム鍵。
+ *
+ * 他人を招く createInvitation と違い、**管理者権限は要らない**（自分の端末を増やすだけ）。
+ * user_id に自分を入れるので、受け取った端末は「自分として」入る（新しい利用者は作らない）。
+ * 本部の人は createInvitation だと自分の端末すら足せない（assertCanManageUser で弾かれる）ので、
+ * ここで self 専用の経路を用意する。鍵は短命・1回限り。
+ */
+export async function createDeviceLink(db: Db, actor: Actor): Promise<{ token: string; expiresAt: string }> {
+  const token = issueToken(actor.tenantId);
+  const row = await one<{ expires_at: string }>(
+    db,
+    `INSERT INTO invitations (tenant_id, token_hash, store_id, user_id, name, trust_level, admin_scope, created_by, expires_at)
+     VALUES ($1, $2, NULL, $3, NULL, $4, $5, $3, now() + make_interval(mins => $6))
+     RETURNING expires_at::text AS expires_at`,
+    [actor.tenantId, hashToken(token), actor.userId, actor.trustLevel, actor.adminScope, DEVICE_LINK_TTL_MINUTES],
+  );
+  return { token, expiresAt: row.expires_at };
+}
+
 /** 招待リンク（マジックリンク）を任意のメールアドレスに送る。QR と同じ招待を、
  *  メールで届けるだけ。パスワードは作らない。権限の確認は createInvitation に任せる。 */
 export async function inviteByEmail(

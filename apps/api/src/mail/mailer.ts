@@ -47,8 +47,8 @@ export function looksLikeEmail(value: string): boolean {
 
 /** "Name <addr>" からアドレス部分だけ取り出す。山括弧が無ければ入力をそのまま返す。封筒(MAIL FROM/RCPT)はアドレスだけを渡す必要がある。 */
 export function addressOnly(value: string): string {
-  const m = /<([^>]+)>/.exec(value);
-  return (m ? m[1] : value).trim();
+  const inside = /<([^>]+)>/.exec(value)?.[1];
+  return (inside ?? value).trim();
 }
 
 /** base64 を76文字ごとに折る（決まり） */

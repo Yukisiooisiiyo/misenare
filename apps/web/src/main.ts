@@ -199,6 +199,34 @@ async function renderDevice(stale: () => boolean): Promise<void> {
   );
   shell(null, section);
 
+  // 別の端末でログイン：どの端末でも出す（パスキーの引き継ぎがうまくいかない端末の逃げ道にもなる）。
+  {
+    const linkOut = h('div', { class: 'invite-out', 'aria-live': 'polite' });
+    const makeLink = action('ログイン用のURLを発行する', 'secondary', async () => {
+      clear(linkOut);
+      try {
+        const r = await api<{ url: string; expiresAt: string }>('POST', '/me/device-link', {});
+        const qr = h('div', { class: 'qr' });
+        qr.innerHTML = qrToSvg(encodeQr(r.url), { label: '別の端末でログインするQRコード' });
+        linkOut.append(
+          h('p', {}, 'もう一方の端末でこのQRを読み取るか、下のURLを開くと、その端末で同じアカウントにログインできます（1回限り・30分以内）。'),
+          qr,
+          h('textarea', { rows: 3, readonly: true, class: 'invite-link' }, r.url),
+          h('div', { class: 'actions' },
+            h('button', { type: 'button', class: 'secondary', onclick: async () => { await navigator.clipboard.writeText(r.url).catch(() => {}); toast('コピーしました'); } }, 'URLをコピー')));
+      } catch (e) {
+        linkOut.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+      }
+    });
+    section.append(
+      h('h2', {}, '別の端末でログイン'),
+      h('p', {}, 'スマホとパソコンなど、もう一方の端末でも同じアカウントで使いたいときに。URLかQRコードを発行して、その端末で開くとログインできます。'),
+      h('p', { class: 'hint' }, 'パスキーの引き継ぎがうまくいかないときの入り方としても使えます。発行したURLは30分で切れ、1回使うと無効になります。'),
+      makeLink,
+      linkOut,
+    );
+  }
+
   const list = h('div');
   const problem = h('p', { class: 'error', role: 'alert', hidden: true });
 
