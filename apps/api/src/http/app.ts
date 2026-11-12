@@ -80,6 +80,7 @@ import {
 import { exportDictionary } from '../domain/tags.ts';
 import {
   acceptInvitation,
+  createDeviceLink,
   createInvitation,
   inviteByEmail,
   listStoreUsers,
@@ -674,6 +675,17 @@ function routes(): Router<Ctx> {
 
   // --- 利用者・端末 ---------------------------------------------------------
   r.get('/me', async (c) => json(await me(c.db, c.actor)));
+  // 別の端末でログインするためのワンタイムURLを、自分用に発行する（管理者でなくても可）。
+  r.post('/me/device-link', async (c) => {
+    if (!(await c.limitUser('device-link', { limit: 10, windowMs: 10 * 60 * 1000 }))) {
+      throw new HttpError(429, '発行が多すぎます。少し待ってからお試しください');
+    }
+    const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
+    if (!appUrl) throw new HttpError(500, 'APP_URL（または WEBAUTHN_ORIGINS）が設定されていないため、リンクを作れません');
+    const { token, expiresAt } = await createDeviceLink(c.db, c.actor);
+    const url = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
+    return json({ url, expiresAt }, 201);
+  });
   r.post('/auth/logout', async (c) => {
     if (c.identity.sessionId) await revokeSession(c.db, c.actor, c.identity.sessionId);
     return json({ ok: true });
