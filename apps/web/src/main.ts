@@ -163,6 +163,20 @@ function renderWelcome(error?: string): void {
     }
   });
 
+  // メールでログインリンクを受け取る：端末のセッションもパスキーも無くなったときの戻り道。
+  // 応答は常に同じ（登録の有無を漏らさない）。
+  const linkEmail = h('input', { id: 'link-email', type: 'email', autocomplete: 'username',
+    placeholder: 'you@example.co.jp', inputmode: 'email' });
+  const linkOut = h('p', { class: 'hint', 'aria-live': 'polite', hidden: true });
+  const sendLink = action('ログインリンクをメールで送る', 'secondary', async () => {
+    const v = linkEmail.value.trim();
+    if (v === '') { problem.textContent = 'メールアドレスを入れてください。'; problem.hidden = false; return; }
+    problem.hidden = true;
+    await api('POST', '/auth/email-link', { email: v }).catch(() => {});
+    linkOut.textContent = `登録があれば、${v} にログイン用のリンクを送りました。メールを開いてリンクをタップしてください。`;
+    linkOut.hidden = false;
+  });
+
   shell(null, h('section', { class: 'page welcome' },
     h('h1', { class: 'brand' }, 'ツギガミ'),
     h('p', { class: 'lead' }, '店のやり方を、接客の合間にすぐ探せます。'),
@@ -171,6 +185,11 @@ function renderWelcome(error?: string): void {
       signIn,
       h('p', { class: 'hint' }, 'この端末にパスキーを作ってある場合は、こちらから入れます。'),
     ) : null,
+    h('p', { class: 'or' }, '前に使っていて、入れなくなった方'),
+    h('label', { for: 'link-email' }, '登録したメールアドレス'),
+    linkEmail,
+    sendLink,
+    linkOut,
     h('p', { class: 'or' }, '会社のアカウントをお持ちの方'),
     h('label', { for: 'sso-email' }, '会社のメールアドレス'),
     email,
@@ -226,6 +245,45 @@ async function renderDevice(stale: () => boolean): Promise<void> {
       linkOut,
     );
   }
+
+  // メールアドレスの登録：入れなくなったとき「メールでログインリンク」を受け取れるようにする。
+  {
+    const current = h('p', { class: 'hint' }, me!.email ? `登録中：${me!.email}` : 'まだ登録されていません。');
+    const emailInput = h('input', { id: 'my-email', type: 'email', autocomplete: 'username',
+      placeholder: 'you@example.co.jp', inputmode: 'email', value: me!.email ?? '' });
+    const emailOut = h('p', { 'aria-live': 'polite', hidden: true });
+    const saveEmail = action('メールアドレスを保存する', 'secondary', async () => {
+      emailOut.hidden = true;
+      try {
+        const r = await api<{ email: string }>('POST', '/me/email', { email: emailInput.value });
+        me!.email = r.email;
+        current.textContent = `登録中：${r.email}`;
+        emailOut.textContent = '保存しました。';
+        emailOut.className = 'hint';
+        emailOut.hidden = false;
+      } catch (e) {
+        emailOut.textContent = e instanceof Error ? e.message : String(e);
+        emailOut.className = 'error';
+        emailOut.hidden = false;
+      }
+    });
+    section.append(
+      h('h2', {}, 'メールアドレス'),
+      h('p', {}, '登録しておくと、パスキーもこの端末も使えなくなったときに、ログイン画面からメールでログインリンクを受け取って入り直せます。'),
+      current,
+      h('label', { for: 'my-email' }, 'メールアドレス'),
+      emailInput,
+      saveEmail,
+      emailOut,
+    );
+  }
+
+  // 「タブを消して戻れない」対策：ホーム画面に追加してもらう案内（アプリはPWA）。
+  section.append(
+    h('h2', {}, 'ホーム画面に追加'),
+    h('p', {}, 'このページをホーム画面に追加しておくと、タブを閉じてもアイコンから開けます。'),
+    h('p', { class: 'hint' }, 'iPhone（Safari）：共有ボタン → 「ホーム画面に追加」。Android（Chrome）：右上のメニュー → 「ホーム画面に追加」。'),
+  );
 
   const list = h('div');
   const problem = h('p', { class: 'error', role: 'alert', hidden: true });

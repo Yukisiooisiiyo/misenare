@@ -4,7 +4,7 @@
 // acceptInvitation でセッショントークンを受け取る → 以後は Authorization: Bearer <token> で API を呼ぶ。
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { maybeOne, one, type Db } from '../db/db.ts';
+import { maybeOne, one, type Database, type Db } from '../db/db.ts';
 import { assert, canAdminister, DomainError, type Actor, type AdminScope, type TrustLevel } from './actor.ts';
 import { assertStore } from './scope.ts';
 import { looksLikeEmail, type Mailer } from '../mail/mailer.ts';
@@ -116,6 +116,52 @@ export async function createDeviceLink(db: Db, actor: Actor): Promise<{ token: s
   return { token, expiresAt: row.expires_at };
 }
 
+/** 自分のメールアドレスを登録・変更する。テナント内で一意（DB の users_email_per_tenant で担保）。 */
+export async function setMyEmail(db: Db, actor: Actor, email: string): Promise<{ email: string }> {
+  const addr = email.trim();
+  assert(looksLikeEmail(addr), 'invalid', 'メールアドレスの形が正しくありません');
+  try {
+    await db.query(`UPDATE users SET email = $2 WHERE id = $1`, [actor.userId, addr]);
+  } catch {
+    // 一意制約違反：同じメアドが社内の別の人に使われている
+    throw new DomainError('conflict', 'このメールアドレスは、社内の別のアカウントで使われています');
+  }
+  return { email: addr };
+}
+
+/**
+ * 「メールでログインリンクを受け取る」。メアドから本人を引き、その宛先へワンタイムのログインURLを送る。
+ *
+ * 未ログインから呼ぶので、テナントを跨いでメアド→本人を引く（RLS 外の raw）。
+ * **存在を漏らさない**：見つからなくても形が違っても、呼び出し側は常に同じ応答を返す（この関数は投げない）。
+ * 実際に送れるのは、メアドが登録済みの本人だけ。鍵は createDeviceLink と同じく短命・1回限り。
+ */
+export async function sendEmailLogin(database: Database, mailer: Mailer, appUrl: string, email: string): Promise<void> {
+  const addr = email.trim().toLowerCase();
+  if (!looksLikeEmail(addr)) return;
+  const rows = await database.raw(
+    `SELECT id, tenant_id, trust_level, admin_scope FROM users WHERE lower(email) = $1 AND status = 'active' LIMIT 1`,
+    [addr],
+  ) as Array<{ id: string; tenant_id: string; trust_level: TrustLevel; admin_scope: AdminScope }>;
+  const u = rows[0];
+  if (!u) return; // 登録が無ければ、何も送らない（応答は呼び出し側が常に成功を返す）
+  const actor: Actor = { userId: u.id, tenantId: u.tenant_id, storeIds: [], trustLevel: u.trust_level, adminScope: u.admin_scope };
+  const { token } = await database.withTenant(u.tenant_id, (db) => createDeviceLink(db, actor));
+  const link = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
+  await mailer.send({
+    to: [addr],
+    subject: '【ツギガミ】ログイン用リンク',
+    text: [
+      'ツギガミにログインするためのリンクです。',
+      '',
+      '下のリンクをこの端末で開くと、そのままログインできます（1回限り・30分以内）。',
+      link,
+      '',
+      'このメールに心当たりがない場合は、そのまま破棄してください。',
+    ].join('\n'),
+  });
+}
+
 /** 招待リンク（マジックリンク）を任意のメールアドレスに送る。QR と同じ招待を、
  *  メールで届けるだけ。パスワードは作らない。権限の確認は createInvitation に任せる。 */
 export async function inviteByEmail(
@@ -127,7 +173,9 @@ export async function inviteByEmail(
 ): Promise<{ sent: boolean; expiresAt: string }> {
   const email = input.email.trim();
   assert(looksLikeEmail(email), 'invalid', 'メールアドレスの形が正しくありません');
-  const { token, expiresAt } = await createInvitation(db, actor, input);
+  const { invitationId, token, expiresAt } = await createInvitation(db, actor, input);
+  // 宛先を控えておき、受け取った本人のメアドとして紐付ける（accept 時）。
+  await db.query(`UPDATE invitations SET email = $2 WHERE id = $1`, [invitationId, email]);
   const link = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
   const who = input.name?.trim();
   const sent = await mailer.send({
@@ -153,11 +201,11 @@ export async function inviteByEmail(
 export async function acceptInvitation(db: Db, tenantId: string, token: string, deviceName: string | null) {
   const inv = await maybeOne<{
     id: string; token_hash: string; store_id: string | null; user_id: string | null; name: string | null;
-    trust_level: TrustLevel; admin_scope: AdminScope; expired: boolean; used: boolean;
+    email: string | null; trust_level: TrustLevel; admin_scope: AdminScope; expired: boolean; used: boolean;
     creator_inactive: boolean;
   }>(
     db,
-    `SELECT i.id, i.token_hash, i.store_id, i.user_id, i.name, i.trust_level, i.admin_scope,
+    `SELECT i.id, i.token_hash, i.store_id, i.user_id, i.name, i.email, i.trust_level, i.admin_scope,
             i.expires_at < now() AS expired, i.used_at IS NOT NULL AS used,
             COALESCE(c.status <> 'active', false) AS creator_inactive
        FROM invitations i LEFT JOIN users c ON c.id = i.created_by
@@ -187,6 +235,13 @@ export async function acceptInvitation(db: Db, tenantId: string, token: string, 
       `INSERT INTO memberships (tenant_id, user_id, store_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
       [tenantId, userId, inv.store_id],
     );
+  }
+  // 招待メールで来た人は、その宛先を本人のメアドとして控える（復帰のログインリンク送付に使う）。
+  // 既にメアドがある人は上書きしない。同じメアドが別の人に使われていれば（一意制約）、黙って見送る。
+  if (inv.email) {
+    try {
+      await db.query(`UPDATE users SET email = $2 WHERE id = $1 AND email IS NULL`, [userId, inv.email]);
+    } catch { /* 一意制約などは紐付けを諦めるだけ。ログインは止めない */ }
   }
   await db.query(`UPDATE invitations SET used_at = now(), used_by = $2 WHERE id = $1`, [inv.id, userId]);
 
@@ -285,7 +340,7 @@ export async function updateUser(db: Db, actor: Actor, userId: string, patch: Us
 }
 
 export async function me(db: Db, actor: Actor) {
-  const u = await one<{ id: string; name: string }>(db, `SELECT id, name FROM users WHERE id = $1`, [actor.userId]);
+  const u = await one<{ id: string; name: string; email: string | null }>(db, `SELECT id, name, email FROM users WHERE id = $1`, [actor.userId]);
   const stores = await db.query<{ id: string; name: string }>(
     actor.adminScope === 'tenant'
       ? `SELECT id, name FROM stores ORDER BY name`

@@ -87,6 +87,8 @@ import {
   me,
   parseToken,
   revokeSession,
+  sendEmailLogin,
+  setMyEmail,
   updateUser,
   type InvitationInput,
   type UserPatch,
@@ -686,6 +688,12 @@ function routes(): Router<Ctx> {
     const url = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
     return json({ url, expiresAt }, 201);
   });
+  // 自分のメールアドレスを登録する（復帰のログインリンクの宛先になる）。
+  r.post('/me/email', async (c, req) => {
+    const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+    const email = typeof b.email === 'string' ? b.email : '';
+    return json(await setMyEmail(c.db, c.actor, email));
+  });
   r.post('/auth/logout', async (c) => {
     if (c.identity.sessionId) await revokeSession(c.db, c.actor, c.identity.sessionId);
     return json({ ok: true });
@@ -804,6 +812,22 @@ export function createApp(deps: AppDeps) {
         if (err instanceof DomainError) await limiter.take(acceptKey, RULES.acceptInvitation);
         throw err;
       }
+    }
+
+    // ログイン前に呼ぶ、「メールでログインリンクを受け取る」。
+    // 端末のセッションもパスキーも無くなった人の、最後の戻り道。
+    // **存在を漏らさない**：登録の有無・メール設定の有無にかかわらず、常に同じ応答を返す。
+    if (url.pathname === '/auth/email-link' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'email-link'), RULES.emailLogin))) return tooMany();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      const email = typeof b.email === 'string' ? b.email : '';
+      const mailer = mailerFromEnv();
+      const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
+      if (mailer !== noMailer && appUrl) {
+        // 失敗やタイミングで存在が漏れないよう、結果は見ずに握りつぶす。
+        await sendEmailLogin(deps.database, mailer, appUrl, email).catch(() => {});
+      }
+      return json({ requested: true });
     }
 
     // ログイン前に呼ぶ、パスキーの2本。

@@ -26,5 +26,13 @@ jobs:
             cd /opt/misenare
             sudo git pull --ff-only
             cd deploy
-            sudo docker compose up -d --build
+            # 新しいイメージを先に作る（マイグレーションのファイルも取り込まれる）
+            sudo docker compose build
+            # DB を起動（すでに動いていれば何もしない）
+            sudo docker compose up -d db
+            # スキーマのマイグレーションを、新しいイメージで適用してからアプリを入れ替える。
+            # 失敗したら script_stop でここで止まり、アプリは旧版のまま（壊れた新版を出さない）。
+            sudo docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
+            # アプリ・バッチ・Caddy を新イメージで起動
+            sudo docker compose up -d
             sudo docker image prune -f
