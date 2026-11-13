@@ -139,14 +139,25 @@ export async function setMyEmail(db: Db, actor: Actor, email: string): Promise<{
 export async function sendEmailLogin(database: Database, mailer: Mailer, appUrl: string, email: string): Promise<void> {
   const addr = email.trim().toLowerCase();
   if (!looksLikeEmail(addr)) return;
-  const rows = await database.raw(
-    `SELECT id, tenant_id, trust_level, admin_scope FROM users WHERE lower(email) = $1 AND status = 'active' LIMIT 1`,
-    [addr],
-  ) as Array<{ id: string; tenant_id: string; trust_level: TrustLevel; admin_scope: AdminScope }>;
-  const u = rows[0];
-  if (!u) return; // 登録が無ければ、何も送らない（応答は呼び出し側が常に成功を返す）
-  const actor: Actor = { userId: u.id, tenantId: u.tenant_id, storeIds: [], trustLevel: u.trust_level, adminScope: u.admin_scope };
-  const { token } = await database.withTenant(u.tenant_id, (db) => createDeviceLink(db, actor));
+  // users は FORCE RLS（app.tenant_id 必須）なので raw で横断検索できない。
+  // RLS 対象外の tenants から会社を列挙し、各社を withTenant（正規経路）で引く。
+  // メアドは会社ごとに一意なので、一致は高々1人。頻度の低い経路なので社数ぶんの往復は許容。
+  const tenants = await database.raw(`SELECT id FROM tenants`) as Array<{ id: string }>;
+  let hit: { tenantId: string; actor: Actor } | null = null;
+  for (const t of tenants) {
+    const rows = await database.withTenant(t.id, (db) => db.query<{ id: string; trust_level: TrustLevel; admin_scope: AdminScope }>(
+      `SELECT id, trust_level, admin_scope FROM users WHERE lower(email) = $1 AND status = 'active' LIMIT 1`,
+      [addr],
+    ));
+    const u = rows[0];
+    if (u) {
+      hit = { tenantId: t.id, actor: { userId: u.id, tenantId: t.id, storeIds: [], trustLevel: u.trust_level, adminScope: u.admin_scope } };
+      break;
+    }
+  }
+  if (!hit) return; // 登録が無ければ、何も送らない（応答は呼び出し側が常に成功を返す）
+  const { tenantId, actor } = hit;
+  const { token } = await database.withTenant(tenantId, (db) => createDeviceLink(db, actor));
   const link = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
   await mailer.send({
     to: [addr],
