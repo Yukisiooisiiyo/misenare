@@ -40,7 +40,7 @@
   header::after{content:"";position:absolute;left:0;right:0;top:100%;height:4px;pointer-events:none;
     background:url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 4' preserveAspectRatio='none'><path fill='%23AF375B' d='M0,0H1000V2.6C700,3.6 450,2.2 200,3.2C120,3.5 50,2.8 0,3Z'/></svg>") 0 0/100% 100% no-repeat}
   .nav{display:flex;align-items:center;gap:24px;max-width:var(--maxw);margin:0 auto;padding:13px 26px}
-  .nav img{height:32px}
+  .nav img{height:32px;width:auto}
   .nav .links{margin-left:auto;display:flex;align-items:center;gap:26px}
   .nav .links a{font-size:14px;color:var(--sumi-2);font-weight:500}
   .nav .links a:hover{color:var(--gold-deep)}
