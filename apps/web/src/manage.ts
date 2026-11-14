@@ -1,7 +1,7 @@
 // 承認・管理の画面の部品：タグ辞書、商品の承認待ち、スタッフ。
 
 import { api, ApiError } from './api.ts';
-import { clear, h, relativeDate, submitOnce, tagChip, toast } from './dom.ts';
+import { clear, h, relativeDate, submitOnce, tagChip, tagLabel, toast } from './dom.ts';
 
 /**
  * ボタンの処理を実行し、失敗したらその理由を知らせる。実行中はボタンを押せなくする。
@@ -169,7 +169,7 @@ export function readingRow(
 
   return h('li', { class: 'row reading-row' },
     h('span', { class: 'reading-head' },
-      h('span', { class: 'tag tag-inline' }, `#${tag.name}`),
+      h('span', { class: 'tag tag-inline' }, ...tagLabel(tag.name)),
       extra ?? null),
     fields,
     h('button', {
