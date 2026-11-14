@@ -106,6 +106,14 @@ export function checkConfig(env: NodeJS.ProcessEnv = process.env): ConfigReport 
     }
   }
 
+  // 運営者の管理画面。パスワードは設定リンクのメールで本人が決めるので、メールが無いと入口が作れない
+  const operators = (env.OPERATOR_EMAILS ?? '').split(',').map((x) => x.trim()).filter((x) => x !== '');
+  if (operators.some((x) => !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x))) {
+    add('error', 'OPERATOR_EMAILS', 'メールアドレスをカンマ区切りで書いてください（例: owner@example.com）');
+  } else if (operators.length > 0 && (!env.SMTP_HOST || !env.MAIL_FROM)) {
+    add(prod ? 'warn' : 'info', 'OPERATOR_EMAILS', '運営者のアドレスはありますが、SMTP_HOST と MAIL_FROM が無いのでパスワード設定リンクを送れません');
+  }
+
   // メール。決めなければ、申請が来ても本部に届かない（画面を開けば分かる）
   if (!env.SMTP_HOST || !env.MAIL_FROM) {
     add(prod ? 'warn' : 'info', 'SMTP_HOST',

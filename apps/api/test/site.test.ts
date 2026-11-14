@@ -138,4 +138,24 @@ describe('紹介サイト（SITE_HOST）', () => {
     const res = await site(new Request('http://tsugigami.example/'));
     assert.equal(res.status, 302);
   });
+
+  it('運営者の管理画面は、アプリのホスト名の /admin/ でだけ配る（検索に載せない・紹介サイトの名前では出さない）', async () => {
+    const adminDir = await mkdtemp(join(tmpdir(), 'misenare-admin-'));
+    await writeFile(join(adminDir, 'index.html'), '<!doctype html><title>運営</title>');
+    await writeFile(join(adminDir, '.secret'), 'x');
+    try {
+      const withAdmin = createSite(async () => new Response('api'), dir, { host: 'tsugigami.example', dir: siteDir }, adminDir);
+      const page = await withAdmin(new Request('http://app.tsugigami.example/admin/'));
+      assert.equal(page.status, 200);
+      assert.match(await page.text(), /運営/);
+      assert.match(page.headers.get('x-robots-tag') ?? '', /noindex/);
+      assert.match(page.headers.get('content-security-policy') ?? '', /default-src 'self'/);
+      assert.equal((await withAdmin(new Request('http://app.tsugigami.example/admin'))).headers.get('location'), '/admin/');
+      assert.equal((await withAdmin(new Request('http://app.tsugigami.example/admin/.secret'))).status, 404);
+      assert.equal((await withAdmin(new Request('http://app.tsugigami.example/admin/', { method: 'POST' }))).status, 405);
+      assert.equal((await withAdmin(new Request('http://tsugigami.example/admin/'))).status, 404);
+    } finally {
+      await rm(adminDir, { recursive: true, force: true });
+    }
+  });
 });

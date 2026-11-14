@@ -1,6 +1,7 @@
 // Web 版の配信と API をまとめる。
 //   /app/…  … Web 版（apps/web/dist の静的ファイル）
 //   /api/…  … API（先頭の /api を外して渡す）
+//   /admin/… … 運営者の管理画面（apps/admin の静的ファイル）
 //   それ以外 … API（以前のパスとの互換）
 //
 // SITE_HOST を決めると、そのホスト名（例: tsugigami.app）で来たものだけ別扱いにする。
@@ -101,6 +102,13 @@ export function staticFiles(dir: string, options: { prefix?: RegExp; headers?: R
   };
 }
 
+/** 運営者の管理画面用。紹介サイトと同じ縛りに、検索に載せない指示を足す */
+const ADMIN_HEADERS: Record<string, string> = {
+  ...SITE_HEADERS,
+  'referrer-policy': 'no-referrer',
+  'x-robots-tag': 'noindex, nofollow',
+};
+
 export interface MarketingSite {
   /** 紹介サイトのホスト名（例: tsugigami.app）。ポートは付けない */
   host: string;
@@ -108,8 +116,10 @@ export interface MarketingSite {
   dir: string;
 }
 
-export function createSite(api: (req: Request) => Promise<Response>, webDir: string, marketing?: MarketingSite) {
+export function createSite(api: (req: Request) => Promise<Response>, webDir: string, marketing?: MarketingSite, adminDir?: string) {
   const files = staticFiles(webDir);
+  // 運営者の管理画面（apps/admin）。アプリと同じホスト名の /admin/ で配る。中身の口は /api/operator/…
+  const adminFiles = adminDir ? staticFiles(adminDir, { prefix: /^\/admin\/?/, headers: ADMIN_HEADERS }) : null;
   const siteHost = marketing?.host.trim().toLowerCase().replace(/\.$/, '') ?? '';
   const siteFiles = marketing && siteHost !== '' ? staticFiles(marketing.dir, { prefix: /^\/+/, headers: SITE_HEADERS }) : null;
   const notFound = (): Response => new Response('Not Found', { status: 404, headers: SITE_HEADERS });
@@ -136,6 +146,12 @@ export function createSite(api: (req: Request) => Promise<Response>, webDir: str
     }
     if (url.pathname === '/' || url.pathname === '/app') {
       return new Response(null, { status: 302, headers: { location: '/app/' } });
+    }
+    if (adminFiles && (url.pathname === '/admin' || url.pathname.startsWith('/admin/'))) {
+      if (url.pathname === '/admin') return new Response(null, { status: 302, headers: { location: '/admin/' } });
+      if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method Not Allowed', { status: 405, headers: ADMIN_HEADERS });
+      if (url.pathname.split('/').some((part) => part.startsWith('.'))) return new Response('Not Found', { status: 404, headers: ADMIN_HEADERS });
+      return adminFiles(url.pathname, req);
     }
     if (url.pathname.startsWith('/app/')) {
       if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method Not Allowed', { status: 405 });
