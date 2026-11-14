@@ -24,6 +24,7 @@ jobs:
           script: |
             set -eu
             cd /opt/misenare
+            before=$(sudo git rev-parse HEAD)
             sudo git pull --ff-only
             cd deploy
             # 新しいイメージを先に作る（マイグレーションのファイルも取り込まれる）
@@ -35,4 +36,9 @@ jobs:
             sudo docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
             # アプリ・バッチ・Caddy を新イメージで起動
             sudo docker compose up -d
+            # Caddyfile は1ファイルだけを差し込んでいるので、書き換わっても動いている Caddy には届かない。
+            # 変わったときだけ作り直す（証明書は caddy_data に残る）
+            if ! sudo git diff --quiet "$before" HEAD -- deploy/Caddyfile; then
+              sudo docker compose up -d --force-recreate caddy
+            fi
             sudo docker image prune -f
