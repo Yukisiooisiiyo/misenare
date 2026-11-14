@@ -8,7 +8,12 @@
 	encode zstd gzip
 
 	# アプリは外に口を開けていない。ここだけが入口
-	reverse_proxy api:8787
+	reverse_proxy api:8787 {
+		# アプリの入れ替え（デプロイ）で数秒つながらないあいだ、502 を返さずに待って送り直す。
+		# 送り直すのは「つなげなかった」ときだけ（要求がアプリに届く前）なので、二重に届くことはない
+		lb_try_duration 20s
+		lb_try_interval 250ms
+	}
 
 	# 接続元の IP は X-Forwarded-For の最後に積まれる。
 	# アプリは TRUST_PROXY=1 のとき、その最後（Caddy が見た接続元）を使う

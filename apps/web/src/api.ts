@@ -68,6 +68,31 @@ async function readBody(res: Response, sent: string | null): Promise<any> {
   return data;
 }
 
+// サーバーの入れ替え（デプロイ）のあいだ、数秒だけ 502 や接続失敗になる。読むだけの要求（GET）は
+// 何度送っても結果が変わらないので、画面にエラーを出す前に、間をあけて静かに送り直す。
+// 書き込み（POST など）は二重に届くと困るので送り直さない。
+const RETRY_STATUS = new Set([502, 503, 504]);
+const RETRY_WAITS_MS = [400, 900, 1800, 3000];
+
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit & { method: string },
+  waits: readonly number[] = RETRY_WAITS_MS,
+  doFetch: typeof fetch = fetch,
+): Promise<Response> {
+  const tries = init.method === 'GET' ? waits.length + 1 : 1;
+  for (let i = 0; ; i++) {
+    const last = i === tries - 1;
+    try {
+      const res = await doFetch(url, init);
+      if (last || !RETRY_STATUS.has(res.status)) return res;
+    } catch (e) {
+      if (last) throw e;
+    }
+    await new Promise((r) => setTimeout(r, waits[i]));
+  }
+}
+
 export async function api<T>(method: string, path: string, body?: unknown): Promise<T> {
   // ファイルの中身（ArrayBuffer）はそのまま送る。それ以外は JSON にする
   const raw = body instanceof ArrayBuffer || body instanceof Blob;
@@ -78,7 +103,7 @@ export async function api<T>(method: string, path: string, body?: unknown): Prom
   let res: Response;
   try {
     const payload = body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) };
-    res = await fetch(`/api${path}`, { method, headers, ...payload });
+    res = await fetchWithRetry(`/api${path}`, { method, headers, ...payload });
   } catch {
     throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
   }
@@ -100,7 +125,7 @@ export async function fetchDictionary(storeId: string): Promise<Dictionary> {
   if (known) headers['if-none-match'] = known.etag;
   let res: Response;
   try {
-    res = await fetch(`/api/stores/${storeId}/tags/dictionary`, { method: 'GET', headers });
+    res = await fetchWithRetry(`/api/stores/${storeId}/tags/dictionary`, { method: 'GET', headers });
   } catch {
     throw new ApiError(0, '通信できませんでした。電波の届く場所で、もう一度お試しください。');
   }
