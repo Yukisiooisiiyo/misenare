@@ -88,7 +88,8 @@ body {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px var(--gutter); padding-top: max(10px, env(safe-area-inset-top));
   position: relative; color: #fff;
-  background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
+  /* 画面の端にだけ、白がうっすら差す */
+  background: linear-gradient(to bottom, rgba(255,255,255,.26), rgba(255,255,255,0) 26px), var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
 }
 /* 帯の下の縁：わずかに右上がりで波打つ金の線 */
 .topbar::after {
@@ -124,7 +125,7 @@ p { margin: 0; }
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
   display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
   padding-left: calc(var(--gutter) - 16px); padding-right: calc(var(--gutter) - 16px);
-  background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
+  background: linear-gradient(to top, rgba(255,255,255,.26), rgba(255,255,255,0) 26px), var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
   padding-bottom: env(safe-area-inset-bottom);
 }
 /* タブの上の縁：帯と同じ、右上がりで波打つ金の線 */
