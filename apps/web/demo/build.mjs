@@ -2,7 +2,7 @@
 // サーバーの代わりに demo/api.ts を使うよう、読み込み先だけ差し替える。
 
 import { build } from 'esbuild';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -47,17 +47,19 @@ const extraCss = `
 
 // 公開時に <!doctype><html><head><body> が付くので、中身だけを書き出す
 const page = [
-  '<title>ミセナレ お試し版</title>',
+  '<title>ツギガミ お試し版</title>',
   '<link rel="preconnect" href="https://fonts.googleapis.com">',
   '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>',
-  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap">',
+  '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&family=Shippori+Mincho+B1:wght@700;800&display=swap">',
   `<style>\n${css}\n${extraCss}\n</style>`,
   banner,
   '<div id="app"></div>',
-  '<noscript>ミセナレを使うには JavaScript を有効にしてください。</noscript>',
+  '<noscript>ツギガミを使うには JavaScript を有効にしてください。</noscript>',
   `<script type="module">\n${js}\n</script>`,
 ].join('\n');
 void html;
 
 writeFileSync(`${out}/index.html`, page);
+// 和紙の質感の画像は、styles.css から相対で読む。index.html の隣に置く
+for (const f of ['washi.webp', 'navy-washi.webp']) copyFileSync(`${web}/public/${f}`, `${out}/${f}`);
 console.log(`built ${out}/index.html (${(page.length / 1024).toFixed(0)}KB)`);

@@ -3,7 +3,7 @@
   "short_name": "ツギガミ",
   "start_url": "./#/home",
   "display": "standalone",
-  "background_color": "#F2F4F3",
-  "theme_color": "#1F5FBF",
+  "background_color": "#F1ECE0",
+  "theme_color": "#19223D",
   "lang": "ja"
 }
