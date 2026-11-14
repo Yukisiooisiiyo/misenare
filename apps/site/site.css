@@ -105,7 +105,7 @@
   .loop em{font-style:normal;color:var(--gold-deep)}
 
   /* ── why (dark) ── */
-  .why-q{font-family:"Shippori Mincho B1",serif;font-weight:700;font-size:clamp(24px,3.6vw,34px);line-height:1.62;max-width:18ch;margin-top:22px;color:#fff}
+  .why-q{font-family:"Shippori Mincho B1",serif;font-weight:700;font-size:clamp(24px,3.6vw,34px);line-height:1.62;max-width:22em;margin-top:22px;color:#fff}
   .why-q .g{color:var(--gold)}
   .why .lead{margin-top:28px}
   .why-tex{position:absolute;inset:0;opacity:.09;background:url(hero.jpg) center/cover;mix-blend-mode:screen;pointer-events:none}
