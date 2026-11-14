@@ -81,15 +81,20 @@ export function relativeDate(iso: string | null): string {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
-/** ハッシュタグのチップ（棚札の POP） */
+/** タグの中身。「#」だけ色を変えるために分ける（読み上げや文字としては「#名前」のまま） */
+export function tagLabel(name: string): [HTMLElement, string] {
+  return [h('span', { class: 'tag-hash' }, '#'), name];
+}
+
+/** ハッシュタグのチップ */
 export function tagChip(name: string, opts: { onClick?: () => void; removable?: boolean; quiet?: boolean } = {}): HTMLElement {
   const label = `#${name}`;
   const cls = `tag${opts.quiet ? ' tag-quiet' : ''}`;
   if (opts.onClick) {
     return h('button', { type: 'button', class: cls, onclick: () => opts.onClick!(), 'aria-label': opts.removable ? `${label} を外す` : label },
-      label, opts.removable ? h('span', { class: 'tag-x', 'aria-hidden': 'true' }, '×') : null);
+      ...tagLabel(name), opts.removable ? h('span', { class: 'tag-x', 'aria-hidden': 'true' }, '×') : null);
   }
-  return h('span', { class: cls }, label);
+  return h('span', { class: cls }, ...tagLabel(name));
 }
 
 type Control = HTMLButtonElement | HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;

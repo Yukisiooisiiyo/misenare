@@ -3,7 +3,7 @@
 
 import { pairKey, suggestTags, TagDictionary, type SuggestResult, type TagEntry, type TagRelation } from '@misenare/search-core';
 import type { Dictionary } from './api.ts';
-import { clear, h } from './dom.ts';
+import { clear, h, tagLabel } from './dom.ts';
 
 export class LocalDictionary {
   readonly dictionary: TagDictionary;
@@ -70,7 +70,7 @@ export function renderSuggestions(
   for (const t of result.candidates) {
     items.push(h('li', {},
       h('button', { type: 'button', class: 'suggest-item', onclick: () => onPick({ tag: t }) },
-        h('span', { class: 'tag tag-inline' }, `#${t.name}`),
+        h('span', { class: 'tag tag-inline' }, ...tagLabel(t.name)),
         h('span', { class: 'suggest-count' }, `${t.useCount}件`))));
   }
   for (const m of related) {
@@ -79,7 +79,7 @@ export function renderSuggestions(
         type: 'button', class: 'suggest-item suggest-related',
         onclick: () => onPick({ tag: m.tag, ...(m.forTagId ? { maybeFor: m.forTagId } : {}) }),
       },
-        h('span', { class: 'tag tag-inline' }, `#${m.tag.name}`),
+        h('span', { class: 'tag tag-inline' }, ...tagLabel(m.tag.name)),
         h('span', { class: 'suggest-count' }, reasons[m.reason] ?? ''))));
   }
   // 新しいタグを作る選択肢は、既存の候補が1つも無いときだけ出す（既存タグを選ぶ方が手数が少ない画面にする）
@@ -99,7 +99,7 @@ export function renderSuggestions(
       h('ul', { class: 'suggest-list suggest-maybe' }, ...typos.map((m) =>
         h('li', {},
           h('button', { type: 'button', class: 'suggest-item', onclick: () => onPick({ tag: m.tag, ...(m.forTagId ? { maybeFor: m.forTagId } : {}) }) },
-            h('span', { class: 'tag tag-inline' }, `#${m.tag.name}`),
+            h('span', { class: 'tag tag-inline' }, ...tagLabel(m.tag.name)),
             h('span', { class: 'suggest-count' }, reasons[m.reason] ?? ''))))),
     );
   }
