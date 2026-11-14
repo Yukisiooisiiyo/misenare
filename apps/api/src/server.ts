@@ -119,7 +119,9 @@ const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
 // 紹介サイト（apps/site）。SITE_HOST を決めたときだけ、そのホスト名で配信する
 const siteHost = process.env.SITE_HOST?.trim() ?? '';
 const marketing = siteHost !== '' ? { host: siteHost, dir: fileURLToPath(new URL('../../site/', import.meta.url)) } : undefined;
-const server = serve(createSite(app, webDir, marketing), port);
+// 運営者の管理画面（apps/admin）。入れるのは OPERATOR_EMAILS に書いたアドレスだけ
+const adminDir = fileURLToPath(new URL('../../admin/', import.meta.url));
+const server = serve(createSite(app, webDir, marketing, adminDir), port);
 // ポートが使用中（EADDRINUSE）などで待ち受けられないとき。リスナが無いと uncaughtException になるので、
 // 理由が分かる形で記録し、終了コード 1 で落とす（立て直しは restart policy に任せる）
 server.on('error', (err) => {
@@ -137,4 +139,5 @@ logger.info('listening', {
   passkeys: process.env.WEBAUTHN_RP_ID ? 'on' : 'off',
   sso: process.env.SSO_REDIRECT_URI ? 'on' : 'off',
   site: siteHost !== '' ? siteHost : 'off',
+  operators: (process.env.OPERATOR_EMAILS ?? '').trim() !== '' ? 'on' : 'off',
 });

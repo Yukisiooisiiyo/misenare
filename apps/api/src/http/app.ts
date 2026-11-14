@@ -107,6 +107,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActorIn, type Authenticator, type Identity } from './auth.ts';
+import { handleOperator } from './operator.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
 import { HttpError, json, matchesEtag, readJson, Router } from './router.ts';
@@ -746,6 +747,10 @@ export interface AppDeps {
   userWriteRule?: RateRule;
   /** 問い合わせの知らせを出す口（試験で差し替える。既定は環境変数から） */
   contactMailer?: Mailer;
+  /** 運営者のパスワード設定リンクを出す口（試験で差し替える。既定は環境変数から） */
+  operatorMailer?: Mailer;
+  /** 運営者の設定を読む先（試験で差し替える。既定は process.env） */
+  operatorEnv?: NodeJS.ProcessEnv;
 }
 
 export function createApp(deps: AppDeps) {
@@ -831,6 +836,15 @@ export function createApp(deps: AppDeps) {
         await sendEmailLogin(deps.database, mailer, appUrl, email).catch(() => {});
       }
       return json({ requested: true });
+    }
+
+    // 運営者の管理画面の口。利用者の認証とは別（http/operator.ts）
+    if (url.pathname.startsWith('/operator/')) {
+      const env = deps.operatorEnv ?? process.env;
+      return handleOperator(
+        { database: deps.database, mailer: deps.operatorMailer ?? mailerFromEnv(), storage, limiter, appUrl: env.APP_URL ?? url.origin, env },
+        req, url, tooMany,
+      );
     }
 
     // ログイン前に呼ぶ、紹介サイトの問い合わせフォーム。

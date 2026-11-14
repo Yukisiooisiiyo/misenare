@@ -5,7 +5,7 @@
 // パスキーやチェーン向けの SSO は、この Authenticator を足す形で後から追加する。
 
 import { maybeOne, type Database, type Db } from '../db/db.ts';
-import type { Actor } from '../domain/actor.ts';
+import { DomainError, type Actor } from '../domain/actor.ts';
 import { parseToken, verifySession } from '../domain/users.ts';
 
 export interface Identity {
@@ -90,12 +90,15 @@ export async function loadActor(database: Database, id: Identity): Promise<Actor
 
 /** loadActor の「取引の中で動く版」（handleRequest が開いた1回の取引を使い回す） */
 export async function loadActorIn(db: Db, id: Identity): Promise<Actor | null> {
-  const u = await maybeOne<{ trust_level: Actor['trustLevel']; admin_scope: Actor['adminScope']; status: string }>(
+  // 会社の状態も同じ問い合わせで読む（運営者が利用を止めた会社は、だれも何もできない）
+  const u = await maybeOne<{ trust_level: Actor['trustLevel']; admin_scope: Actor['adminScope']; status: string; tenant_status: string }>(
     db,
-    `SELECT trust_level, admin_scope, status FROM users WHERE id = $1`,
+    `SELECT u.trust_level, u.admin_scope, u.status, t.status AS tenant_status
+       FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1`,
     [id.userId],
   );
   if (!u || u.status !== 'active') return null;
+  if (u.tenant_status !== 'active') throw new DomainError('forbidden', 'この会社は、いま利用を停止しています。運営までお問い合わせください');
   const stores = await db.query<{ store_id: string }>(`SELECT store_id FROM memberships WHERE user_id = $1`, [id.userId]);
   return {
     userId: id.userId,

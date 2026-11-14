@@ -1,0 +1,104 @@
+/* 運営者の管理画面。見た目はアプリ本体にそろえる（生成りの和紙・濃紺の帯・金の線）。
+   和紙のテクスチャは本体（/app/）のものをそのまま借りる。 */
+:root {
+  --paper: #F1ECE0; --surface: #FBF9F3; --ink: #20273A; --ink-soft: #5A6072; --rule: #CFC6AF;
+  --sign: #1B2A50; --act: #E3A12E; --act-ink: #271A05; --gold: #CC9B45; --beni: #AF375B;
+  --bar: #19223D; --bar-on: #F0C469; --ok: #2F6B4F;
+  --mincho: 'Shippori Mincho B1', 'Hiragino Mincho ProN', 'Yu Mincho', serif;
+  --wave: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 8' preserveAspectRatio='none'%3E%3Cpath d='M0 4.6C14 2.2 26 5.4 42 3.6S72 2 90 4.2s22 .4 30-1v3.2C108 7.6 98 5.2 84 6.4S56 7.4 40 6 14 7.6 0 6.6Z'/%3E%3C/svg%3E");
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; color: var(--ink); font: 16px/1.7 -apple-system, BlinkMacSystemFont, 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+  background: var(--paper) url(/app/washi.webp) 0 0 / 384px 384px repeat; background-blend-mode: multiply; min-height: 100dvh;
+}
+a { color: var(--sign); }
+:focus-visible { outline: 3px solid var(--sign); outline-offset: 2px; }
+
+.bar {
+  position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px max(16px, calc((100vw - 960px) / 2 + 16px)); color: #fff;
+  background: linear-gradient(to bottom, rgba(255,255,255,.26), rgba(255,255,255,0) 26px), var(--bar) url(/app/navy-washi.webp) 0 0 / 640px auto repeat;
+}
+.bar::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 6px; background: var(--gold);
+  -webkit-mask: var(--wave) 0 0 / 100% 100% no-repeat; mask: var(--wave) 0 0 / 100% 100% no-repeat;
+}
+.bar-title { color: #fff; text-decoration: none; font-weight: 700; letter-spacing: .04em; }
+.bar-side { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--bar-on); min-width: 0; }
+.bar-side span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar .link { color: var(--bar-on); }
+.bar :focus-visible { outline-color: var(--bar-on); }
+
+.view { max-width: 960px; margin: 0 auto; padding: 28px 16px 80px; }
+.narrow { max-width: 440px; margin: 0 auto; }
+h1 { font: 700 26px/1.4 var(--mincho); margin: 0 0 18px; }
+h2 { font: 700 19px/1.4 var(--mincho); margin: 36px 0 14px; padding-bottom: 8px; position: relative; }
+h2::after {
+  content: ''; position: absolute; left: 0; bottom: 0; width: 56px; height: 4px; background: var(--gold);
+  -webkit-mask: var(--wave) 0 0 / 100% 100% no-repeat; mask: var(--wave) 0 0 / 100% 100% no-repeat;
+}
+p { margin: 0 0 12px; }
+.hint { color: var(--ink-soft); font-size: 13px; }
+.back { display: inline-block; margin-bottom: 10px; font-size: 14px; }
+
+label { display: block; font-weight: 700; font-size: 14px; margin: 14px 0 4px; }
+input, select, textarea {
+  width: 100%; min-height: 44px; padding: 9px 12px; font: inherit; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--rule); border-radius: 4px;
+}
+textarea { min-height: 88px; resize: vertical; }
+input:focus-visible, select:focus-visible, textarea:focus-visible { outline-offset: 0; }
+
+button, .button {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 18px;
+  font: inherit; font-weight: 700; border-radius: 4px; cursor: pointer; text-decoration: none;
+  background: var(--surface); color: var(--sign); border: 1.5px solid var(--sign);
+}
+button.primary { background: var(--act); color: var(--act-ink); border-color: var(--act); }
+button.danger { color: var(--beni); border-color: var(--beni); }
+button.danger.solid { background: var(--beni); color: #fff; }
+button.small { min-height: 36px; padding: 4px 12px; font-size: 14px; }
+button.link { min-height: 0; padding: 0; border: 0; background: none; text-decoration: underline; font-weight: 400; }
+button:disabled { opacity: .5; cursor: default; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; align-items: center; }
+
+.panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; }
+.panel + .panel { margin-top: 14px; }
+.grid { display: grid; gap: 0 18px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.error { color: var(--beni); font-weight: 700; margin-top: 12px; }
+.error:empty { display: none; }
+
+.tenants { list-style: none; margin: 0; padding: 0; }
+.tenants li { border-bottom: 1px solid var(--rule); }
+.tenants a { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; padding: 14px 4px; text-decoration: none; color: var(--ink); }
+.tenants a:hover .t-name { text-decoration: underline; }
+.t-name { font-weight: 700; font-size: 17px; }
+.t-meta { grid-column: 1 / -1; color: var(--ink-soft); font-size: 13px; }
+.badge {
+  display: inline-block; font-size: 12px; font-weight: 700; line-height: 1; padding: 5px 8px; border-radius: 3px;
+  border: 1.5px solid var(--ok); color: var(--ok); align-self: center; white-space: nowrap;
+}
+.badge.stopped { border-color: var(--beni); color: var(--beni); transform: rotate(-3deg); }
+.badge.plan { border-color: var(--rule); color: var(--ink-soft); font-weight: 400; margin-right: 6px; }
+
+.rows { list-style: none; margin: 0; padding: 0; }
+.rows li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 0; border-bottom: 1px solid var(--rule); }
+.rows li:last-child { border-bottom: 0; }
+.rows .grow { flex: 1; min-width: 160px; }
+.rows input { min-height: 38px; }
+
+.invite { margin-top: 14px; padding: 12px 14px; border-left: 4px solid var(--gold); background: var(--surface); }
+.invite code { display: block; word-break: break-all; font-size: 13px; margin: 6px 0 10px; }
+
+.danger-zone { border-color: var(--beni); }
+.log { list-style: none; margin: 0; padding: 0; font-size: 13px; color: var(--ink-soft); }
+.log li { padding: 6px 0; border-bottom: 1px dotted var(--rule); }
+.log b { color: var(--ink); }
+
+.toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 9; max-width: calc(100vw - 32px);
+  background: var(--bar); color: #fff; padding: 10px 18px; border-radius: 4px; font-size: 14px;
+}
+[hidden] { display: none !important; }

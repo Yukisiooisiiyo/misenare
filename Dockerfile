@@ -36,6 +36,8 @@ COPY --from=build /app/apps/web/dist ./apps/web/dist
 COPY --from=build /app/apps/web/package.json ./apps/web/package.json
 # 紹介サイト（静的ファイル。SITE_HOST を決めたときだけ配信される）
 COPY --from=build /app/apps/site ./apps/site
+# 運営者の管理画面（静的ファイル。/admin/ で配信される）
+COPY --from=build /app/apps/admin ./apps/admin
 
 # root では動かさない
 USER node

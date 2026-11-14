@@ -181,4 +181,11 @@ describe('内緒の値を包む鍵', () => {
     assert.ok(!keys(full).includes('CONTACT_TO'));
     assert.ok(!keys(prod()).includes('CONTACT_TO'), '紹介サイトを出さないなら何も言わない');
   });
+
+  it('運営者のアドレスの形が違えば起動しない。メールが無ければ警告にとどめる', () => {
+    assert.ok(keys(prod({ OPERATOR_EMAILS: 'owner' }), 'error').includes('OPERATOR_EMAILS'));
+    assert.ok(!keys(prod()).includes('OPERATOR_EMAILS'), '決めなければ何も言わない');
+    const full = prod({ OPERATOR_EMAILS: 'owner@example.com, second@example.com', SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'info@example.com' });
+    assert.ok(!keys(full).includes('OPERATOR_EMAILS'));
+  });
 });
