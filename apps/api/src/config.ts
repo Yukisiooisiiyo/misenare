@@ -85,6 +85,27 @@ export function checkConfig(env: NodeJS.ProcessEnv = process.env): ConfigReport 
     add(prod ? 'warn' : 'info', 'ALERT_WEBHOOK_URL', 'サーバー側のエラーが誰にも届きません');
   }
 
+  // 紹介サイト。SITE_HOST で来たものはアプリではなく紹介サイトを返すので、
+  // アプリと同じ名前にすると**アプリが見えなくなる**。ここだけは止める
+  const siteHost = env.SITE_HOST?.trim().toLowerCase() ?? '';
+  if (siteHost !== '') {
+    if (/[/:\s]/.test(siteHost)) {
+      add('error', 'SITE_HOST', 'ホスト名だけを書いてください（https:// やポート、パスは付けない。例: tsugigami.app）');
+    } else {
+      let appHost = '';
+      try { appHost = env.APP_URL ? new URL(env.APP_URL).hostname.toLowerCase() : ''; } catch { /* APP_URL の形は別の点検が見る */ }
+      if (appHost === siteHost) {
+        add('error', 'SITE_HOST', `APP_URL と同じ名前です（${siteHost}）。この名前で来たものは紹介サイトになり、アプリが開けなくなります`);
+      }
+      const to = (env.CONTACT_TO ?? '').split(',').map((x) => x.trim()).filter((x) => x.includes('@'));
+      if (to.length === 0) {
+        add(prod ? 'warn' : 'info', 'CONTACT_TO', '紹介サイトの問い合わせをメールで知らせません（DB の contact_inquiries には残ります）');
+      } else if (!env.SMTP_HOST || !env.MAIL_FROM) {
+        add(prod ? 'warn' : 'info', 'CONTACT_TO', '宛先はありますが、SMTP_HOST と MAIL_FROM が無いので問い合わせの知らせを送れません');
+      }
+    }
+  }
+
   // メール。決めなければ、申請が来ても本部に届かない（画面を開けば分かる）
   if (!env.SMTP_HOST || !env.MAIL_FROM) {
     add(prod ? 'warn' : 'info', 'SMTP_HOST',

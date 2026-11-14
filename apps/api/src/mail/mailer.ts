@@ -12,6 +12,8 @@ export interface Mail {
   subject: string;
   /** 本文（ふつうの文字列。改行はそのまま） */
   text: string;
+  /** この1通だけの返信先（問い合わせの相手など）。アドレスの形でなければ使わない */
+  replyTo?: string | undefined;
 }
 
 export interface Mailer {
@@ -98,7 +100,9 @@ export class SmtpMailer implements Mailer {
       from: addressOnly(this.from),
       to,
       message: compose({
-        ...mail, to, from: this.from, replyTo: this.replyTo,
+        ...mail, to, from: this.from,
+        // 人が打ったアドレスが入りうるので、形を確かめてから（改行を含むものは looksLikeEmail が通さない）
+        replyTo: mail.replyTo && looksLikeEmail(mail.replyTo) ? mail.replyTo.trim() : this.replyTo,
         messageId: `${Date.now().toString(36)}.${Math.random().toString(36).slice(2)}@misenare`,
       }),
     });

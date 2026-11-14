@@ -2,6 +2,11 @@
 //   /app/…  … Web 版（apps/web/dist の静的ファイル）
 //   /api/…  … API（先頭の /api を外して渡す）
 //   それ以外 … API（以前のパスとの互換）
+//
+// SITE_HOST を決めると、そのホスト名（例: tsugigami.app）で来たものだけ別扱いにする。
+//   GET  /…        … 紹介サイト（apps/site の静的ファイル）
+//   POST /contact  … 問い合わせフォーム（API に渡す）
+//   それ以外        … 404（アプリの API を紹介サイトのドメインからは触らせない）
 
 import { readFile, stat } from 'node:fs/promises';
 import { basename, extname, join, normalize, sep } from 'node:path';
@@ -15,7 +20,10 @@ const TYPES: Record<string, string> = {
   '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.txt': 'text/plain; charset=utf-8',
 };
 
 /**
@@ -35,7 +43,21 @@ function securityHeaders(photoOrigin?: string): Record<string, string> {
   };
 }
 
-const SECURITY_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
+const APP_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
+
+/**
+ * 紹介サイト用。読み込むのは自分のファイルと Google Fonts だけ。
+ * inline の style / script は許さない（見た目は site.css、動きは site.js に置いてある）。
+ * 画像の data: は、site.css の中に書いた SVG のため。
+ */
+const SITE_HEADERS: Record<string, string> = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'x-frame-options': 'DENY',
+  'content-security-policy':
+    "default-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+    + "img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+};
 
 /**
  * ファイル名に内容のハッシュ（app.1a2b3c4d.js）が入っているものは、中身が変われば名前も変わる。
@@ -43,10 +65,12 @@ const SECURITY_HEADERS = securityHeaders(process.env.PHOTO_ORIGIN);
  */
 const HASHED_NAME = /\.[0-9a-f]{8,16}\.[A-Za-z0-9]+$/;
 
-export function staticFiles(dir: string) {
+export function staticFiles(dir: string, options: { prefix?: RegExp; headers?: Record<string, string> } = {}) {
   const rootDir = normalize(dir).replace(/[\\/]+$/, '');
+  const prefix = options.prefix ?? /^\/app\/?/;
+  const SECURITY_HEADERS = options.headers ?? APP_HEADERS;
   return async (pathname: string, req?: Request): Promise<Response> => {
-    const rel = pathname.replace(/^\/app\/?/, '') || 'index.html';
+    const rel = pathname.replace(prefix, '') || 'index.html';
     let decoded: string;
     try {
       decoded = decodeURIComponent(rel);
@@ -77,10 +101,39 @@ export function staticFiles(dir: string) {
   };
 }
 
-export function createSite(api: (req: Request) => Promise<Response>, webDir: string) {
+export interface MarketingSite {
+  /** 紹介サイトのホスト名（例: tsugigami.app）。ポートは付けない */
+  host: string;
+  /** 紹介サイトの静的ファイルの置き場（apps/site） */
+  dir: string;
+}
+
+export function createSite(api: (req: Request) => Promise<Response>, webDir: string, marketing?: MarketingSite) {
   const files = staticFiles(webDir);
+  const siteHost = marketing?.host.trim().toLowerCase().replace(/\.$/, '') ?? '';
+  const siteFiles = marketing && siteHost !== '' ? staticFiles(marketing.dir, { prefix: /^\/+/, headers: SITE_HEADERS }) : null;
+  const notFound = (): Response => new Response('Not Found', { status: 404, headers: SITE_HEADERS });
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
+    if (siteFiles) {
+      const host = url.hostname.toLowerCase();
+      // www 付きは、付かないほうへ寄せる（同じページが2つの住所で見えないように）
+      if (host === `www.${siteHost}`) {
+        return new Response(null, { status: 301, headers: { location: `https://${siteHost}${url.pathname}${url.search}` } });
+      }
+      if (host === siteHost) {
+        // 生死の確認だけは、どのホスト名でも答える（外からの監視がこのドメインを見ることがある）
+        if (url.pathname === '/health') return api(req);
+        if (url.pathname === '/contact') {
+          if (req.method !== 'POST') return new Response('Method Not Allowed', { status: 405, headers: SITE_HEADERS });
+          return api(req);
+        }
+        if (req.method !== 'GET' && req.method !== 'HEAD') return new Response('Method Not Allowed', { status: 405, headers: SITE_HEADERS });
+        // 隠しファイル（.env など）は、置いてあっても出さない
+        if (url.pathname.split('/').some((part) => part.startsWith('.'))) return notFound();
+        return siteFiles(url.pathname, req);
+      }
+    }
     if (url.pathname === '/' || url.pathname === '/app') {
       return new Response(null, { status: 302, headers: { location: '/app/' } });
     }

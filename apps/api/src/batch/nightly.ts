@@ -24,6 +24,7 @@ import { digestMail, markNotified, pendingDigest, shouldNotify } from '../domain
 import { mailerFromEnv, type Mailer } from '../mail/mailer.ts';
 import { sweepSsoStates } from '../domain/sso.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
+import { sweepContactInquiries } from '../domain/contact.ts';
 import type { Storage } from '../storage/storage.ts';
 
 export interface BatchOptions {
@@ -231,6 +232,7 @@ export async function runNightly(database: Database, tokenizer: Tokenizer, optio
 async function runNightlyLocked(database: Database, tokenizer: Tokenizer, options: BatchOptions): Promise<TenantReport[]> {
   // 会社に属さない片付け（試行回数の記録）は、会社ごとの処理の前に1回だけ
   await sweepRateLimits((sql, params) => database.raw(sql, params)).catch((err) => console.error('rate_limits の片付けに失敗', err));
+  await sweepContactInquiries((sql, params) => database.raw(sql, params)).catch((err) => console.error('古い問い合わせの片付けに失敗', err));
   await sweepChallenges((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの合言葉の片付けに失敗', err));
   await sweepSsoStates((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの会社アカウントの覚えの片付けに失敗', err));
   const tenants = (await database.raw(`SELECT id FROM tenants ORDER BY created_at`)) as Array<{ id: string }>;

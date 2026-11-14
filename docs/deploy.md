@@ -816,3 +816,38 @@ docker compose logs api --tail 50               # 起動しないとき（[設�
 ### 12-7. プロセス数とタイムゾーン
 
 `MISENARE_WORKERS`（既定 1）を 2 以上にすると、API が `node:cluster` でその数のプロセスに分かれ、4 OCPU を使い切れます（落ちたプロセスは親が立て直します）。**辞書のキャッシュ（`domain/tags.ts`）と、記憶の中で数える試行回数（`MemoryRateLimiter`）はプロセスごとの持ち物になる**ので、辞書は最初の検索がプロセスの数だけ DB を読み、試行回数の上限は実質「プロセスの数 × 設定値」になります。回数を全プロセスで共有したいときは `RATE_LIMIT=db`（台をまたぐときと同じ）にしてください。日付（今日の引き継ぎなど）は、サーバーが UTC でも `MISENARE_TZ`（既定 `Asia/Tokyo`）で数えます。
+
+## 13. 紹介サイト（tsugigami.app）
+
+紹介サイトは `apps/site/`（`index.html` / `site.css` / `site.js` と画像）にあり、アプリと同じ台・同じイメージから出します。ビルドは要りません（置いてあるものをそのまま返します）。
+
+**しくみ**
+
+- `SITE_HOST` に書いたホスト名で来たリクエストだけ、アプリではなく紹介サイトを返します（`apps/api/src/http/site.ts`）。`www.` 付きは付かないほうへ 301 で寄せます。
+- そのホスト名で通るのは、静的ファイルの `GET` と、問い合わせフォームの `POST /contact` だけです。アプリの API は紹介サイトのドメインからは触れません。
+- CSP で inline の style / script を禁じています。見た目を変えるときは `site.css`、動きは `site.js` に書いてください（`index.html` に `style="…"` や `<script>…</script>` を書いても効きません）。
+
+**問い合わせフォーム（`POST /contact`）**
+
+1. 接続元ごとに1時間5回まで（`RULES.contact`）。
+2. 人に見えない欄（`website`）が埋まっていたら機械とみなし、受け取ったふりをして何も残しません。
+3. 形を確かめて `contact_inquiries` に残します（`db/migrations/0023_contact_inquiries.sql`。会社に属さないので行レベルセキュリティは無し。アプリの画面からは読めません）。
+4. `CONTACT_TO` があれば、その宛先へメールで知らせます。返信先（Reply-To）が相手のアドレスなので、**届いたメールにそのまま返信すれば相手に届きます**。送れなかったものは `mailed = false` のまま残ります。
+5. 1年たったものは夜間バッチが消します。
+
+届いたものを見る：
+
+```
+docker compose exec db psql -U postgres misenare -c "SELECT created_at, name, company, email, mailed, left(message, 60) FROM contact_inquiries ORDER BY created_at DESC LIMIT 20"
+```
+
+**出すときの手順**
+
+1. DNS で `tsugigami.app` と `www.tsugigami.app` を、アプリと同じ台に向ける。
+2. `deploy/.env` の `MISENARE_HOST` に、カンマ区切りで足す（Caddy がその名前でも証明書を取ります）。
+   `MISENARE_HOST=app.tsugigami.app, tsugigami.app, www.tsugigami.app`
+3. `deploy/.env` に `SITE_HOST=tsugigami.app` と `CONTACT_TO=<届けたいアドレス>` を足す。
+   `SITE_HOST` を `APP_URL` と同じ名前にすると**アプリが開けなくなる**ので、起動を止めます（`config.ts`）。
+4. `cd deploy && docker compose up -d`（`.env` を変えたので、api と caddy が作り直されます）。
+
+`SITE_HOST` を決めないうちは、これまでと何も変わりません。

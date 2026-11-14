@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ツギガミ ― その走り書きが、研修資料になる。</title>
+<meta name="description" content="現場で書き残したメモが、店の知恵として継がれ、本部の研修資料になる。小売店舗のためのナレッジ共有サービス「ツギガミ」。">
+<link rel="canonical" href="https://tsugigami.app/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="ツギガミ ― その走り書きが、研修資料になる。">
+<meta property="og:description" content="現場のメモが資料になり、現場の知識が見える化する。小売店舗のためのナレッジ共有サービス。">
+<meta property="og:url" content="https://tsugigami.app/">
+<meta property="og:image" content="https://tsugigami.app/hero.jpg">
+<meta name="theme-color" content="#131D38">
+<link rel="icon" href="icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho+B1:wght@500;600;700;800&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<header>
+  <div class="nav">
+    <img src="logo.png" alt="ツギガミ" width="480" height="147">
+    <nav class="links">
+      <a class="plain" href="#cycle">仕組み</a>
+      <a class="plain" href="#features">特長</a>
+      <a class="plain" href="#pricing">料金</a>
+      <a class="plain" href="#contact">問い合わせ</a>
+      <a class="btn btn-gold" href="https://app.tsugigami.app/app/" target="_blank" rel="noopener">デモを見る</a>
+    </nav>
+  </div>
+</header>
+
+<!-- HERO : orange backlit sky + navy mountain = the logo made literal -->
+<section class="hero">
+  <div class="hero-band">
+    <div class="hero-img"></div>
+    <div class="in">
+      <span class="kicker anim">継ぎ紙 ― TSUGIGAMI</span>
+      <h1 class="anim">その走り書きが、<br>研修資料になる。</h1>
+    </div>
+    <svg class="hero-mtn" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <path d="M0.00,54.52 L1.25,53.03 L2.50,51.49 L3.75,49.93 L5.00,48.38 L6.25,46.88 L7.50,45.42 L8.75,43.94 L10.00,42.41 L11.25,40.82 L12.50,39.23 L13.75,37.67 L15.00,36.11 L16.25,34.54 L17.50,32.94 L18.75,31.36 L20.00,29.84 L21.25,28.37 L22.50,26.90 L23.75,25.38 L25.00,23.81 L26.25,22.23 L27.50,20.68 L28.75,19.15 L30.00,17.60 L31.25,18.89 L32.50,20.18 L33.75,21.51 L35.00,22.87 L36.25,24.24 L37.50,25.55 L38.75,26.80 L40.00,28.04 L41.25,29.31 L42.50,30.61 L43.75,31.93 L45.00,33.23 L46.25,34.54 L47.50,35.89 L48.75,37.31 L50.00,38.73 L51.25,40.11 L52.50,41.44 L53.75,42.75 L55.00,44.10 L56.25,45.48 L57.50,46.86 L58.75,48.22 L60.00,49.56 L61.25,49.09 L62.50,48.65 L63.75,48.21 L65.00,47.73 L66.25,47.17 L67.50,46.59 L68.75,46.04 L70.00,45.53 L71.25,45.05 L72.50,44.55 L73.75,44.04 L75.00,43.56 L76.25,43.11 L77.50,42.68 L78.75,42.21 L80.00,41.68 L81.25,41.12 L82.50,40.58 L83.75,40.09 L85.00,39.62 L86.25,39.13 L87.50,38.61 L88.75,38.08 L90.00,37.58 L91.25,37.09 L92.50,36.56 L93.75,35.98 L95.00,35.36 L96.25,34.77 L97.50,34.24 L98.75,33.76 L100.00,33.27 L100.00,34.73 L98.75,35.24 L97.50,35.76 L96.25,36.23 L95.00,36.64 L93.75,37.02 L92.50,37.44 L91.25,37.91 L90.00,38.42 L88.75,38.92 L87.50,39.39 L86.25,39.87 L85.00,40.38 L83.75,40.91 L82.50,41.42 L81.25,41.88 L80.00,42.32 L78.75,42.79 L77.50,43.32 L76.25,43.89 L75.00,44.44 L73.75,44.96 L72.50,45.45 L71.25,45.95 L70.00,46.47 L68.75,46.96 L67.50,47.41 L66.25,47.83 L65.00,48.27 L63.75,48.79 L62.50,49.35 L61.25,49.91 L60.00,50.44 L58.75,49.11 L57.50,47.81 L56.25,46.52 L55.00,45.24 L53.75,43.91 L52.50,42.56 L51.25,41.22 L50.00,39.94 L48.75,38.69 L47.50,37.44 L46.25,36.13 L45.00,34.77 L43.75,33.41 L42.50,32.05 L41.25,30.69 L40.00,29.30 L38.75,27.87 L37.50,26.45 L36.25,25.10 L35.00,23.79 L33.75,22.49 L32.50,21.16 L31.25,19.78 L30.00,18.40 L28.75,19.94 L27.50,21.48 L26.25,23.02 L25.00,24.52 L23.75,26.04 L22.50,27.60 L21.25,29.21 L20.00,30.83 L18.75,32.39 L17.50,33.89 L16.25,35.38 L15.00,36.89 L13.75,38.42 L12.50,39.93 L11.25,41.43 L10.00,42.93 L8.75,44.47 L7.50,46.08 L6.25,47.70 L5.00,49.28 L3.75,50.82 L2.50,52.34 L1.25,53.89 L0.00,55.48Z" fill="#CC9B45"/>
+    </svg>
+  </div>
+  <div class="hero-body">
+    <div class="in">
+      <p class="sub anim">現場で書き残したひと言が、店の知恵として継がれ、やがて本部の研修資料へ。小売の現場で、知識を腐らせないためのナレッジ共有サービスです。</p>
+      <div class="act anim">
+        <a class="btn btn-gold" href="https://app.tsugigami.app/app/" target="_blank" rel="noopener">デモを触ってみる</a>
+        <a class="btn btn-line" href="#cycle">仕組みを見る</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- PROBLEM -->
+<section class="sec sec-paper" id="problem">
+  <div class="wrap">
+    <span class="kicker">現場でおきていること</span>
+    <h2>マニュアルは増える。<br>でも「わからない」は埋まらない。</h2>
+    <div class="joins">
+      <div class="join"><div class="idx m">一</div><div><h3>聞ける人がいない</h3><p>ベテランの手際は、言葉にされないまま。忙しい時間帯ほど、新人は誰にも聞けずに手が止まります。</p></div></div>
+      <div class="join"><div class="idx m">二</div><div><h3>資料が読まれない</h3><p>研修資料は作った瞬間から古くなり、現場は更新を知らないまま、古い手順で動き続けます。</p></div></div>
+      <div class="join"><div class="idx m">三</div><div><h3>本部に現場が見えない</h3><p>何に困っているか、どの手順が足りないか。本部の席からは見えず、資料の作りどころが分かりません。</p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- CYCLE -->
+<section class="sec sec-paper2" id="cycle">
+  <div class="wrap">
+    <span class="kicker">ツギガミの仕組み</span>
+    <h2>現場のメモが資料になり、<br>現場の知識が、見える化する。</h2>
+    <p class="lead">ナレッジは最終物ではなく、研修資料になるまでの仮置き。現場で書かれた知恵を本部が資料へ育て直し、その資料がまた現場へ返る。この循環がツギガミの中心です。</p>
+    <div class="cyc">
+      <figure>
+        <img src="cycle-mtn.png" alt="ツギガミの仕組み図。現場のメモが紺の山のように本部へ積み上がり、本部が作り直した研修資料が山吹の光となって現場へ降りていく循環。">
+      </figure>
+      <div>
+        <div class="flow">
+          <div class="flow-h navy"><b>紺の山</b><span>現場から本部へ、メモが積み上がる</span></div>
+          <div class="step"><div class="n">1</div><div><h3>メモする</h3><p>先輩に聞いた答えを、その場で書いて残す。</p></div></div>
+          <div class="step"><div class="n">2</div><div><h3>ナレッジにする</h3><p>信頼されたスタッフが承認し、店で共有する。</p></div></div>
+          <div class="step"><div class="n">3</div><div><h3>資料を作り直す</h3><p>本部が、現場で読まれた内容をもとに研修資料を直す。</p></div></div>
+        </div>
+        <div class="flow">
+          <div class="flow-h gold"><b>山吹の光</b><span>本部から現場へ、知識を見える化する</span></div>
+          <div class="step g"><div class="n">4</div><div><h3>見える化する</h3><p>作り直した資料で、口伝だった知識が誰にでも見える。</p></div></div>
+        </div>
+      </div>
+    </div>
+    <p class="loop m">四のあとは一に戻る。<em>回すたびに、資料が現場に合っていく。</em></p>
+  </div>
+</section>
+
+<!-- WHY -->
+<section class="sec sec-dark why">
+  <div class="why-tex"></div>
+  <div class="wrap rel">
+    <span class="kicker">なぜ本部に効くのか</span>
+    <p class="why-q">本部が本当に欲しいのは、<br>「現場が<span class="g">何を詳しく知りたいか</span>」。</p>
+    <p class="lead">資料作成ツールとは競合しません。ツギガミが供給するのは“何を作るべきか”という、本部の席からは見えない需要データ。現場の検索・質問・書き込みが、そのまま次の研修資料の材料になります。</p>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="sec sec-paper" id="features">
+  <div class="wrap">
+    <span class="kicker">腐らせない仕組み</span>
+    <h2>速さではなく、鮮度で選ばれる。</h2>
+    <div class="feats">
+      <div class="feat">
+        <div class="gl"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="13" r="8" stroke="#131D38" stroke-width="1.7"/><path d="M12 9v4l3 2" stroke="#131D38" stroke-width="1.7" stroke-linecap="round"/><path d="M9 2.5h6" stroke="#E3A12E" stroke-width="1.8" stroke-linecap="round"/></svg></div>
+        <div><h3>鮮度を保つ</h3><p>最終確認日を記録し、一定期間を過ぎたものは見直し一覧へ。ワンタップで「今も正しい」と確認でき、古い情報が自信ありげに混ざりません。</p></div>
+      </div>
+      <div class="feat">
+        <div class="gl"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="6.5" stroke="#131D38" stroke-width="1.7"/><path d="M15.5 15.5L20 20" stroke="#131D38" stroke-width="1.7" stroke-linecap="round"/><path d="M8.5 11h5" stroke="#E3A12E" stroke-width="2" stroke-linecap="round"/></svg></div>
+        <div><h3>見つからなかった検索が残る</h3><p>0件で終わった検索を記録。ナレッジの“穴”が本部に見えるので、どの手順を足すべきかが分かります。</p></div>
+      </div>
+      <div class="feat">
+        <div class="gl"><svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M5 17l1.5-4.5L16 3l4 4-9.5 9.5L5 18z" stroke="#131D38" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 5l4 4" stroke="#E3A12E" stroke-width="1.8"/></svg></div>
+        <div><h3>現場が書けて、公開は承認制</h3><p>写真を添えて、現場がその場で書き残せます。公開は信頼されたスタッフと本部の承認を通し、タグ辞書が言葉のゆれ（略称・別名）を吸収。質を保ちながら、知恵が集まります。</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- AUDIENCE -->
+<section class="sec sec-paper2" id="audience">
+  <div class="wrap">
+    <span class="kicker">こんな現場へ</span>
+    <h2>デジタルが苦手でも、迷わない。</h2>
+    <p class="lead">家電量販をはじめ、商品数が多くパート・アルバイトの比率が高い小売店のために。大きな文字・簡単な言葉・押しやすいボタンで、接客の合間にすぐ使えます。</p>
+    <ul class="marks">
+      <li>小売チェーン・家電量販</li>
+      <li>パート・アルバイト中心の店舗</li>
+      <li>商品数が多く覚えきれない現場</li>
+      <li>研修・教育を強化したい本部</li>
+    </ul>
+  </div>
+</section>
+
+<!-- PRICING -->
+<section class="sec sec-paper" id="pricing">
+  <div class="wrap">
+    <span class="kicker">料金</span>
+    <h2>店舗ごとの月額。閲覧IDは無制限。</h2>
+    <div class="pills">
+      <span class="pill">初期費用 0円</span>
+      <span class="pill">閲覧ID 無制限</span>
+      <span class="pill">年払いで2か月分無料</span>
+    </div>
+    <table class="ptable">
+      <tr><th>店舗数</th><th class="r">1店舗あたり・月額</th></tr>
+      <tr><td>1〜3 店舗</td><td class="amt r">4,800円</td></tr>
+      <tr><td>4〜10 店舗</td><td class="amt r">3,800円</td></tr>
+      <tr><td>11〜50 店舗</td><td class="amt r">3,200円</td></tr>
+      <tr><td>51 店舗以上</td><td class="amt r">2,800円〜</td></tr>
+    </table>
+    <p class="fine">※ 10店舗までは月契約、11店舗以上は年額前払い。大規模・企業向けの条件は個別にご相談ください。</p>
+  </div>
+</section>
+
+<!-- ABOUT / VISION -->
+<section class="sec sec-dark" id="about">
+  <div class="wrap">
+    <div class="about">
+      <div class="body">
+        <span class="kicker">運営・ビジョン</span>
+        <h2>現場の知恵を、腐らせない。</h2>
+        <p>ツギガミは、現在ひとりの開発者が設計・開発・運営している、立ち上げ段階のプロダクトです。大きな組織や派手な機能ではなく、「現場が本当に使い続けられること」を一点で考えて作っています。</p>
+        <p>AIも特別なインフラも使わず、小さなサーバー1台で動く軽い設計。だからこそ運用費が低く、店舗の負担を抑えられます。平凡に見えるかもしれませんが、毎日の売場で止まらないことを最優先にした結果です。</p>
+        <p>名前の「継ぎ紙」は、色の違う紙を継いで一枚の美しい紙にする日本の技法から。現場それぞれの知恵を継ぎ合わせ、研修資料へと育てていく——その姿勢をそのまま名前にしています。</p>
+      </div>
+      <div>
+        <p class="vq">知恵は、<span class="g">継ぐ</span>ほど<br>強くなる。</p>
+        <div class="vmeta">
+          <div><span>プロダクト</span><b>店舗ナレッジ共有「ツギガミ」</b></div>
+          <div><span>提供形態</span><b>クラウド（SaaS）</b></div>
+          <div><span>運営</span><b>個人開発・運営（立ち上げ期）</b></div>
+          <div><span>稼働中のデモ</span><b>app.tsugigami.app</b></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CONTACT -->
+<section class="sec final" id="contact">
+  <div class="wrap">
+    <h2>まずは、触ってみてください。</h2>
+    <p class="lead">資料を読むより、現場の画面を1分触るのが早い。導入のご相談・デモのご依頼も歓迎します。</p>
+    <div class="act">
+      <a class="btn btn-gold" href="https://app.tsugigami.app/app/" target="_blank" rel="noopener">デモを触ってみる</a>
+    </div>
+    <form class="cform" id="contact-form" novalidate>
+      <h3>お問い合わせ</h3>
+      <label>お名前
+        <input name="name" required maxlength="80" autocomplete="name">
+      </label>
+      <label>会社・店舗名（任意）
+        <input name="company" maxlength="120" autocomplete="organization">
+      </label>
+      <label>メールアドレス
+        <input type="email" name="email" required maxlength="254" autocomplete="email" inputmode="email">
+      </label>
+      <label>ご相談内容
+        <textarea name="message" required maxlength="4000" rows="5"></textarea>
+      </label>
+      <div class="hp" aria-hidden="true">
+        <label>Webサイト（入力しないでください）
+          <input name="website" tabindex="-1" autocomplete="off">
+        </label>
+      </div>
+      <button class="btn btn-gold" type="submit">送信する</button>
+      <p class="cnote">いただいた内容は、お問い合わせへの返信のためだけに使います。</p>
+      <p class="cstatus" role="status" aria-live="polite"></p>
+    </form>
+    <noscript><p class="cnote">フォームの送信には JavaScript が必要です。</p></noscript>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap row">
+    <span class="bk">継ぎ紙</span>
+    <a href="#cycle">仕組み</a>
+    <a href="#features">特長</a>
+    <a href="#pricing">料金</a>
+    <a href="#contact">問い合わせ</a>
+    <span class="sp">© 2026 Tsugigami</span>
+  </div>
+</footer>
+
+</body>
+</html>
