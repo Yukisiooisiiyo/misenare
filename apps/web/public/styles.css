@@ -20,6 +20,7 @@
   --act-ink: #271A05;
   --gold: #CC9B45;       /* 金の線 */
   --beni: #AF375B;       /* 紅：数の印 */
+  --beni-ink: #AF375B;   /* 紅で書く文字と線（暗い画面では明るくする） */
   --bar: #19223D;        /* 上の帯と下のタブ（濃紺の和紙） */
   --bar-ink: #C6CCDD;
   --bar-on: #F0C469;
@@ -57,6 +58,7 @@
     --sign: #EDBE62;
     --sign-ink: #271A05;
     --unread: #2C3558;
+    --beni-ink: #EC93AC;
     --focus: #EDBE62;
     --pending: #E0A243;
     --error: #FF8A80;
@@ -345,7 +347,17 @@ button.tag { cursor: pointer; }
 .handover-form .primary { width: auto; min-width: 72px; }
 .handover-body { flex: 1 1 100%; }
 .handover-body.done { color: var(--ink-soft); text-decoration: line-through; }
-.handover-carried { background-color: var(--unread); }
+/* 持ち越した引き継ぎ：地は塗らない。左に紅の筆線を引き、「持ち越し」は紅のハンコを少し傾けて押す */
+.rows > .row.handover-carried { padding-left: 14px; }
+.handover-carried::before {
+  content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 5px; pointer-events: none; border-radius: 3px;
+  background: var(--beni-ink);
+  -webkit-mask: var(--wave-short) 0 0 / 100% 100% no-repeat; mask: var(--wave-short) 0 0 / 100% 100% no-repeat;
+}
+.handover-carried .notice-badge {
+  background: none; color: var(--beni-ink); border: 1.5px solid var(--beni-ink); border-radius: 3px;
+  padding: 1px 7px; margin-right: 8px; transform: rotate(-4deg);
+}
 .fresh-detail .primary, .fresh-detail .secondary { margin-top: 10px; }
 
 /* 引き継ぎの履歴 */
