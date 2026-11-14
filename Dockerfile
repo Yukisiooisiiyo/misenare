@@ -34,6 +34,8 @@ COPY --from=build /app/db ./db
 COPY --from=build /app/apps/api ./apps/api
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 COPY --from=build /app/apps/web/package.json ./apps/web/package.json
+# 紹介サイト（静的ファイル。SITE_HOST を決めたときだけ配信される）
+COPY --from=build /app/apps/site ./apps/site
 
 # root では動かさない
 USER node

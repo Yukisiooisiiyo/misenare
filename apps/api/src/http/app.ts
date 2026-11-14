@@ -97,7 +97,8 @@ import { OidcDirectory } from '../auth/oidc.ts';
 import {
   approveRequest, getNotifySettings, listRequests, rejectRequest, requestBadge, setNotifyEmail,
 } from '../domain/accessRequests.ts';
-import { mailerFromEnv, noMailer } from '../mail/mailer.ts';
+import { mailerFromEnv, noMailer, type Mailer } from '../mail/mailer.ts';
+import { contactRecipients, parseContact, submitContact } from '../domain/contact.ts';
 import {
   addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
   verifyDomain, type SsoSite,
@@ -743,6 +744,8 @@ export interface AppDeps {
   oidc?: OidcDirectory;
   /** 上限の差し替え（試験で回数を小さくするため。本番では指定しない） */
   userWriteRule?: RateRule;
+  /** 問い合わせの知らせを出す口（試験で差し替える。既定は環境変数から） */
+  contactMailer?: Mailer;
 }
 
 export function createApp(deps: AppDeps) {
@@ -828,6 +831,18 @@ export function createApp(deps: AppDeps) {
         await sendEmailLogin(deps.database, mailer, appUrl, email).catch(() => {});
       }
       return json({ requested: true });
+    }
+
+    // ログイン前に呼ぶ、紹介サイトの問い合わせフォーム。
+    // 誰でも打てるので、回数で鈍らせる。DB に残してから運営へメールで知らせる（domain/contact.ts）。
+    if (url.pathname === '/contact' && req.method === 'POST') {
+      if (!(await limiter.take(clientKey(req, 'contact'), RULES.contact))) return tooMany();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      // 人には見えない欄（website）が埋まっていたら機械。受け取ったふりをして、何も残さない
+      if (typeof b.website === 'string' && b.website.trim() !== '') return json({ received: true });
+      const input = parseContact(b);
+      await submitContact(deps.database, deps.contactMailer ?? mailerFromEnv(), contactRecipients(), input);
+      return json({ received: true });
     }
 
     // ログイン前に呼ぶ、パスキーの2本。

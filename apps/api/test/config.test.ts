@@ -166,4 +166,19 @@ describe('内緒の値を包む鍵', () => {
     const env = prod({ MISENARE_SECRET_KEYS: `k1:${key()}` });
     assert.equal(checkConfig(env).findings.some((f) => f.key.startsWith('MISENARE_SECRET')), false);
   });
+  it('紹介サイトのホスト名をアプリと同じにしたら起動しない（アプリが開けなくなる）', () => {
+    const r = checkConfig(prod({ SITE_HOST: 'misenare.example.com' }));
+    assert.ok(r.fatal);
+    assert.ok(keys(prod({ SITE_HOST: 'misenare.example.com' }), 'error').includes('SITE_HOST'));
+    assert.ok(keys(prod({ SITE_HOST: 'https://example.com/' }), 'error').includes('SITE_HOST'), 'ホスト名だけを書かせる');
+  });
+
+  it('紹介サイトを出すのに知らせの宛先が無ければ、警告にとどめる（問い合わせは DB に残る）', () => {
+    const env = prod({ SITE_HOST: 'example.com' });
+    assert.ok(!keys(env, 'error').includes('SITE_HOST'));
+    assert.ok(keys(env, 'warn').includes('CONTACT_TO'));
+    const full = prod({ SITE_HOST: 'example.com', CONTACT_TO: 'owner@example.com', SMTP_HOST: 'smtp.example.com', MAIL_FROM: 'info@example.com' });
+    assert.ok(!keys(full).includes('CONTACT_TO'));
+    assert.ok(!keys(prod()).includes('CONTACT_TO'), '紹介サイトを出さないなら何も言わない');
+  });
 });

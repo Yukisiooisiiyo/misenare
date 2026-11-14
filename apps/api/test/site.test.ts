@@ -76,3 +76,66 @@ describe('ハッシュ付きファイル名の長期キャッシュ', () => {
     assert.equal((await get('/app/app.1a2b3c4d.js', { 'if-none-match': tag })).headers.get('cache-control'), long);
   });
 });
+
+describe('紹介サイト（SITE_HOST）', () => {
+  let siteDir: string;
+  let both: (req: Request) => Promise<Response>;
+  const seen: string[] = [];
+
+  before(async () => {
+    siteDir = await mkdtemp(join(tmpdir(), 'misenare-marketing-'));
+    await writeFile(join(siteDir, 'index.html'), '<!doctype html><title>紹介</title>');
+    await writeFile(join(siteDir, 'site.css'), 'body{}');
+    await writeFile(join(siteDir, '.env'), 'SECRET=1');
+    both = createSite(async (req) => { seen.push(`${req.method} ${new URL(req.url).pathname}`); return new Response('api'); }, dir, { host: 'Tsugigami.example', dir: siteDir });
+  });
+  after(async () => { await rm(siteDir, { recursive: true, force: true }); });
+
+  const at = (host: string, path: string, init: RequestInit = {}) => both(new Request(`http://${host}${path}`, init));
+
+  it('そのホスト名で来たら、/ で紹介サイトを返す（アプリへ飛ばさない）', async () => {
+    const res = await at('tsugigami.example', '/');
+    assert.equal(res.status, 200);
+    assert.match(await res.text(), /紹介/);
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.ok(!csp.includes("'unsafe-inline'"), 'inline は許さない');
+    assert.match(csp, /form-action 'self'/);
+    assert.equal((await at('tsugigami.example', '/site.css')).headers.get('content-type'), 'text/css; charset=utf-8');
+  });
+
+  it('ポートが付いていても同じ。www 付きは付かないほうへ寄せる', async () => {
+    assert.equal((await at('tsugigami.example:8787', '/')).status, 200);
+    const res = await at('www.tsugigami.example', '/x?y=1');
+    assert.equal(res.status, 301);
+    assert.equal(res.headers.get('location'), 'https://tsugigami.example/x?y=1');
+  });
+
+  it('アプリのホスト名は今までどおり（/ は /app/ へ）', async () => {
+    const res = await at('app.tsugigami.example', '/');
+    assert.equal(res.status, 302);
+    assert.equal(res.headers.get('location'), '/app/');
+  });
+
+  it('紹介サイトのドメインから通る API は /contact の POST と /health だけ', async () => {
+    seen.length = 0;
+    assert.equal((await at('tsugigami.example', '/contact', { method: 'POST', body: '{}' })).status, 200);
+    assert.equal((await at('tsugigami.example', '/health')).status, 200);
+    assert.deepEqual(seen, ['POST /contact', 'GET /health']);
+    assert.equal((await at('tsugigami.example', '/contact')).status, 405);
+    assert.equal((await at('tsugigami.example', '/auth/accept', { method: 'POST', body: '{}' })).status, 405);
+    assert.equal((await at('tsugigami.example', '/api/me')).status, 404);
+    assert.equal((await at('tsugigami.example', '/app/')).status, 404);
+    assert.deepEqual(seen, ['POST /contact', 'GET /health'], 'ほかは API に届かない');
+  });
+
+  it('隠しファイルと、置き場の外は出さない', async () => {
+    assert.equal((await at('tsugigami.example', '/.env')).status, 404);
+    assert.equal((await at('tsugigami.example', '/..%2F..%2Fetc%2Fpasswd')).status, 404);
+  });
+
+  it('SITE_HOST を決めなければ、何も変わらない', async () => {
+    const res = await site(new Request('http://tsugigami.example/'));
+    assert.equal(res.status, 302);
+  });
+});

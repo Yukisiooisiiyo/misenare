@@ -11,6 +11,8 @@
 //   ALERT_WEBHOOK_URL … サーバー側のエラーを知らせる先（Slack 互換）
 //   WEBAUTHN_RP_ID / WEBAUTHN_ORIGINS … パスキーを使うなら（ドメインが決まってから）
 //   SSO_REDIRECT_URI … 会社のアカウントで入れるようにするなら
+//   SITE_HOST … 紹介サイトのホスト名（例: tsugigami.app）。決めると、その名前で来たものに apps/site を返す
+//   CONTACT_TO … 紹介サイトの問い合わせを知らせる宛先（カンマ区切り）。無ければ DB に残すだけ
 //
 // 設定の点検は config.ts にある。足りないものは起動のときに声に出し、
 // 黙って壊れるもの（本番で開発用の認証、など）では起動しない。
@@ -114,7 +116,10 @@ const app = createApp({
 });
 // Web 版（apps/web をビルドした dist）を /app/ で、API を /api/ で配信する
 const webDir = fileURLToPath(new URL('../../web/dist/', import.meta.url));
-const server = serve(createSite(app, webDir), port);
+// 紹介サイト（apps/site）。SITE_HOST を決めたときだけ、そのホスト名で配信する
+const siteHost = process.env.SITE_HOST?.trim() ?? '';
+const marketing = siteHost !== '' ? { host: siteHost, dir: fileURLToPath(new URL('../../site/', import.meta.url)) } : undefined;
+const server = serve(createSite(app, webDir, marketing), port);
 // ポートが使用中（EADDRINUSE）などで待ち受けられないとき。リスナが無いと uncaughtException になるので、
 // 理由が分かる形で記録し、終了コード 1 で落とす（立て直しは restart policy に任せる）
 server.on('error', (err) => {
@@ -131,4 +136,5 @@ logger.info('listening', {
   // まずここを見れば分かる
   passkeys: process.env.WEBAUTHN_RP_ID ? 'on' : 'off',
   sso: process.env.SSO_REDIRECT_URI ? 'on' : 'off',
+  site: siteHost !== '' ? siteHost : 'off',
 });
