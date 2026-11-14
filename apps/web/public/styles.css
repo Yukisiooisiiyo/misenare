@@ -1,20 +1,46 @@
-/* ミセナレ Web 版
-   売場の棚札と POP をよりどころにした、静かな画面。目立たせるのはハッシュタグ（POP黄の値札）だけ。 */
+/* ツギガミ Web 版
+   継ぎ紙の料紙をよりどころにした画面。紹介サイト（apps/site）と同じ手で作ってある：
+     ・地は和紙。質感の画像（washi.webp）を、地の色に乗算で重ねる（background-blend-mode）
+     ・上の帯と下のタブは濃紺の和紙（navy-washi.webp）。縁はまっすぐにせず、わずかに右上がりで波打つ金の線
+     ・区切り線も定規で引かない。少し傾け、ほんの少し波打たせ、太さを揃えない（--wave-*）
+   目立たせるのはハッシュタグ（POP の値札）と、押してほしいボタン（山吹）だけ。
+   文字は読みやすさを優先して UD ゴシックのまま。見出しだけ明朝にする。 */
 
 :root {
-  --paper: #F2F4F3;      /* 棚札の白（冷たい白） */
-  --surface: #FFFFFF;
-  --ink: #1A2421;        /* 墨 */
-  --ink-soft: #4B5753;
-  --rule: #D5DBD8;
-  --pop: #FFD60A;        /* POP黄：ハッシュタグ */
-  --pop-soft: #FFF2B3;
-  --sign: #1F5FBF;       /* 案内板の青：操作 */
+  --paper: #F1ECE0;      /* 和紙の地 */
+  --surface: #FBF9F3;    /* 一枚上に重ねた紙 */
+  --ink: #20273A;        /* 墨（紺寄り） */
+  --ink-soft: #5A6072;
+  --rule: #CFC6AF;
+  --pop: #F3BF3F;        /* POP の値札：ハッシュタグ */
+  --pop-soft: #F6E3A6;
+  --sign: #1B2A50;       /* 藍：操作（リンク・枠のボタン） */
   --sign-ink: #FFFFFF;
-  --pending: #9A5B00;    /* 承認待ち */
-  --error: #B3261E;
-  --radius: 10px;
+  --act: #E3A12E;        /* 山吹：いちばん押してほしいボタン */
+  --act-ink: #271A05;
+  --gold: #CC9B45;       /* 金の線 */
+  --beni: #AF375B;       /* 紅：数の印 */
+  --beni-ink: #AF375B;   /* 紅で書く文字と線（暗い画面では明るくする） */
+  --bar: #19223D;        /* 上の帯と下のタブ（濃紺の和紙） */
+  --bar-ink: #C6CCDD;
+  --bar-on: #F0C469;
+  --unread: #FFF4CF;     /* まだ読んでいない・持ち越しの地 */
+  --focus: #1B2A50;
+  --pending: #8F5300;    /* 承認待ち */
+  --error: #A32A1E;
+  --radius: 4px;
   --tap: 48px;
+  /* 読みの確認の画面が使っている名前（以前は未定義で、枠線が出ていなかった） */
+  --border: var(--rule); --text: var(--ink); --accent: var(--sign); --muted: var(--ink-soft);
+  --mincho: 'Shippori Mincho B1', 'Hiragino Mincho ProN', 'Yu Mincho', serif;
+  --wave-a: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 6' preserveAspectRatio='none'><path fill='%23000' d='M0.0,1.65 L35.7,1.71 L71.4,1.71 L107.1,1.70 L142.9,1.77 L178.6,1.95 L214.3,2.15 L250.0,2.21 L285.7,2.05 L321.4,1.70 L357.1,1.35 L392.9,1.17 L428.6,1.26 L464.3,1.54 L500.0,1.87 L535.7,2.13 L571.4,2.30 L607.1,2.45 L642.9,2.63 L678.6,2.82 L714.3,2.95 L750.0,2.95 L785.7,2.87 L821.4,2.79 L857.1,2.81 L892.9,2.92 L928.6,3.00 L964.3,2.94 L1000.0,2.72 L1000.0,4.49 L964.3,4.57 L928.6,4.67 L892.9,4.70 L857.1,4.60 L821.4,4.33 L785.7,3.99 L750.0,3.76 L714.3,3.73 L678.6,3.90 L642.9,4.11 L607.1,4.18 L571.4,4.04 L535.7,3.76 L500.0,3.48 L464.3,3.32 L428.6,3.27 L392.9,3.26 L357.1,3.21 L321.4,3.12 L285.7,3.05 L250.0,3.07 L214.3,3.16 L178.6,3.24 L142.9,3.22 L107.1,3.11 L71.4,3.03 L35.7,3.08 L0.0,3.29Z'/></svg>");
+  --wave-b: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 6' preserveAspectRatio='none'><path fill='%23000' d='M0.0,2.91 L35.7,2.93 L71.4,2.83 L107.1,2.68 L142.9,2.56 L178.6,2.51 L214.3,2.47 L250.0,2.37 L285.7,2.22 L321.4,2.08 L357.1,2.04 L392.9,2.13 L428.6,2.24 L464.3,2.23 L500.0,2.05 L535.7,1.76 L571.4,1.52 L607.1,1.50 L642.9,1.72 L678.6,2.07 L714.3,2.38 L750.0,2.52 L785.7,2.49 L821.4,2.39 L857.1,2.27 L892.9,2.15 L928.6,1.96 L964.3,1.69 L1000.0,1.39 L1000.0,2.97 L964.3,2.83 L928.6,2.89 L892.9,3.16 L857.1,3.52 L821.4,3.77 L785.7,3.83 L750.0,3.74 L714.3,3.63 L678.6,3.60 L642.9,3.65 L607.1,3.72 L571.4,3.71 L535.7,3.62 L500.0,3.52 L464.3,3.47 L428.6,3.48 L392.9,3.49 L357.1,3.42 L321.4,3.29 L285.7,3.20 L250.0,3.31 L214.3,3.66 L178.6,4.16 L142.9,4.61 L107.1,4.83 L71.4,4.80 L35.7,4.62 L0.0,4.44Z'/></svg>");
+  --wave-c: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 6' preserveAspectRatio='none'><path fill='%23000' d='M0.0,1.88 L35.7,2.16 L71.4,2.45 L107.1,2.61 L142.9,2.54 L178.6,2.27 L214.3,1.94 L250.0,1.76 L285.7,1.82 L321.4,2.08 L357.1,2.35 L392.9,2.48 L428.6,2.40 L464.3,2.20 L500.0,2.01 L535.7,1.89 L571.4,1.85 L607.1,1.81 L642.9,1.77 L678.6,1.77 L714.3,1.88 L750.0,2.11 L785.7,2.36 L821.4,2.52 L857.1,2.53 L892.9,2.43 L928.6,2.39 L964.3,2.53 L1000.0,2.85 L1000.0,4.09 L964.3,4.13 L928.6,4.13 L892.9,4.11 L857.1,4.11 L821.4,4.18 L785.7,4.25 L750.0,4.19 L714.3,3.93 L678.6,3.48 L642.9,3.01 L607.1,2.72 L571.4,2.74 L535.7,3.02 L500.0,3.38 L464.3,3.65 L428.6,3.76 L392.9,3.78 L357.1,3.80 L321.4,3.88 L285.7,3.97 L250.0,4.00 L214.3,3.94 L178.6,3.84 L142.9,3.76 L107.1,3.74 L71.4,3.69 L35.7,3.51 L0.0,3.18Z'/></svg>");
+  --wave-short: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 6' preserveAspectRatio='none'><path fill='%23000' d='M0.0,2.38 L71.4,2.89 L142.9,2.34 L214.3,1.81 L285.7,1.56 L357.1,0.84 L428.6,0.85 L500.0,1.94 L571.4,2.13 L642.9,1.48 L714.3,1.51 L785.7,1.52 L857.1,1.05 L928.6,1.27 L1000.0,1.57 L1000.0,3.36 L928.6,4.55 L857.1,5.12 L785.7,4.29 L714.3,3.87 L642.9,3.96 L571.4,3.56 L500.0,3.62 L428.6,4.31 L357.1,4.36 L285.7,4.40 L214.3,5.02 L142.9,4.76 L71.4,3.95 L0.0,4.36Z'/></svg>");
+  --edge-top: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 10' preserveAspectRatio='none'><path fill='%2319223D' d='M0.0,0.00 L1000.0,0.00 L1000.0,3.10 L964.3,3.28 L928.6,3.49 L892.9,3.69 L857.1,3.84 L821.4,3.94 L785.7,4.00 L750.0,4.08 L714.3,4.21 L678.6,4.42 L642.9,4.71 L607.1,5.05 L571.4,5.37 L535.7,5.63 L500.0,5.78 L464.3,5.84 L428.6,5.82 L392.9,5.79 L357.1,5.80 L321.4,5.88 L285.7,6.02 L250.0,6.20 L214.3,6.36 L178.6,6.48 L142.9,6.54 L107.1,6.56 L71.4,6.57 L35.7,6.64 L0.0,6.79Z'/><path fill='%23CC9B45' d='M0.0,6.28 L35.7,5.89 L71.4,5.65 L107.1,5.60 L142.9,5.64 L178.6,5.61 L214.3,5.39 L250.0,5.05 L285.7,4.76 L321.4,4.70 L357.1,4.88 L392.9,5.15 L428.6,5.33 L464.3,5.31 L500.0,5.11 L535.7,4.85 L571.4,4.60 L607.1,4.35 L642.9,4.02 L678.6,3.58 L714.3,3.11 L750.0,2.79 L785.7,2.71 L821.4,2.83 L857.1,2.99 L892.9,3.01 L928.6,2.82 L964.3,2.53 L1000.0,2.33 L1000.0,3.88 L964.3,4.03 L928.6,4.16 L892.9,4.37 L857.1,4.69 L821.4,5.04 L785.7,5.30 L750.0,5.36 L714.3,5.30 L678.6,5.27 L642.9,5.41 L607.1,5.75 L571.4,6.14 L535.7,6.41 L500.0,6.45 L464.3,6.36 L428.6,6.31 L392.9,6.44 L357.1,6.73 L321.4,7.05 L285.7,7.27 L250.0,7.34 L214.3,7.34 L178.6,7.36 L142.9,7.44 L107.1,7.51 L71.4,7.49 L35.7,7.38 L0.0,7.31Z'/></svg>");
+  --edge-bottom: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 10' preserveAspectRatio='none'><path fill='%2319223D' d='M0.0,10.00 L1000.0,10.00 L1000.0,2.75 L964.3,3.01 L928.6,3.22 L892.9,3.37 L857.1,3.48 L821.4,3.57 L785.7,3.69 L750.0,3.88 L714.3,4.15 L678.6,4.45 L642.9,4.74 L607.1,4.97 L571.4,5.11 L535.7,5.13 L500.0,5.09 L464.3,5.03 L428.6,5.00 L392.9,5.05 L357.1,5.18 L321.4,5.37 L285.7,5.58 L250.0,5.75 L214.3,5.87 L178.6,5.94 L142.9,6.00 L107.1,6.08 L71.4,6.25 L35.7,6.50 L0.0,6.82Z'/><path fill='%23CC9B45' d='M0.0,6.05 L35.7,5.79 L71.4,5.48 L107.1,5.12 L142.9,4.79 L178.6,4.62 L214.3,4.65 L250.0,4.78 L285.7,4.84 L321.4,4.73 L357.1,4.50 L392.9,4.29 L428.6,4.25 L464.3,4.39 L500.0,4.56 L535.7,4.57 L571.4,4.33 L607.1,3.91 L642.9,3.49 L678.6,3.20 L714.3,3.06 L750.0,2.98 L785.7,2.86 L821.4,2.70 L857.1,2.57 L892.9,2.54 L928.6,2.58 L964.3,2.56 L1000.0,2.34 L1000.0,3.16 L964.3,3.46 L928.6,3.86 L892.9,4.21 L857.1,4.39 L821.4,4.44 L785.7,4.53 L750.0,4.79 L714.3,5.23 L678.6,5.70 L642.9,6.00 L607.1,6.04 L571.4,5.88 L535.7,5.70 L500.0,5.62 L464.3,5.66 L428.6,5.74 L392.9,5.81 L357.1,5.86 L321.4,6.01 L285.7,6.31 L250.0,6.72 L214.3,7.09 L178.6,7.26 L142.9,7.20 L107.1,7.05 L71.4,7.01 L35.7,7.20 L0.0,7.58Z'/></svg>");
+  /* 絵の具をたっぷり含ませた筆で、雑に一度引いた跡。入りは太く、抜けはかすれる */
+  --brush: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 100' preserveAspectRatio='none'><defs><mask id='m'><path fill='%23fff' d='M20.0,17.5 L31.1,17.7 L42.1,17.0 L53.2,16.7 L64.2,16.6 L75.3,17.8 L86.4,18.4 L97.4,18.9 L108.5,19.0 L119.6,18.5 L130.6,17.1 L141.7,14.4 L152.8,14.6 L163.8,13.6 L174.9,12.3 L185.9,11.7 L197.0,12.1 L208.1,12.1 L219.1,9.8 L230.2,9.1 L241.2,9.5 L252.3,9.7 L263.4,9.9 L274.4,10.1 L285.5,11.3 L296.6,11.5 L307.6,10.6 L318.7,9.3 L329.8,9.1 L340.8,9.0 L351.9,8.1 L362.9,8.3 L374.0,9.6 L385.1,9.4 L396.1,7.8 L407.2,7.8 L418.2,8.4 L429.3,9.1 L440.4,9.3 L451.4,10.4 L462.5,12.9 L473.6,12.4 L484.6,11.9 L495.7,11.9 L506.8,11.2 L517.8,10.7 L528.9,9.4 L539.9,10.4 L551.0,11.1 L562.1,10.2 L573.1,9.2 L584.2,8.0 L595.2,8.2 L606.3,7.4 L617.4,7.1 L628.4,8.3 L639.5,10.1 L650.6,10.2 L661.6,9.1 L672.7,9.2 L683.8,8.2 L694.8,7.6 L705.9,6.7 L716.9,7.5 L728.0,7.9 L739.1,6.6 L750.1,5.9 L761.2,6.1 L772.2,5.1 L783.3,4.7 L794.4,4.6 L805.4,6.3 L816.5,8.0 L827.6,9.4 L838.6,9.4 L849.7,10.5 L860.8,10.8 L871.8,10.5 L882.9,9.7 L893.9,11.3 L905.0,12.1 L955.9,12.4 L981.5,13.3 L945.7,14.0 L905.3,14.3 L914.9,16.5 L937.2,20.1 L914.7,26.9 L901.8,29.1 L954.8,30.5 L987.0,33.3 L950.6,37.3 L884.2,38.7 L906.6,40.5 L938.6,44.4 L918.7,49.0 L913.1,50.8 L928.5,53.3 L950.3,60.6 L929.5,64.9 L885.3,67.4 L946.2,68.2 L978.7,70.8 L952.9,71.6 L899.2,72.4 L964.8,72.5 L999.3,72.7 L978.2,73.1 L914.5,73.3 L908.5,73.7 L931.8,74.4 L900.9,75.5 L889.1,75.8 L926.4,77.5 L958.9,83.1 L923.0,85.2 L905.0,86.9 L893.9,85.3 L882.9,83.5 L871.8,83.7 L860.8,84.5 L849.7,83.6 L838.6,82.9 L827.6,82.0 L816.5,81.5 L805.4,79.9 L794.4,79.5 L783.3,80.7 L772.2,82.0 L761.2,82.1 L750.1,82.3 L739.1,84.0 L728.0,83.9 L716.9,83.4 L705.9,83.5 L694.8,83.4 L683.8,84.2 L672.7,84.7 L661.6,84.2 L650.6,84.7 L639.5,83.9 L628.4,82.3 L617.4,82.2 L606.3,82.9 L595.2,84.2 L584.2,84.4 L573.1,84.7 L562.1,86.3 L551.0,86.3 L539.9,85.2 L528.9,84.8 L517.8,85.7 L506.8,85.9 L495.7,84.5 L484.6,85.0 L473.6,85.0 L462.5,83.8 L451.4,81.6 L440.4,80.8 L429.3,81.0 L418.2,80.5 L407.2,80.5 L396.1,81.6 L385.1,82.9 L374.0,83.4 L362.9,82.2 L351.9,82.7 L340.8,83.3 L329.8,83.6 L318.7,83.8 L307.6,84.9 L296.6,85.8 L285.5,84.3 L274.4,83.8 L263.4,83.6 L252.3,83.6 L241.2,83.5 L230.2,84.3 L219.1,85.9 L208.1,87.5 L197.0,88.0 L185.9,87.8 L174.9,89.1 L163.8,90.1 L152.8,90.1 L141.7,90.4 L130.6,92.1 L119.6,93.0 L108.5,92.4 L97.4,92.4 L86.4,92.1 L75.3,90.9 L64.2,89.8 L53.2,89.6 L42.1,91.5 L31.1,92.4 L20.0,92.3 L16.0,89.3 L9.0,80.3 L3.0,62.9 L1.0,48.9 L6.0,30.5 L13.0,21.5Z'/><g fill='%23000'><path d='M869,71.3 q51,-0.9 101,-0.9 q-51,1.0 -101,0.0 Z'/><path d='M868,74.1 q47,-1.5 94,0.2 q-47,1.8 -94,0.0 Z'/><path d='M845,28.8 q42,-0.9 83,-1.1 q-42,1.0 -83,0.0 Z'/><path d='M879,52.9 q37,-1.7 74,0.4 q-37,2.1 -74,0.0 Z'/><path d='M839,31.9 q21,-0.8 43,-0.4 q-21,1.0 -43,0.0 Z'/><path d='M837,75.4 q22,-1.1 44,0.6 q-22,1.3 -44,0.0 Z'/><path d='M874,32.4 q30,-1.4 59,0.3 q-30,1.6 -59,0.0 Z'/><path d='M868,35.4 q38,-1.8 77,0.5 q-38,2.2 -77,0.0 Z'/><path d='M895,75.4 q27,-1.3 54,-0.5 q-27,1.5 -54,0.0 Z'/><path d='M662,82.4 q34,-1.4 68,0.2 q-34,1.7 -68,0.0 Z'/><path d='M793,82.7 q38,-1.7 76,0.5 q-38,2.0 -76,0.0 Z'/><path d='M617,80.2 q39,-1.4 78,-0.8 q-39,1.7 -78,0.0 Z'/><path d='M744,80.2 q41,-1.1 82,0.1 q-41,1.3 -82,0.0 Z'/><path d='M565,20.0 q51,-1.3 102,-0.7 q-51,1.5 -102,0.0 Z'/><path d='M810,16.0 q83,-0.8 167,-0.7 q-83,1.0 -167,0.0 Z'/><path d='M570,22.0 q75,-1.6 150,0.0 q-75,2.0 -150,0.0 Z'/><path d='M534,82.2 q57,-0.7 113,-1.1 q-57,0.8 -113,0.0 Z'/><path d='M410,19.0 q54,-1.2 107,-1.0 q-54,1.4 -107,0.0 Z'/><path d='M491,84.2 q26,-1.3 51,-0.4 q-26,1.6 -51,0.0 Z'/><path d='M519,20.4 q67,-1.3 134,-0.7 q-67,1.5 -134,0.0 Z'/><path d='M167,22.5 q38,-1.0 76,-0.9 q-38,1.1 -76,0.0 Z'/><path d='M247,16.1 q26,-1.0 52,0.6 q-26,1.1 -52,0.0 Z'/></g></mask></defs><path opacity='.42' d='M64.2,9.1 L75.3,8.1 L86.4,6.4 L97.4,6.1 L108.5,7.2 L119.6,7.7 L130.6,7.5 L141.7,7.8 L152.8,8.0 L163.8,6.6 L174.9,4.2 L185.9,3.1 L197.0,3.1 L208.1,2.4 L219.1,1.6 L230.2,1.9 L241.2,2.3 L252.3,1.4 L263.4,0.1 L274.4,0.4 L285.5,1.7 L296.6,2.5 L307.6,3.3 L318.7,5.1 L329.8,6.5 L340.8,6.0 L351.9,4.8 L362.9,4.9 L374.0,5.2 L385.1,4.7 L396.1,4.7 L407.2,5.8 L418.2,6.5 L429.3,5.6 L440.4,4.7 L451.4,5.2 L462.5,5.9 L492.5,24.0 L39.2,24.0Z M385.1,91.5 L396.1,89.1 L407.2,87.9 L418.2,88.3 L429.3,88.5 L440.4,88.2 L451.4,88.7 L462.5,89.7 L473.6,89.4 L484.6,88.4 L495.7,88.6 L506.8,90.0 L517.8,90.7 L528.9,90.8 L539.9,91.7 L551.0,92.5 L562.1,91.4 L573.1,89.6 L584.2,89.2 L595.2,89.7 L606.3,89.7 L617.4,89.9 L628.4,91.4 L639.5,92.8 L650.6,92.7 L661.6,92.2 L672.7,93.0 L683.8,94.4 L694.8,94.9 L705.9,95.5 L716.9,97.1 L728.0,98.0 L739.1,96.9 L750.1,95.2 L761.2,94.5 L772.2,94.0 L783.3,92.8 L794.4,92.3 L805.4,93.3 L816.5,93.7 L827.6,92.5 L838.6,91.5 L868.6,78.0 L360.1,78.0Z'/><rect width='1000' height='100' mask='url(%23m)'/></svg>");
   font-family: 'BIZ UDPGothic', 'Hiragino Sans', 'Noto Sans JP', system-ui, sans-serif;
   color: var(--ink);
   background: var(--paper);
@@ -23,13 +49,17 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #141A18;
-    --surface: #1D2522;
-    --ink: #E8EDEB;
-    --ink-soft: #A9B4B0;
-    --rule: #33403C;
+    --paper: #19223D;
+    --surface: #222D4E;
+    --ink: #ECE9E0;
+    --ink-soft: #A8AEC1;
+    --rule: #3A4670;
     --pop-soft: #4A3F0C;
-    --sign: #5B8FE0;
+    --sign: #EDBE62;
+    --sign-ink: #271A05;
+    --unread: #2C3558;
+    --beni-ink: #EC93AC;
+    --focus: #EDBE62;
     --pending: #E0A243;
     --error: #FF8A80;
   }
@@ -37,7 +67,15 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; }
-body { background: var(--paper); min-height: 100dvh; font-size: 16px; line-height: 1.7; }
+body {
+  /* 和紙の質感を、地の色に乗算で重ねる。重ね合わせは背景の中だけで済むので、スクロールしても描き直しが増えない */
+  background: var(--paper) url(washi.webp) 0 0 / 384px 384px repeat; background-blend-mode: multiply;
+  min-height: 100dvh; font-size: 16px; line-height: 1.7;
+}
+@media (prefers-color-scheme: dark) {
+  /* 暗い画面では、地そのものを濃紺の和紙にする（乗算では沈んで見えないため） */
+  body { background: var(--paper) url(navy-washi.webp) 0 0 / 640px auto repeat; background-blend-mode: normal; }
+}
 
 #app { display: flex; flex-direction: column; min-height: 100dvh; max-width: 640px; margin: 0 auto; }
 
@@ -45,53 +83,79 @@ body { background: var(--paper); min-height: 100dvh; font-size: 16px; line-heigh
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top));
-  border-bottom: 1px solid var(--rule); background: var(--surface);
+  position: relative; color: #fff;
+  background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
+}
+/* 帯の下の縁：わずかに右上がりで波打つ金の線 */
+.topbar::after {
+  content: ''; position: absolute; left: 0; right: 0; top: calc(100% - 1px); height: 10px; pointer-events: none;
+  background: var(--edge-top) 0 0 / 100% 100% no-repeat;
 }
 .store-name { font-weight: 700; }
-.store-select { font: inherit; font-weight: 700; border: 0; background: transparent; color: var(--ink); padding: 6px 0; }
-.topbar-link { color: var(--sign); font-size: 15px; text-decoration: none; padding: 8px 0; }
+.store-select { font: inherit; font-weight: 700; border: 0; background: transparent; color: #fff; padding: 6px 0; }
+.store-select option { color: #20273A; background: #FBF9F3; }
+.topbar-link { color: var(--bar-on); font-size: 15px; text-decoration: none; padding: 8px 0; }
 
 .content { flex: 1; padding: 20px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
 .page { display: flex; flex-direction: column; gap: 12px; }
 .center { align-items: center; text-align: center; padding-top: 30vh; }
 
-h1 { font-size: 24px; line-height: 1.4; margin: 4px 0 4px; font-weight: 700; letter-spacing: 0.01em; }
-h2 { font-size: 17px; line-height: 1.5; margin: 20px 0 0; font-weight: 700; }
+h1 { font-family: var(--mincho); font-size: 25px; line-height: 1.45; margin: 6px 0 4px; font-weight: 700; letter-spacing: 0.02em; }
+h2 { font-family: var(--mincho); font-size: 18px; line-height: 1.5; margin: 20px 0 0; font-weight: 700; letter-spacing: 0.02em; }
+/* 見出しの下に、短い金の線（太さの揃わない、筆で引いたような線） */
+h2::after {
+  content: ''; display: block; width: 46px; height: 5px; margin-top: 5px; background: var(--gold);
+  -webkit-mask: var(--wave-short) 0 0 / 100% 100% no-repeat; mask: var(--wave-short) 0 0 / 100% 100% no-repeat;
+}
 p { margin: 0; }
 .lead { font-size: 18px; }
 .hint, .note { color: var(--ink-soft); font-size: 14px; }
 .error { color: var(--error); font-weight: 700; }
 .pending { color: var(--pending); font-weight: 700; }
 
-.welcome .brand { font-size: 40px; letter-spacing: 0.08em; margin-top: 12vh; }
+.welcome .brand { font-size: 40px; font-weight: 800; letter-spacing: 0.1em; margin-top: 12vh; }
 
 /* 下のタブ：親指が届く位置 */
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
   display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
   max-width: 640px; margin: 0 auto;
-  background: var(--surface); border-top: 1px solid var(--rule);
+  background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
   padding-bottom: env(safe-area-inset-bottom);
+}
+/* タブの上の縁：帯と同じ、右上がりで波打つ金の線 */
+.tabbar::before {
+  content: ''; position: absolute; left: 0; right: 0; bottom: calc(100% - 1px); height: 10px; pointer-events: none;
+  background: var(--edge-bottom) 0 0 / 100% 100% no-repeat;
 }
 .tab {
   min-height: 56px; display: flex; align-items: center; justify-content: center;
-  color: var(--ink-soft); text-decoration: none; font-weight: 700; font-size: 15px;
-  border-top: 3px solid transparent;
+  color: var(--bar-ink); text-decoration: none; font-weight: 700; font-size: 15px;
+  position: relative;
 }
-.tab-active { color: var(--sign); border-top-color: var(--sign); }
+.tab-active { color: var(--bar-on); }
+/* いまいる画面の印：文字の下に、短い金の線 */
+.tab-active::after {
+  content: ''; position: absolute; left: 50%; bottom: 9px; width: 30px; height: 4px; transform: translateX(-50%);
+  background: var(--bar-on);
+  -webkit-mask: var(--wave-short) 0 0 / 100% 100% no-repeat; mask: var(--wave-short) 0 0 / 100% 100% no-repeat;
+}
 
 /* 入力 */
 label { font-size: 14px; font-weight: 700; margin-top: 8px; }
 label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
-input[type=text], input[type=search], textarea, select {
+input[type=text], input[type=search], input[type=email], input[type=url], input[type=password], input[type=date], input[type=number], input[type=tel], textarea, select {
   font: inherit; color: var(--ink); background: var(--surface);
   border: 1px solid var(--rule); border-radius: var(--radius);
   padding: 12px 14px; min-height: var(--tap); width: 100%;
 }
 textarea { resize: vertical; line-height: 1.7; }
 input[type=checkbox] { width: 22px; height: 22px; accent-color: var(--sign); }
+/* 上の帯の店舗の切り替えだけは、帯の色のまま（枠も地も付けない） */
+.topbar .store-select { width: auto; min-height: 0; background: transparent; border: 0; color: #fff; padding: 6px 0; }
 
-:focus-visible { outline: 3px solid var(--sign); outline-offset: 2px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.topbar :focus-visible, .tabbar :focus-visible { outline-color: var(--bar-on); }
 
 /* ボタン */
 button { font: inherit; cursor: pointer; }
@@ -100,7 +164,7 @@ button { font: inherit; cursor: pointer; }
   min-height: var(--tap); padding: 10px 18px; border-radius: var(--radius);
   font-weight: 700; text-decoration: none; text-align: center;
 }
-.primary { background: var(--sign); color: var(--sign-ink); border: 0; }
+.primary { background: var(--act); color: var(--act-ink); border: 0; }
 .secondary { background: var(--surface); color: var(--sign); border: 1px solid var(--sign); }
 .block { display: flex; width: 100%; }
 .small { min-height: 40px; padding: 6px 12px; font-size: 14px; }
@@ -151,9 +215,19 @@ button.tag { cursor: pointer; }
 .maybe-label { font-size: 13px; color: var(--ink-soft); margin: 8px 8px 0; border-top: 1px dashed var(--rule); padding-top: 8px; }
 .proposals { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 
-/* 検索結果：カードではなく、区切り線で並べる一覧 */
-.hits { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
-.hits li { border-bottom: 1px solid var(--rule); }
+/* 検索結果：カードではなく、区切り線で並べる一覧。
+   線は定規で引かず、少し傾いて波打つ線（--wave-*）を行ごとに替えて置く */
+.hits, .rows { position: relative; }
+.hits { list-style: none; margin: 0; padding: 0; }
+.hits li, .rows > .row { position: relative; }
+.hits::before, .rows::before, .hits li::after, .rows > .row::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 4px; pointer-events: none; background: var(--rule);
+  -webkit-mask: var(--wave-a) 0 0 / 100% 100% no-repeat; mask: var(--wave-a) 0 0 / 100% 100% no-repeat;
+}
+.hits::before, .rows::before { top: -2px; -webkit-mask-image: var(--wave-c); mask-image: var(--wave-c); }
+.hits li::after, .rows > .row::after { bottom: -2px; }
+.hits li:nth-child(2n)::after, .rows > .row:nth-child(2n)::after { -webkit-mask-image: var(--wave-b); mask-image: var(--wave-b); }
+.hits li:nth-child(3n)::after, .rows > .row:nth-child(3n)::after { -webkit-mask-image: var(--wave-c); mask-image: var(--wave-c); transform: scaleX(-1); }
 .hit { display: flex; flex-direction: column; gap: 6px; padding: 14px 2px; color: inherit; text-decoration: none; }
 .hit-title { font-weight: 700; font-size: 17px; line-height: 1.5; }
 .hit-snippet { color: var(--ink-soft); font-size: 14px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -161,7 +235,11 @@ button.tag { cursor: pointer; }
 .fresh { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; justify-content: flex-end; margin-left: auto; color: var(--ink-soft); font-size: 13px; font-variant-numeric: tabular-nums; }
 .fresh-stale { color: var(--pending); }
 .fresh-warn { color: var(--pending); font-weight: 700; }
-.fresh-detail { display: flex; flex-direction: column; gap: 2px; color: var(--ink-soft); font-size: 14px; padding-top: 10px; border-top: 1px solid var(--rule); }
+.fresh-detail { display: flex; flex-direction: column; gap: 2px; color: var(--ink-soft); font-size: 14px; padding-top: 12px; position: relative; }
+.fresh-detail::before {
+  content: ''; position: absolute; left: 0; right: 0; top: -2px; height: 4px; pointer-events: none; background: var(--rule);
+  -webkit-mask: var(--wave-c) 0 0 / 100% 100% no-repeat; mask: var(--wave-c) 0 0 / 100% 100% no-repeat;
+}
 .linked { display: inline-block; margin-right: 6px; color: var(--sign); font-size: 13px; }
 
 .empty { display: flex; flex-direction: column; gap: 10px; padding: 24px 0; }
@@ -171,14 +249,20 @@ button.tag { cursor: pointer; }
 .actions { display: flex; gap: 8px; margin-top: 8px; }
 
 /* 商品 */
-.product { display: flex; flex-direction: column; gap: 8px; padding: 14px 0; border-top: 2px solid var(--ink); border-bottom: 1px solid var(--rule); }
-.product-name { font-size: 19px; font-weight: 700; line-height: 1.5; }
+.product { display: flex; flex-direction: column; gap: 8px; padding: 16px 0 14px; position: relative; }
+.product::before, .product::after {
+  content: ''; position: absolute; left: 0; right: 0; pointer-events: none;
+  -webkit-mask: var(--wave-b) 0 0 / 100% 100% no-repeat; mask: var(--wave-b) 0 0 / 100% 100% no-repeat;
+}
+.product::before { top: -3px; height: 6px; background: var(--ink); }
+.product::after { bottom: -2px; height: 4px; background: var(--rule); -webkit-mask-image: var(--wave-a); mask-image: var(--wave-a); }
+.product-name { font-family: var(--mincho); font-size: 20px; font-weight: 700; line-height: 1.5; }
 .product-meta { color: var(--ink-soft); font-size: 14px; font-variant-numeric: tabular-nums; }
 .camera { width: 100%; border-radius: var(--radius); background: #000; }
 
 /* 承認・管理 */
-.rows { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--rule); }
-.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 0; border-bottom: 1px solid var(--rule); }
+.rows { list-style: none; margin: 0; padding: 0; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 0; }
 .row a { color: var(--ink); font-weight: 700; }
 .row-actions { display: flex; gap: 8px; margin-left: auto; }
 .invite-link { font-size: 13px; }
@@ -200,11 +284,12 @@ button.tag { cursor: pointer; }
 }
 
 /* 承認・管理：開閉できるまとまり */
-.panel { border: 1px solid var(--rule); background: var(--surface); margin: 0 0 12px; }
+.panel { border: 1px solid var(--rule); background: var(--surface) url(washi.webp) 120px 60px / 384px 384px repeat; background-blend-mode: multiply; margin: 0 0 12px; }
 .panel > summary { cursor: pointer; padding: 14px 16px; font-weight: 700; min-height: 48px; box-sizing: border-box; }
 .panel[open] > summary { border-bottom: 1px solid var(--rule); }
 .panel-body { padding: 4px 16px 16px; }
 .panel-body h3 { font-size: 15px; margin: 16px 0 6px; }
+.panel > summary { font-family: var(--mincho); font-size: 17px; letter-spacing: 0.02em; }
 .relation { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .quote { font-weight: 700; }
 
@@ -229,33 +314,50 @@ button.tag { cursor: pointer; }
 /* 連絡・引き継ぎ */
 .tab-count {
   display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 5px;
-  border-radius: 9px; background: var(--error, #c0392b); color: #fff;
+  border-radius: 9px; background: var(--beni); color: #fff;
   font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; vertical-align: text-top;
 }
-.home-alert { margin: 8px 0 16px; padding: 12px; background: var(--pop); border: 1px solid var(--ink); }
-.home-alert a { color: var(--ink); font-weight: 700; }
+/* ホームの知らせ：山吹の絵の具を、筆で雑に引いた跡の上に書く（見出しの下の線を、大きくしたもの） */
+/* 右は筆の抜け（かすれ）なので、文字はその手前で折り返す */
+.home-alert { position: relative; margin: 10px 0 18px; padding: 20px 40px 20px 20px; }
+.home-alert::before {
+  content: ''; position: absolute; inset: -5px -14px -5px -9px; pointer-events: none; background: var(--pop);
+  -webkit-mask: var(--brush) 0 0 / 100% 100% no-repeat; mask: var(--brush) 0 0 / 100% 100% no-repeat;
+}
+.home-alert a { position: relative; }
+.home-alert a { color: #20273A; font-weight: 700; }
 .notices { display: flex; flex-direction: column; gap: 12px; }
-.notice { padding: 12px 14px; background: var(--surface); border: 1px solid var(--rule); }
+.notice { padding: 12px 14px; background: var(--surface) url(washi.webp) 60px 140px / 384px 384px repeat; background-blend-mode: multiply; border: 1px solid var(--rule); }
 .notice h3 { margin: 0; font-size: 16px; }
 .notice p { margin: 8px 0 0; }
-.notice-important { border-left: 6px solid var(--error, #c0392b); }
-.notice-unread { background: #fffdf2; }
+.notice-important { border-left: 6px solid var(--beni); }
+.notice-unread { background-color: var(--unread); }
 .notice-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .notice-badge {
   display: inline-block; padding: 2px 8px; border-radius: 3px;
   background: var(--ink); color: var(--paper); font-size: 11px; font-weight: 700;
 }
-.notice-important .notice-head .notice-badge:first-child { background: var(--error, #c0392b); }
-.notice-all { background: var(--sign); }
-.notice-new { background: var(--pending); }
+.notice-important .notice-head .notice-badge:first-child { background: var(--beni); color: #fff; }
+.notice-all { background: var(--sign); color: var(--sign-ink); }
+.notice-new { background: var(--pending); color: var(--paper); }
 .notice-acked { color: var(--sign); font-weight: 700; }
 .notice .primary { margin-top: 10px; }
 .handover-form { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 16px; }
 .handover-form textarea { flex: 1; margin: 0; }
 .handover-form .primary { width: auto; min-width: 72px; }
 .handover-body { flex: 1 1 100%; }
-.handover-body.done { color: #6b7570; text-decoration: line-through; }
-.handover-carried { background: #fffdf2; }
+.handover-body.done { color: var(--ink-soft); text-decoration: line-through; }
+/* 持ち越した引き継ぎ：地は塗らない。左に紅の筆線を引き、「持ち越し」は紅のハンコを少し傾けて押す */
+.rows > .row.handover-carried { padding-left: 14px; }
+.handover-carried::before {
+  content: ''; position: absolute; left: 0; top: 10px; bottom: 10px; width: 5px; pointer-events: none; border-radius: 3px;
+  background: var(--beni-ink);
+  -webkit-mask: var(--wave-short) 0 0 / 100% 100% no-repeat; mask: var(--wave-short) 0 0 / 100% 100% no-repeat;
+}
+.handover-carried .notice-badge {
+  background: none; color: var(--beni-ink); border: 1.5px solid var(--beni-ink); border-radius: 3px;
+  padding: 1px 7px; margin-right: 8px; transform: rotate(-4deg);
+}
 .fresh-detail .primary, .fresh-detail .secondary { margin-top: 10px; }
 
 /* 引き継ぎの履歴 */
@@ -271,8 +373,8 @@ button.tag { cursor: pointer; }
 .history .notice-badge { margin-right: 6px; }
 /* 消したものは本文だけに線を引く（状態の札には引かない） */
 .history-deleted .history-text { color: var(--ink-soft); text-decoration: line-through; }
-.history-done { background: var(--sign); }
-.history-open { background: var(--pending); }
+.history-done { background: var(--sign); color: var(--sign-ink); }
+.history-open { background: var(--pending); color: var(--paper); }
 
 /* その場で出す確認（window.confirm は埋め込みで出ないことがあるため使わない） */
 .confirm { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
@@ -333,8 +435,10 @@ button.tag { cursor: pointer; }
   display: flex; align-items: center; gap: 12px;
 }
 .welcome .or::before, .welcome .or::after {
-  content: ''; flex: 1; height: 1px; background: currentColor; opacity: 0.25;
+  content: ''; flex: 1; height: 4px; background: currentColor; opacity: 0.4;
+  -webkit-mask: var(--wave-a) 0 0 / 100% 100% no-repeat; mask: var(--wave-a) 0 0 / 100% 100% no-repeat;
 }
+.welcome .or::after { -webkit-mask-image: var(--wave-b); mask-image: var(--wave-b); }
 
 /* ホームの足元から「この端末の設定」へ */
 .home-foot { margin-top: 32px; font-size: 14px; }
@@ -375,7 +479,7 @@ button.tag { cursor: pointer; }
 .check-ok { color: var(--sign); font-weight: 700; }
 .check-steps { list-style: none; padding: 0; margin: 6px 0; }
 .check-steps li { padding: 3px 0; }
-.check-steps .step-ng { color: #B3261E; }
+.check-steps .step-ng { color: var(--error); }
 @media (prefers-color-scheme: dark) { .check-steps .step-ng { color: #FFB4AB; } }
 .check-steps .hint { display: block; padding-left: 1.3em; }
 
