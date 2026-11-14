@@ -6,6 +6,7 @@ import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeD
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
+import { decodeImage } from './ean.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
@@ -920,58 +921,93 @@ function renderScan(initialJan: string, stale: () => boolean): void {
       out.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
   });
-  // 端末が BarcodeDetector に対応していればカメラで読む（Android の Chrome など）。無ければ数字を入力する
+  // カメラで読む。端末が BarcodeDetector を持っていればそれを使い（Android の Chrome など）、
+  // 無ければ（iPhone の Safari）自前の読み取り（ean.ts）で、画のまんなかの帯から読む。
   const Detector = (window as unknown as { BarcodeDetector?: new (o: { formats: string[] }) => { detect(v: HTMLVideoElement): Promise<Array<{ rawValue: string }>> } }).BarcodeDetector;
+  const canCamera = typeof navigator.mediaDevices?.getUserMedia === 'function';
+  const cameraHint = h('p', { class: 'hint', hidden: true }, 'バーコードを横向きにして、画面のまんなかに写してください。読めないときは、少し離すとピントが合います。');
   // カメラは押すたびに新しく掴むので、前の stream と読み取りのループを止めてから始める。
   // 止め忘れるとカメラが点いたままになり、電池も食う。画面を離れるときも止める（disposeView）
   let stream: MediaStream | null = null;
   let frame = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let cameraSeq = 0;
   const stopCamera = () => {
     cameraSeq += 1; // 動いているループと、取得待ちの startCamera を無効にする
     cancelAnimationFrame(frame);
+    clearTimeout(timer);
     stream?.getTracks().forEach((t) => t.stop());
     stream = null;
     video.srcObject = null;
     video.hidden = true;
+    cameraHint.hidden = true;
   };
   const startCamera = async () => {
-    if (!Detector) return;
+    if (!canCamera) return;
     stopCamera();
     const mine = cameraSeq;
     try {
-      const got = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      const got = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
       if (mine !== cameraSeq) { got.getTracks().forEach((t) => t.stop()); return; } // 待つ間に離れた・押し直された
       stream = got;
       video.srcObject = got;
       video.hidden = false;
+      cameraHint.hidden = false;
       await video.play();
       if (mine !== cameraSeq) return;
-      const detector = new Detector({ formats: ['ean_13', 'ean_8'] });
-      const tick = async () => {
-        if (mine !== cameraSeq) return;
-        const codes = await detector.detect(video).catch(() => []);
-        if (mine !== cameraSeq) return;
-        if (codes[0]) {
-          field.value = codes[0].rawValue;
-          stopCamera();
-          void lookup();
-          return;
-        }
-        frame = requestAnimationFrame(() => void tick());
+      const found = (code: string) => {
+        field.value = code;
+        stopCamera();
+        void lookup();
       };
-      void tick();
+      if (Detector) {
+        const detector = new Detector({ formats: ['ean_13', 'ean_8'] });
+        const tick = async () => {
+          if (mine !== cameraSeq) return;
+          const codes = await detector.detect(video).catch(() => []);
+          if (mine !== cameraSeq) return;
+          if (codes[0]) return found(codes[0].rawValue);
+          frame = requestAnimationFrame(() => void tick());
+        };
+        void tick();
+        return;
+      }
+      // 自前の読み取り。画のまんなかの帯（高さの4割）だけを切り出して、1秒に8回ほど試す。
+      // 同じ数字が2回続けて読めたら採る（たまたま形が似た模様を、商品だと思わない）
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) throw new Error('canvas');
+      let last = '';
+      const tick = () => {
+        if (mine !== cameraSeq) return;
+        const vw = video.videoWidth, vh = video.videoHeight;
+        if (vw > 0 && vh > 0) {
+          const width = Math.min(vw, 1000);
+          const bandHeight = Math.round(vh * 0.4);
+          const height = Math.max(40, Math.round(bandHeight * (width / vw)));
+          if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+          ctx.drawImage(video, 0, Math.round((vh - bandHeight) / 2), vw, bandHeight, 0, 0, width, height);
+          const code = decodeImage(ctx.getImageData(0, 0, width, height));
+          if (code) {
+            if (code === last) return found(code);
+            last = code;
+          }
+        }
+        timer = setTimeout(tick, 120);
+      };
+      tick();
     } catch {
       if (mine === cameraSeq) stopCamera(); // play() などで失敗したとき、掴んだカメラを放す
-      toast('カメラを使えませんでした。数字を入力してください');
+      toast('カメラを使えませんでした。設定でカメラを許可するか、数字を入力してください');
     }
   };
   field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void lookup(); } });
   lookupButton.addEventListener('click', () => void lookup());
   shell('search', h('section', { class: 'page' },
     h('h1', {}, 'バーコードで調べる'),
-    Detector ? h('button', { type: 'button', class: 'primary', onclick: () => void startCamera() }, 'カメラで読み取る') : null,
+    canCamera ? h('button', { type: 'button', class: 'primary', onclick: () => void startCamera() }, 'カメラで読み取る') : null,
     video,
+    cameraHint,
     h('label', { for: 'jan' }, 'JANコード（バーコードの下の数字）'),
     h('div', { class: 'search-bar' }, field, lookupButton),
     out,

@@ -36,8 +36,27 @@ export const MAX_PHOTOS = 8;
  * 写真を縮小して JPEG にする。
  * 向きの情報（EXIF）は createImageBitmap に任せるので、横倒しのまま送られることはない。
  */
+/** 画像を開く。createImageBitmap が読めない形式（端末によっては HEIC など）は、<img> で開き直す */
+async function openImage(file: File): Promise<{ source: CanvasImageSource; width: number; height: number; close: () => void }> {
+  try {
+    const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    return { source: bitmap, width: bitmap.width, height: bitmap.height, close: () => bitmap.close() };
+  } catch {
+    const url = URL.createObjectURL(file);
+    try {
+      const img = new Image();
+      img.src = url;
+      await img.decode();
+      return { source: img, width: img.naturalWidth, height: img.naturalHeight, close: () => URL.revokeObjectURL(url) };
+    } catch {
+      URL.revokeObjectURL(url);
+      throw new Error('この画像は開けませんでした。JPEG か PNG の写真を選んでください');
+    }
+  }
+}
+
 export async function shrink(file: File): Promise<Blob> {
-  const bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const bitmap = await openImage(file);
   try {
     const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
     const width = Math.max(1, Math.round(bitmap.width * scale));
@@ -47,7 +66,7 @@ export async function shrink(file: File): Promise<Blob> {
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('この端末では写真を縮小できません');
-    ctx.drawImage(bitmap, 0, 0, width, height);
+    ctx.drawImage(bitmap.source, 0, 0, width, height);
     const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', QUALITY));
     if (!blob) throw new Error('写真を変換できませんでした');
     return blob;
@@ -95,14 +114,19 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
   const revokers: Array<() => void> = [];
   let photos: Photo[] = [];
 
-  const file = h('input', { type: 'file', accept: 'image/*', capture: 'environment', id: 'photo-file', hidden: true, multiple: true });
-  const addButton = h('button', { type: 'button', class: 'secondary' }, '写真を追加');
-  addButton.addEventListener('click', () => file.click());
+  // 入口を2つに分ける：その場で撮る（capture を付けるとカメラが直接開く）／端末のアルバムやファイルから選ぶ
+  const cameraFile = h('input', { type: 'file', accept: 'image/*', capture: 'environment', id: 'photo-camera', hidden: true });
+  const libraryFile = h('input', { type: 'file', accept: 'image/*', id: 'photo-library', hidden: true, multiple: true });
+  const cameraButton = h('button', { type: 'button', class: 'secondary' }, '写真を撮る');
+  const libraryButton = h('button', { type: 'button', class: 'secondary' }, 'アルバムから選ぶ');
+  cameraButton.addEventListener('click', () => cameraFile.click());
+  libraryButton.addEventListener('click', () => libraryFile.click());
 
   const setBusy = (text: string | null) => {
     status.textContent = text ?? '';
     status.hidden = text === null;
-    addButton.disabled = text !== null;
+    cameraButton.disabled = text !== null;
+    libraryButton.disabled = text !== null;
   };
 
   const draw = () => {
@@ -124,12 +148,14 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
       );
       grid.append(figure);
     }
-    if (canEdit && photos.length < MAX_PHOTOS) grid.append(h('div', { class: 'photo-add' }, addButton, file));
+    if (canEdit && photos.length < MAX_PHOTOS) grid.append(h('div', { class: 'photo-add' }, cameraButton, libraryButton, cameraFile, libraryFile));
   };
 
-  file.addEventListener('change', async () => {
-    const chosen = [...(file.files ?? [])].slice(0, MAX_PHOTOS - photos.length);
+  const onChosen = async (file: HTMLInputElement) => {
+    const picked = [...(file.files ?? [])];
+    const chosen = picked.slice(0, MAX_PHOTOS - photos.length);
     file.value = '';
+    if (picked.length > chosen.length) toast(`写真は1件につき${MAX_PHOTOS}枚までです。先頭の${chosen.length}枚だけ送ります`);
     for (const [i, f] of chosen.entries()) {
       setBusy(chosen.length > 1 ? `写真を送っています（${i + 1}/${chosen.length}）…` : '写真を送っています…');
       try {
@@ -141,7 +167,9 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
       }
     }
     setBusy(null);
-  });
+  };
+  cameraFile.addEventListener('change', () => void onChosen(cameraFile));
+  libraryFile.addEventListener('change', () => void onChosen(libraryFile));
 
   void api<Photo[]>('GET', `/knowledge/${knowledgeId}/photos`).then((list) => { photos = list; draw(); }).catch(() => { draw(); });
   draw();

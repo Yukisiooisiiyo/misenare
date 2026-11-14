@@ -39,6 +39,10 @@ COPY --from=build /app/apps/site ./apps/site
 # 運営者の管理画面（静的ファイル。/admin/ で配信される）
 COPY --from=build /app/apps/admin ./apps/admin
 
+# 写真の置き場（PHOTO_DIR の既定）。ここに差し込むボリュームは、新しく作られたときにこの持ち主を引き継ぐ。
+# 用意しておかないと root の持ち物で作られ、node で動くアプリが書けない（写真を送ると 500 になる）
+RUN mkdir -p /var/misenare/photos && chown node:node /var/misenare/photos
+
 # root では動かさない
 USER node
 EXPOSE 8787
