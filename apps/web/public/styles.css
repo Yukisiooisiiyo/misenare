@@ -77,12 +77,16 @@ body {
   body { background: var(--paper) url(navy-washi.webp) 0 0 / 640px auto repeat; background-blend-mode: normal; }
 }
 
-#app { display: flex; flex-direction: column; min-height: 100dvh; max-width: 640px; margin: 0 auto; }
+/* 幅の広い画面（PC・タブレット）では、中身は読みやすい幅（640px）のまま真ん中に置き、
+   上の帯と下のタブだけを画面の端から端まで通す（帯が真ん中に浮いた島にならないように）。
+   --gutter は、その「真ん中の列」の左右の余白 */
+:root { --col: 640px; --gutter: max(16px, calc((100vw - var(--col)) / 2 + 16px)); }
+#app { display: flex; flex-direction: column; min-height: 100dvh; }
 
 /* 上の帯：店舗名と承認・管理 */
 .topbar {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 16px; padding-top: max(10px, env(safe-area-inset-top));
+  padding: 10px var(--gutter); padding-top: max(10px, env(safe-area-inset-top));
   position: relative; color: #fff;
   background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
 }
@@ -96,7 +100,7 @@ body {
 .store-select option { color: #20273A; background: #FBF9F3; }
 .topbar-link { color: var(--bar-on); font-size: 15px; text-decoration: none; padding: 8px 0; }
 
-.content { flex: 1; padding: 20px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
+.content { flex: 1; width: 100%; max-width: var(--col); margin: 0 auto; padding: 20px 16px calc(96px + env(safe-area-inset-bottom, 0px)); }
 .page { display: flex; flex-direction: column; gap: 12px; }
 .center { align-items: center; text-align: center; padding-top: 30vh; }
 
@@ -119,7 +123,7 @@ p { margin: 0; }
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
   display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
-  max-width: 640px; margin: 0 auto;
+  padding-left: calc(var(--gutter) - 16px); padding-right: calc(var(--gutter) - 16px);
   background: var(--bar) url(navy-washi.webp) 0 0 / 640px auto repeat;
   padding-bottom: env(safe-area-inset-bottom);
 }
