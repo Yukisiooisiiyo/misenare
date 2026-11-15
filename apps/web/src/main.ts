@@ -1,5 +1,5 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
-// 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
+// 画面は URL のハッシュで切り替える：#/home（#/search?q= も同じ画面） #/k/<id> #/write #/edit/<id> #/scan #/memo #/settings #/manage #/device
 
 import { api, ApiError, fetchDictionary, onUnauthorized, session, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
@@ -218,7 +218,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
     h('h1', {}, 'この端末の設定'),
     h('p', { class: 'hint' }, `いまお使いの端末：${guessDeviceName()}`),
   );
-  shell(null, section);
+  shell('settings', section);
 
   // 別の端末でログイン：どの端末でも出す（パスキーの引き継ぎがうまくいかない端末の逃げ道にもなる）。
   {
@@ -342,7 +342,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
 
 // --- 画面の枠 -------------------------------------------------------------------
 
-type Tab = 'home' | 'notices' | 'search' | 'write' | 'memo';
+type Tab = 'home' | 'notices' | 'write' | 'memo' | 'settings';
 
 /** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
 let disposeView: (() => void) | null = null;
@@ -366,19 +366,14 @@ function shell(tab: Tab | null, ...content: Node[]): void {
           route();
         } }, ...me.stores.map((s) => h('option', { value: s.id, ...(s.id === session.storeId ? { selected: true } : {}) }, s.name)))
       : h('span', { class: 'store-name' }, store?.name ?? ''),
-    // 申請の数は、ホームだけでなく上の帯にも出す。どの画面にいても目に入るようにするため
-    isTrusted() ? h('a', { href: '#/manage', class: 'topbar-link' }, '承認・管理',
-      (badges?.accessRequests?.pending ?? 0) > 0
-        ? h('span', { class: 'tab-count', 'aria-label': `利用の申請が${badges!.accessRequests.pending}件` },
-            String(badges!.accessRequests.pending))
-        : null) : null,
   ) : null;
   const nav = me ? h('nav', { class: 'tabbar', 'aria-label': '画面の切り替え' },
     navLink('#/home', 'ホーム', tab === 'home'),
     navLink('#/notices', '連絡', tab === 'notices', badgeCount()),
-    navLink('#/search', '探す', tab === 'search'),
     navLink('#/write', '書く', tab === 'write'),
     navLink('#/memo', 'メモ', tab === 'memo'),
+    // 承認・管理と、この端末の設定への入口。利用の申請の数は、どの画面にいても目に入るようにここに出す
+    navLink('#/settings', '設定', tab === 'settings', manageCount()),
   ) : null;
   root.append(...[header, h('main', { class: 'content' }, ...content), nav].filter((x): x is HTMLElement => x !== null));
 }
@@ -399,12 +394,17 @@ function badgeCount(): number {
   return badges.notices.unread + badges.notices.needsAck + badges.handovers.open;
 }
 
-/** 上の帯の「承認・管理」に出す件数を、いまの数に合わせる */
+/** 「設定」タブに出す数（承認できる人にだけ：利用の申請） */
+function manageCount(): number {
+  return isTrusted() ? (badges?.accessRequests?.pending ?? 0) : 0;
+}
+
+/** 「設定」タブに出す件数を、いまの数に合わせる */
 function updateManageCount(): void {
-  const link = document.querySelector('.topbar-link');
+  const link = document.querySelector('.tabbar a[href="#/settings"]');
   if (!link) return;
   link.querySelector('.tab-count')?.remove();
-  const pending = badges?.accessRequests?.pending ?? 0;
+  const pending = manageCount();
   if (pending > 0) {
     link.append(h('span', { class: 'tab-count', 'aria-label': `利用の申請が${pending}件` }, String(pending)));
   }
@@ -436,6 +436,7 @@ async function refreshBadges(maxAgeMs = 0): Promise<void> {
   existing?.remove();
   const count = badgeCount();
   if (count > 0) tab.append(h('span', { class: 'tab-count', 'aria-label': `${count}件` }, String(count)));
+  updateManageCount();
 }
 
 // --- ルーティング ---------------------------------------------------------------
@@ -456,7 +457,9 @@ function route(): void {
   const params = new URLSearchParams(query ?? '');
   const k = /^\/k\/([0-9a-f-]{36})$/.exec(path);
   const edit = /^\/edit\/([0-9a-f-]{36})$/.exec(path);
-  if (path === '/search') return void renderSearch(params.get('q') ?? '');
+  // 「探す」はホームに統合した。前からある #/search?q=… の行き先も、同じ画面で受ける
+  if (path === '/search') return void renderHome(params.get('q') ?? '');
+  if (path === '/settings') return renderSettings();
   if (path === '/write') return renderWrite(null);
   if (edit) return void loadAndEdit(edit[1]!, stale);
   if (k) return void renderKnowledge(k[1]!, stale);
@@ -465,20 +468,20 @@ function route(): void {
   if (path === '/memo') return renderMemoTab();
   if (path === '/manage') return void renderManage(stale);
   if (path === '/device') return void renderDevice(stale);
-  return void renderHome();
+  return void renderHome('');
 }
 
 // --- ホーム ---------------------------------------------------------------------
 
-async function renderHome(): Promise<void> {
+async function renderHome(initial: string): Promise<void> {
+  // ホームと「探す」は1つの画面。何も打っていないあいだはホームの中身（お知らせ・タグ・ブックマーク）を見せ、
+  // 打ち始めたら、その場で候補と結果に入れ替える。
   const tags = dict ? [...dict.dictionary.tags.values()].sort((a, b) => b.useCount - a.useCount).slice(0, 12) : [];
   const alert = h('div', { class: 'home-alert', hidden: true });
   const bookmarks = h('div', { class: 'home-bookmarks' });
   const homeStore = storeId();
-  shell('home', h('section', { class: 'page' },
-    h('h1', {}, `${me!.name}さん`),
-    alert,
-    h('a', { href: '#/search', class: 'search-launch' }, 'タグや言葉で探す'),
+  const greeting = h('h1', {}, `${me!.name}さん`);
+  const homeBody = h('div', { class: 'home-body' },
     h('a', { href: '#/scan', class: 'secondary block' }, 'バーコードで商品を調べる'),
     tags.length > 0 ? h('h2', {}, 'よく使われるタグ') : null,
     tags.length > 0 ? h('div', { class: 'tag-row' }, ...tags.map((t) => tagChip(t.name, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t.name)}`; } }))) : null,
@@ -486,69 +489,15 @@ async function renderHome(): Promise<void> {
     me!.trustLevel === 'visitor' && !isAdmin()
       ? h('p', { class: 'note' }, 'あなたの投稿や修正は、trusted のメンバーが承認すると公開されます。')
       : null,
-    h('p', { class: 'home-foot' }, h('a', { href: '#/device' }, 'この端末の設定')),
-  ));
-  // 自分のブックマーク。無ければ欄ごと出さない（取れなくても、ホームのほかの部分はそのまま使える）
-  void api<BookmarkItem[]>('GET', `/stores/${homeStore}/bookmarks`).then((list) => {
-    if (!bookmarks.isConnected || list.length === 0) return;
-    bookmarks.append(
-      h('h2', {}, 'ブックマーク'),
-      h('ul', { class: 'rows' }, ...list.map((b) => h('li', { class: 'row bookmark-row' },
-        h('a', { href: `#/k/${b.id}` }, b.title),
-        b.tags.length > 0 ? h('span', { class: 'tag-row' }, ...b.tags.slice(0, 3).map((t) => tagChip(t, { quiet: true }))) : null))));
-  }).catch(() => {});
-  // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）。
-  // 起動で取ったばかり（5秒以内）なら、もう一度は取らない。画面を移ってきたときは今までどおり取り直す
-  await refreshBadges(5000);
-  const parts: string[] = [];
-  if (badges) {
-    if (badges.notices.needsAck > 0) parts.push(`確認がまだの連絡が${badges.notices.needsAck}件`);
-    else if (badges.notices.unread > 0) parts.push(`未読の連絡が${badges.notices.unread}件`);
-    if (badges.handovers.open > 0) {
-      parts.push(badges.handovers.carriedOver > 0
-        ? `引き継ぎが${badges.handovers.open}件（うち持ち越し${badges.handovers.carriedOver}件）`
-        : `引き継ぎが${badges.handovers.open}件`);
-    }
-  }
-  clear(alert);
-  if (parts.length > 0) {
-    alert.append(h('a', { href: '#/notices' }, `${parts.join('、')}あります`));
-  }
-  // 利用の申請は、待っている人がいる話なので別の行で出す。
-  // 承認・管理を開かないと気づけないと、申請した人がいつまでも入れない。
-  const pending = badges?.accessRequests?.pending ?? 0;
-  if (pending > 0) {
-    alert.append(h('a', { href: '#/manage', class: 'alert-request' },
-      `利用の申請が${pending}件あります（承認すると使えるようになります）`));
-  }
-  alert.hidden = alert.childNodes.length === 0;
-}
+  );
+  let alertFilled = false;
+  const showHome = (on: boolean) => {
+    greeting.hidden = !on;
+    homeBody.hidden = !on;
+    alert.hidden = !on || !alertFilled;
+  };
 
-// --- 連絡 -------------------------------------------------------------------------
-
-function renderNoticesTab(): void {
-  const section = h('section', { class: 'page' });
-  shell('notices', section);
-  renderNotices(section, {
-    storeId: storeId(),
-    userName: me!.name,
-    isTrusted: isTrusted(),
-    onBadges: () => void refreshBadges(),
-  });
-}
-
-// --- メモ -------------------------------------------------------------------------
-
-function renderMemoTab(): void {
-  const section = h('section', { class: 'page' });
-  shell('memo', section);
-  renderMemos(section);
-}
-
-// --- 探す -------------------------------------------------------------------------
-
-async function renderSearch(initial: string): Promise<void> {
-  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: '冷蔵庫 リサイクル', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
+  const input = h('input', { type: 'search', id: 'q', value: initial, placeholder: 'タグや言葉で探す', autocomplete: 'off', enterkeyhint: 'search', 'aria-label': '検索' });
   const suggest = h('div', { class: 'suggest', hidden: true });
   const results = h('div', { class: 'results', 'aria-live': 'polite' });
   let pendingPick: { suggestedTagId: string; pickedTagId: string } | null = null;
@@ -578,8 +527,9 @@ async function renderSearch(initial: string): Promise<void> {
   };
   const run = async (record: boolean) => {
     const q = input.value.trim();
-    history.replaceState(null, '', `#/search?q=${encodeURIComponent(q)}`);
+    history.replaceState(null, '', q ? `#/search?q=${encodeURIComponent(q)}` : '#/home');
     const mine = ++seq;
+    showHome(!q);
     if (!q) { clear(results); return; }
     try {
       // 入力中のライブ検索は記録しない（record=0）。打ちかけの語で 0件ワードを汚さない。
@@ -617,6 +567,8 @@ async function renderSearch(initial: string): Promise<void> {
     });
   };
   input.addEventListener('input', () => {
+    // 打ち始めたら、すぐに結果の場所を空ける（消したら、ホームの中身を戻す）
+    showHome(input.value.trim() === '');
     updateSuggest();
     window.clearTimeout(timer);
     timer = window.setTimeout(() => void run(false), 450);
@@ -625,15 +577,98 @@ async function renderSearch(initial: string): Promise<void> {
     if (e.key === 'Enter') { e.preventDefault(); window.clearTimeout(timer); suggest.hidden = true; void run(true); }
   });
 
-  shell('search', h('section', { class: 'page' },
+  shell('home', h('section', { class: 'page' },
+    greeting,
+    alert,
     h('div', { class: 'search-bar' }, input, h('a', { href: '#/scan', class: 'icon-button', 'aria-label': 'バーコードで調べる' }, 'JAN')),
     h('p', { class: 'hint' }, 'ひらがな・ローマ字でも候補が出ます（てれび／terebi → #テレビ）'),
     suggest,
     results,
+    homeBody,
   ));
-  input.focus();
-  if (initial) await run(true);
+  showHome(initial.trim() === '');
+  // 探しに来たとき（タグを押した・前の検索に戻った）だけ、入力欄に入る。
+  // ホームを開いただけでは入らない（スマホで、開くたびにキーボードが出てしまう）
+  if (initial) { input.focus(); void run(true); }
+
+  // 自分のブックマーク。無ければ欄ごと出さない（取れなくても、ホームのほかの部分はそのまま使える）
+  void api<BookmarkItem[]>('GET', `/stores/${homeStore}/bookmarks`).then((list) => {
+    if (!bookmarks.isConnected || list.length === 0) return;
+    bookmarks.append(
+      h('h2', {}, 'ブックマーク'),
+      h('ul', { class: 'rows' }, ...list.map((b) => h('li', { class: 'row bookmark-row' },
+        h('a', { href: `#/k/${b.id}` }, b.title),
+        b.tags.length > 0 ? h('span', { class: 'tag-row' }, ...b.tags.slice(0, 3).map((t) => tagChip(t, { quiet: true }))) : null))));
+  }).catch(() => {});
+  // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）。
+  // 起動で取ったばかり（5秒以内）なら、もう一度は取らない。画面を移ってきたときは今までどおり取り直す
+  await refreshBadges(5000);
+  const parts: string[] = [];
+  if (badges) {
+    if (badges.notices.needsAck > 0) parts.push(`確認がまだの連絡が${badges.notices.needsAck}件`);
+    else if (badges.notices.unread > 0) parts.push(`未読の連絡が${badges.notices.unread}件`);
+    if (badges.handovers.open > 0) {
+      parts.push(badges.handovers.carriedOver > 0
+        ? `引き継ぎが${badges.handovers.open}件（うち持ち越し${badges.handovers.carriedOver}件）`
+        : `引き継ぎが${badges.handovers.open}件`);
+    }
+  }
+  clear(alert);
+  if (parts.length > 0) {
+    alert.append(h('a', { href: '#/notices' }, `${parts.join('、')}あります`));
+  }
+  // 利用の申請は、待っている人がいる話なので別の行で出す。
+  // 承認・管理を開かないと気づけないと、申請した人がいつまでも入れない。
+  const pending = manageCount();
+  if (pending > 0) {
+    alert.append(h('a', { href: '#/manage', class: 'alert-request' },
+      `利用の申請が${pending}件あります（承認すると使えるようになります）`));
+  }
+  alertFilled = alert.childNodes.length > 0;
+  showHome(input.value.trim() === '');
 }
+
+// --- 設定（承認・管理と、この端末の設定への入口） ---------------------------------
+
+function renderSettings(): void {
+  const pending = manageCount();
+  shell('settings', h('section', { class: 'page' },
+    h('h1', {}, '設定'),
+    h('ul', { class: 'rows settings-list' },
+      isTrusted()
+        ? h('li', { class: 'row' }, h('a', { href: '#/manage', class: 'settings-link' },
+            h('span', { class: 'settings-title' }, '承認・管理',
+              pending > 0 ? h('span', { class: 'tab-count', 'aria-label': `利用の申請が${pending}件` }, String(pending)) : null),
+            h('span', { class: 'hint' }, '投稿の承認、見つからなかった検索、タグ、スタッフの招待など')))
+        : null,
+      h('li', { class: 'row' }, h('a', { href: '#/device', class: 'settings-link' },
+        h('span', { class: 'settings-title' }, 'この端末の設定'),
+        h('span', { class: 'hint' }, 'パスキー、メールアドレス、ほかの端末で使う、ログアウト')))),
+  ));
+}
+
+// --- 連絡 -------------------------------------------------------------------------
+
+function renderNoticesTab(): void {
+  const section = h('section', { class: 'page' });
+  shell('notices', section);
+  renderNotices(section, {
+    storeId: storeId(),
+    userName: me!.name,
+    isTrusted: isTrusted(),
+    onBadges: () => void refreshBadges(),
+  });
+}
+
+// --- メモ -------------------------------------------------------------------------
+
+function renderMemoTab(): void {
+  const section = h('section', { class: 'page' });
+  shell('memo', section);
+  renderMemos(section);
+}
+
+// --- 探す -------------------------------------------------------------------------
 
 function renderResults(container: HTMLElement, r: SearchResult, q: string, addTag: (tag: string) => void, onOpen: (knowledgeId: string) => void): void {
   clear(container);
@@ -672,7 +707,7 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
     k = await api<Knowledge>('GET', `/knowledge/${id}`);
   } catch (e) {
     if (stale()) return;
-    return shell('search', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
+    return shell('home', h('section', { class: 'page' }, h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e))));
   }
   if (stale()) return; // 応答を待つ間に別の画面へ移っていたら、遅れて届いた詳細で上書きしない
   // 写真を足せるのは本文を直せる人と同じ：全店共通は本部、店舗は trusted 以上か、修正案を出している本人
@@ -722,7 +757,7 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
     }
   };
   drawBookmark();
-  shell('search', h('article', { class: 'page knowledge' },
+  shell('home', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
     pendingEditsBlock(k),
@@ -1053,7 +1088,7 @@ function renderScan(initialJan: string, stale: () => boolean): void {
   };
   field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void lookup(); } });
   lookupButton.addEventListener('click', () => void lookup());
-  shell('search', h('section', { class: 'page' },
+  shell('home', h('section', { class: 'page' },
     h('h1', {}, 'バーコードで調べる'),
     canCamera ? h('button', { type: 'button', class: 'primary', onclick: () => void startCamera() }, 'カメラで読み取る') : null,
     video,
@@ -1158,7 +1193,7 @@ function listFrame<T>(fetcher: () => Promise<T>, draw: (items: T) => Node[]): Li
 async function renderManage(stale: () => boolean): Promise<void> {
   if (!isTrusted()) { location.hash = '#/home'; return; }
   const section = h('section', { class: 'page manage' }, h('h1', {}, '承認・管理'));
-  shell(null, section);
+  shell('settings', section);
   const sid = storeId();
   type PendingRow = { id: string; version: number; title: string; edited_by: string; is_new: boolean };
   type StaleRow = { id: string; title: string; verified_at: string | null };

@@ -153,6 +153,8 @@ for (const [role, label] of [['新人', '新人'], ['店長', '店長']]) {
   await collect(p, `${role} 09 この端末`);
   await to(p, '#/manage');
   await collect(p, `${role} 10 承認・管理`);
+  await to(p, '#/settings', '.settings-list');
+  await collect(p, `${role} 11 設定`);
   await p.context().close();
 }
 await browser.close();

@@ -533,3 +533,10 @@ button.tag { cursor: pointer; }
 .memo-edit .row-actions { margin: 8px 0 0; }
 /* タブが5つになっても、狭い画面で字が詰まらないように */
 @media (max-width: 380px) { .tab { font-size: 14px; } }
+
+/* --- ホームと「探す」の統合・設定 --- */
+.home-body > .block { margin-top: 4px; }
+.settings-list { margin-top: 8px; }
+.settings-link { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 6px 2px; text-decoration: none; }
+.settings-title { display: inline-flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 700; color: var(--sign); }
+.settings-link .hint { font-weight: 400; }
