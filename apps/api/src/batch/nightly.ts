@@ -17,6 +17,7 @@ import type { Database, Db } from '../db/db.ts';
 import { indexKnowledge } from '../domain/indexer.ts';
 import { invalidateDictionary } from '../domain/tags.ts';
 import { closeStaleHandovers } from '../domain/handovers.ts';
+import { sweepTodayMemos } from '../domain/memos.ts';
 import { STALE_DAYS } from '../domain/knowledge.ts';
 import { sweepAbandonedPhotos } from '../domain/photos.ts';
 import { sweepChallenges } from '../domain/passkeys.ts';
@@ -250,6 +251,8 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
         const readingsFilled = await fillReadings(db, tokenizer);
         const sweptPhotos = options.storage ? await sweepAbandonedPhotos(db, options.storage) : 0;
         const closedHandovers = await closeStaleHandovers(db);
+        // 「今日だけ」の個人メモは、日付が変わったら消す（お客様の番号などを残し続けない）
+        await sweepTodayMemos(db);
         // 検索の記録は、使う窓（0件検索 30日・「もしかして」の候補 30日）より十分長く残して、あとは捨てる。
         // 検索のたびに1行増え、捨てる口が無いと際限なく溜まる
         const sweptLogs = (await db.query<{ id: number }>(

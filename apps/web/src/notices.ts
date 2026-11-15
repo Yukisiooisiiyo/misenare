@@ -28,6 +28,8 @@ export interface Handover {
   body: string;
   state: 'open' | 'done';
   forDate: string;
+  /** 店がその場で付けた札（お客様対応・落とし物など） */
+  labels?: string[];
   createdBy: string | null;
   createdAt: string;
   doneBy: string | null;
@@ -154,11 +156,18 @@ function noticeForm(storeId: string, onPosted: () => void): HTMLElement {
 
 // --- 引き継ぎ -----------------------------------------------------------------------
 
+/** 引き継ぎに付いているラベル（無ければ何も出さない） */
+function labelTags(labels: string[] | undefined): HTMLElement | null {
+  if (!labels || labels.length === 0) return null;
+  return h('span', { class: 'label-row' }, ...labels.map((l) => h('span', { class: 'label' }, l)));
+}
+
 function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HTMLElement {
   const row = h('li', { class: `row handover${item.carriedOver ? ' handover-carried' : ''}` },
     h('span', { class: 'handover-body' },
       item.carriedOver ? h('span', { class: 'notice-badge' }, '持ち越し') : null,
       item.body),
+    labelTags(item.labels),
     h('span', { class: 'hint' }, item.createdBy ? `${item.createdBy}さん・${relativeDate(item.createdAt)}` : `ツギガミから・${relativeDate(item.createdAt)}`),
     h('span', { class: 'row-actions' },
       action('片付いた', 'secondary small', async () => {
@@ -276,12 +285,42 @@ export function renderNotices(
     }
   };
 
+  // ラベルで絞る。既定は「すべて」（今までどおり全部出す）。絞っても、数（タブの印）は変えない
+  let filter: string | null = null;
+  let lastList: Handover[] = [];
+  const filterBar = h('div', { class: 'label-filter', role: 'group', 'aria-label': 'ラベルで絞る', hidden: true });
+  const drawFilter = () => {
+    const counts = new Map<string, number>();
+    for (const item of lastList) if (item.state === 'open') for (const l of item.labels ?? []) counts.set(l, (counts.get(l) ?? 0) + 1);
+    if (filter !== null && !counts.has(filter)) filter = null; // 絞っていた札の引き継ぎが無くなったら、全部に戻す
+    clear(filterBar);
+    filterBar.hidden = counts.size === 0;
+    if (counts.size === 0) return;
+    const chip = (text: string, value: string | null) => h('button', {
+      type: 'button', class: `label-chip${filter === value ? ' label-chip-on' : ''}`, 'aria-pressed': filter === value ? 'true' : 'false',
+      onclick: () => { filter = value; drawFilter(); drawHandovers(); },
+    }, text);
+    filterBar.append(chip('すべて', null), ...[...counts.entries()].sort((a, b) => b[1] - a[1]).map(([l, n]) => chip(`${l} ${n}`, l)));
+  };
+
   let handoverSeq = 0;
   const loadHandovers = async () => {
     const mine = ++handoverSeq;
     try {
       const list = await api<Handover[]>('GET', `/stores/${options.storeId}/handovers`);
       if (mine !== handoverSeq) return;
+      lastList = list;
+      drawFilter();
+      drawHandovers();
+    } catch (e) {
+      if (mine !== handoverSeq) return;
+      clear(handoverList);
+      handoverList.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    }
+  };
+  const drawHandovers = () => {
+    {
+      const list = filter === null ? lastList : lastList.filter((x) => (x.labels ?? []).includes(filter!));
       clear(handoverList);
       const open = list.filter((x) => x.state === 'open');
       handoverList.append(...countedList('残っている引き継ぎ', open, (item) =>
@@ -296,6 +335,7 @@ export function renderNotices(
           h('ul', { class: 'rows panel-body' }, ...done.map((item) =>
             h('li', { class: 'row' },
               h('span', { class: 'handover-body done' }, item.body),
+              labelTags(item.labels),
               h('span', { class: 'hint' }, `${item.doneBy ?? ''}さんが片付けた`),
               h('span', { class: 'row-actions' },
                 action('戻す', 'secondary small', async () => {
@@ -304,19 +344,55 @@ export function renderNotices(
                   options.onBadges?.();
                 }, () => { void loadHandovers(); options.onBadges?.(); })))))));
       }
-    } catch (e) {
-      if (mine !== handoverSeq) return;
-      clear(handoverList);
-      handoverList.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
+  };
+
+  // 書くときに付けるラベル。この店で最近使われた札が候補に出る。無い札は、その場で作れる
+  const picked: string[] = [];
+  let known: string[] = [];
+  const pickBar = h('div', { class: 'label-pick', role: 'group', 'aria-label': '付けるラベル' });
+  const newLabel = h('input', { type: 'text', class: 'label-new', maxlength: 20, placeholder: 'ラベルを作る（例：落とし物）', 'aria-label': '新しいラベル', autocomplete: 'off', enterkeyhint: 'done' });
+  const drawPick = () => {
+    clear(pickBar);
+    const all = [...new Set([...picked, ...known])];
+    pickBar.append(...all.map((l) => h('button', {
+      type: 'button', class: `label-chip${picked.includes(l) ? ' label-chip-on' : ''}`, 'aria-pressed': picked.includes(l) ? 'true' : 'false',
+      onclick: () => {
+        const i = picked.indexOf(l);
+        if (i >= 0) picked.splice(i, 1);
+        else if (picked.length >= 5) { toast('ラベルは1件につき5個までです'); return; }
+        else picked.push(l);
+        drawPick();
+      },
+    }, l)));
+  };
+  const addNewLabel = () => {
+    const l = newLabel.value.normalize('NFKC').trim().replace(/^[#＃]+/, '').trim();
+    if (!l) return;
+    if (!picked.includes(l)) {
+      if (picked.length >= 5) { toast('ラベルは1件につき5個までです'); return; }
+      picked.push(l);
+    }
+    newLabel.value = '';
+    drawPick();
+  };
+  newLabel.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addNewLabel(); } });
+  const loadLabels = async () => {
+    try {
+      known = (await api<{ labels: string[] }>('GET', `/stores/${options.storeId}/handover-labels`)).labels;
+    } catch { /* 候補が取れなくても、書くことはできる */ }
+    drawPick();
   };
 
   const addSubmit = async () => {
     const text = input.value.trim();
     if (!text) return;
     try {
-      await api('POST', `/stores/${options.storeId}/handovers`, { body: text });
+      addNewLabel(); // 打ちかけのラベルも付ける
+      await api('POST', `/stores/${options.storeId}/handovers`, { body: text, ...(picked.length > 0 ? { labels: picked } : {}) });
       input.value = '';
+      picked.length = 0;
+      void loadLabels();
       toast('書きました');
       await loadHandovers();
       options.onBadges?.();
@@ -339,9 +415,14 @@ export function renderNotices(
     h('h2', {}, '引き継ぎ'),
     h('p', { class: 'hint' }, '承認はありません。誰でも書けて、誰でも片付けられます。片付かないものは次の日に持ち越します。'),
     handoverForm,
+    h('div', { class: 'label-tools' },
+      pickBar,
+      h('span', { class: 'label-add' }, newLabel, h('button', { type: 'button', class: 'secondary small', onclick: () => addNewLabel() }, 'ラベルを足す'))),
+    filterBar,
     handoverList,
     historyPanel(options.storeId, () => { void loadHandovers(); options.onBadges?.(); }),
   );
   void loadNotices();
   void loadHandovers();
+  void loadLabels();
 }

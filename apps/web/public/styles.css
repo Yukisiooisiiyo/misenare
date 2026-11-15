@@ -494,3 +494,42 @@ button.tag { cursor: pointer; }
   overflow-x: auto; padding: 8px; margin: 6px 0; background: var(--paper); border-radius: 4px;
   -webkit-user-select: all; user-select: all;
 }
+
+/* --- ラベル（引き継ぎに店が付ける札）・ブックマーク・個人メモ --- */
+/* 札：ハッシュタグ（#＋紺の字）とは見分けが付くよう、細い金の枠の小さな札にする */
+.label-row { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.label {
+  display: inline-block; padding: 1px 8px; font-size: 12px; font-weight: 700; line-height: 1.6;
+  color: var(--ink-soft); border: 1px solid var(--gold); border-radius: 3px;
+}
+.label-tools { display: flex; flex-direction: column; gap: 8px; margin: -6px 0 18px; }
+.label-pick, .label-filter { display: flex; flex-wrap: wrap; gap: 8px; }
+.label-filter { margin: 4px 0 6px; }
+.label-chip {
+  min-height: 36px; padding: 4px 12px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer;
+  color: var(--sign); background: none; border: 1.5px solid var(--gold); border-radius: 4px;
+}
+.label-chip-on { background: var(--sign); color: var(--surface); border-color: var(--sign); }
+.label-add { display: flex; gap: 8px; align-items: center; }
+.label-add .label-new { flex: 1; min-height: 40px; margin: 0; }
+.label-add .secondary { white-space: nowrap; }
+
+.bookmark-box { margin: 10px 0 2px; }
+.bookmark-box:empty { display: none; }
+.bookmark-on { background: var(--sign); color: var(--surface); border-color: var(--sign); }
+.bookmark-count { margin: 0; font-weight: 700; color: var(--sign); }
+.bookmark-count .hint { font-weight: 400; margin-left: 6px; }
+.home-bookmarks:empty { display: none; }
+.bookmark-row a { flex: 1 1 100%; }
+
+.memo-form { margin: 8px 0 8px; }
+.memo-kinds { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 8px 0 12px; }
+.memo-kind { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; margin: 0; font-weight: 400; font-size: 15px; cursor: pointer; }
+.memo-kind input { width: 20px; height: 20px; min-height: 0; margin: 0; }
+.memo-body { flex: 1 1 100%; white-space: normal; overflow-wrap: anywhere; }
+.memo-body.done { color: var(--ink-soft); text-decoration: line-through; }
+.memo .row-actions { flex-wrap: wrap; }
+.memo-edit { flex: 1 1 100%; }
+.memo-edit .row-actions { margin: 8px 0 0; }
+/* タブが5つになっても、狭い画面で字が詰まらないように */
+@media (max-width: 380px) { .tab { font-size: 14px; } }

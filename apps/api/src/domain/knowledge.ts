@@ -2,6 +2,7 @@
 // visitor の変更は承認待ちの版（pending）として積み、trusted の変更はその場で公開する。
 // どちらの場合も、編集のたびに版を1つ追加して残す。
 
+import { bookmarkState } from './bookmarks.ts';
 import { readingCandidates, suggestReading, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
@@ -51,6 +52,12 @@ export interface KnowledgeView {
    * 中身は「見る」で開く（listVersions）。検索には出ない。
    */
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
+  /** 自分がブックマークしているか */
+  bookmarked: boolean;
+  /** ブックマークを付けられるか（自分が書いたものには付けられない） */
+  canBookmark: boolean;
+  /** 付いたブックマークの数。**書いた本人にだけ**返す（ほかの人には項目ごと無い） */
+  bookmarkCount?: number;
 }
 
 interface KnowledgeRow {
@@ -360,9 +367,9 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     `SELECT name FROM hashtags WHERE id = ANY($1::uuid[]) ORDER BY array_position($1::uuid[], id)`,
     [v.tag_ids],
   );
-  const meta = await one<{ verified_at: string | null; verified_by: string | null; created_by: string | null }>(
+  const meta = await one<{ verified_at: string | null; verified_by: string | null; created_by: string | null; created_by_id: string }>(
     db,
-    `SELECT k.verified_at::text AS verified_at, u.name AS verified_by, cu.name AS created_by
+    `SELECT k.verified_at::text AS verified_at, u.name AS verified_by, cu.name AS created_by, k.created_by AS created_by_id
        FROM knowledge k
        LEFT JOIN users u  ON u.id  = k.verified_by
        LEFT JOIN users cu ON cu.id = k.created_by
@@ -395,6 +402,7 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
     pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
+    ...(await bookmarkState(db, actor, id, meta.created_by_id)),
   };
 }
 
