@@ -1,12 +1,13 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
 // 画面は URL のハッシュで切り替える：#/home #/search?q= #/k/<id> #/write #/edit/<id> #/scan #/manage
 
-import { api, ApiError, fetchDictionary, onUnauthorized, session, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
+import { api, ApiError, fetchDictionary, onUnauthorized, session, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { decodeImage } from './ean.ts';
+import { renderMemos } from './memo.ts';
 import { photoSection } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
@@ -341,7 +342,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
 
 // --- 画面の枠 -------------------------------------------------------------------
 
-type Tab = 'home' | 'notices' | 'search' | 'write';
+type Tab = 'home' | 'notices' | 'search' | 'write' | 'memo';
 
 /** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
 let disposeView: (() => void) | null = null;
@@ -377,6 +378,7 @@ function shell(tab: Tab | null, ...content: Node[]): void {
     navLink('#/notices', '連絡', tab === 'notices', badgeCount()),
     navLink('#/search', '探す', tab === 'search'),
     navLink('#/write', '書く', tab === 'write'),
+    navLink('#/memo', 'メモ', tab === 'memo'),
   ) : null;
   root.append(...[header, h('main', { class: 'content' }, ...content), nav].filter((x): x is HTMLElement => x !== null));
 }
@@ -460,6 +462,7 @@ function route(): void {
   if (k) return void renderKnowledge(k[1]!, stale);
   if (path === '/scan') return renderScan(params.get('jan') ?? '', stale);
   if (path === '/notices') return void renderNoticesTab();
+  if (path === '/memo') return renderMemoTab();
   if (path === '/manage') return void renderManage(stale);
   if (path === '/device') return void renderDevice(stale);
   return void renderHome();
@@ -470,6 +473,8 @@ function route(): void {
 async function renderHome(): Promise<void> {
   const tags = dict ? [...dict.dictionary.tags.values()].sort((a, b) => b.useCount - a.useCount).slice(0, 12) : [];
   const alert = h('div', { class: 'home-alert', hidden: true });
+  const bookmarks = h('div', { class: 'home-bookmarks' });
+  const homeStore = storeId();
   shell('home', h('section', { class: 'page' },
     h('h1', {}, `${me!.name}さん`),
     alert,
@@ -477,11 +482,21 @@ async function renderHome(): Promise<void> {
     h('a', { href: '#/scan', class: 'secondary block' }, 'バーコードで商品を調べる'),
     tags.length > 0 ? h('h2', {}, 'よく使われるタグ') : null,
     tags.length > 0 ? h('div', { class: 'tag-row' }, ...tags.map((t) => tagChip(t.name, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t.name)}`; } }))) : null,
+    bookmarks,
     me!.trustLevel === 'visitor' && !isAdmin()
       ? h('p', { class: 'note' }, 'あなたの投稿や修正は、trusted のメンバーが承認すると公開されます。')
       : null,
     h('p', { class: 'home-foot' }, h('a', { href: '#/device' }, 'この端末の設定')),
   ));
+  // 自分のブックマーク。無ければ欄ごと出さない（取れなくても、ホームのほかの部分はそのまま使える）
+  void api<BookmarkItem[]>('GET', `/stores/${homeStore}/bookmarks`).then((list) => {
+    if (!bookmarks.isConnected || list.length === 0) return;
+    bookmarks.append(
+      h('h2', {}, 'ブックマーク'),
+      h('ul', { class: 'rows' }, ...list.map((b) => h('li', { class: 'row bookmark-row' },
+        h('a', { href: `#/k/${b.id}` }, b.title),
+        b.tags.length > 0 ? h('span', { class: 'tag-row' }, ...b.tags.slice(0, 3).map((t) => tagChip(t, { quiet: true }))) : null))));
+  }).catch(() => {});
   // 連絡と引き継ぎの数は、ホームにも出す（出勤してすぐ気づけるように）。
   // 起動で取ったばかり（5秒以内）なら、もう一度は取らない。画面を移ってきたときは今までどおり取り直す
   await refreshBadges(5000);
@@ -520,6 +535,14 @@ function renderNoticesTab(): void {
     isTrusted: isTrusted(),
     onBadges: () => void refreshBadges(),
   });
+}
+
+// --- メモ -------------------------------------------------------------------------
+
+function renderMemoTab(): void {
+  const section = h('section', { class: 'page' });
+  shell('memo', section);
+  renderMemos(section);
 }
 
 // --- 探す -------------------------------------------------------------------------
@@ -673,12 +696,39 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
       : undefined));
   };
   drawFresh();
+  // ブックマーク：ほかの人が書いたものに、自分用の印を付ける。付いた数は、書いた本人にだけ届く
+  const bookmarkBox = h('div', { class: 'bookmark-box' });
+  const drawBookmark = () => {
+    clear(bookmarkBox);
+    if (k.status !== 'published') return;
+    if (k.canBookmark) {
+      const btn = h('button', { type: 'button', class: `secondary small bookmark${k.bookmarked ? ' bookmark-on' : ''}`, 'aria-pressed': k.bookmarked ? 'true' : 'false' },
+        k.bookmarked ? 'ブックマーク済み' : 'ブックマークする');
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          await api(k.bookmarked ? 'DELETE' : 'POST', `/knowledge/${k.id}/bookmark`);
+          k.bookmarked = !k.bookmarked;
+          toast(k.bookmarked ? 'ブックマークしました（ホームに出ます）' : 'ブックマークを外しました');
+        } catch (e) {
+          toast(e instanceof Error ? e.message : String(e));
+        }
+        drawBookmark();
+      });
+      bookmarkBox.append(btn);
+    } else if ((k.bookmarkCount ?? 0) > 0) {
+      bookmarkBox.append(h('p', { class: 'bookmark-count' }, `${k.bookmarkCount}人がブックマークしています`,
+        h('span', { class: 'hint' }, '（書いたあなたにだけ見えています）')));
+    }
+  };
+  drawBookmark();
   shell('search', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
     pendingEditsBlock(k),
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
+    bookmarkBox,
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
     photos.el,
     freshBox,

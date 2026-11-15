@@ -186,7 +186,15 @@ export interface Knowledge {
   verifiedAt: string | null;
   verifiedBy: string | null;
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
+  /** 自分がブックマークしているか */
+  bookmarked: boolean;
+  /** 付けられるか（自分が書いたものには付けられない） */
+  canBookmark: boolean;
+  /** 付いた数。書いた本人にだけ届く */
+  bookmarkCount?: number;
 }
+
+export interface BookmarkItem { id: string; title: string; tags: string[]; bookmarkedAt: string }
 
 export interface Dictionary {
   tags: Array<{ id: string; name: string; readings: string[]; useCount: number }>;

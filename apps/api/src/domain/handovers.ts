@@ -16,6 +16,29 @@ import { assertStore } from './scope.ts';
 export const MAX_BODY = 1000;
 /** 持ち越しをどこまでさかのぼって出すか */
 export const CARRY_OVER_DAYS = 14;
+/** 1件に付けられるラベルの数と、1つの長さ */
+export const MAX_LABELS = 5;
+export const MAX_LABEL_LENGTH = 20;
+/** ラベルの候補に出すのは、この日数のあいだに使われたもの（使われなくなった札は自然に消える） */
+export const LABEL_SUGGEST_DAYS = 90;
+
+/**
+ * ラベルを整える。前後の空白と先頭の # を落とし、同じものは1つにする。
+ * 店がその場で作る札なので、決まった一覧とは照らし合わせない。
+ */
+export function cleanLabels(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  assert(Array.isArray(value) && value.every((x) => typeof x === 'string'), 'invalid', 'ラベルの形が正しくありません');
+  const out: string[] = [];
+  for (const raw of value as string[]) {
+    const label = raw.normalize('NFKC').replace(/[\r\n\t]+/g, ' ').trim().replace(/^[#＃]+/, '').trim();
+    if (label === '') continue;
+    assert([...label].length <= MAX_LABEL_LENGTH, 'invalid', `ラベルは${MAX_LABEL_LENGTH}文字までです`);
+    if (!out.includes(label)) out.push(label);
+  }
+  assert(out.length <= MAX_LABELS, 'invalid', `ラベルは1件につき${MAX_LABELS}個までです`);
+  return out;
+}
 
 export type HandoverAction = 'created' | 'done' | 'reopened' | 'deleted' | 'restored';
 
@@ -32,6 +55,8 @@ export interface HandoverView {
   body: string;
   state: 'open' | 'done';
   forDate: string;
+  /** 店がその場で付けた札（お客様対応・落とし物など）。無ければ空 */
+  labels: string[];
   createdBy: string | null;
   createdAt: string;
   doneBy: string | null;
@@ -47,6 +72,7 @@ interface HandoverRow {
   body: string;
   state: 'open' | 'done';
   for_date: string;
+  labels?: string[] | null;
   author: string | null;
   created_at: string;
   done_by_name: string | null;
@@ -61,6 +87,7 @@ function view(row: HandoverRow, today: string): HandoverView {
     body: row.body,
     state: row.state,
     forDate: row.for_date,
+    labels: row.labels ?? [],
     createdBy: row.author,
     createdAt: row.created_at,
     doneBy: row.done_by_name,
@@ -88,7 +115,7 @@ export async function listHandovers(db: Db, actor: Actor, storeId: string, date?
   assert(date === undefined || /^\d{4}-\d{2}-\d{2}$/.test(date), 'invalid', '日付は YYYY-MM-DD で指定してください');
   const rows = await db.query<HandoverRow & { today: string }>(
     `WITH target AS (SELECT coalesce($2::date, current_date) AS d)
-     SELECT h.id, h.body, h.state, h.for_date::text AS for_date,
+     SELECT h.id, h.body, h.state, h.for_date::text AS for_date, h.labels,
             u.name AS author, h.created_at::text AS created_at,
             d.name AS done_by_name, h.done_at::text AS done_at,
             (SELECT d FROM target)::text AS today
@@ -108,21 +135,35 @@ export async function listHandovers(db: Db, actor: Actor, storeId: string, date?
 }
 
 /** 書く。その店舗にいる人なら誰でも（visitor も） */
-export async function addHandover(db: Db, actor: Actor, storeId: string, body: string, forDate?: string) {
+export async function addHandover(db: Db, actor: Actor, storeId: string, body: string, forDate?: string, labels?: unknown) {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗には書けません');
   await assertStore(db, storeId);
   const text = body?.trim() ?? '';
   assert(text.length > 0 && text.length <= MAX_BODY, 'invalid', `引き継ぎは1〜${MAX_BODY}文字で書いてください`);
   assert(forDate === undefined || /^\d{4}-\d{2}-\d{2}$/.test(forDate), 'invalid', '日付は YYYY-MM-DD で指定してください');
+  const cleaned = cleanLabels(labels);
   const row = await one<{ id: string; for_date: string }>(
     db,
-    `INSERT INTO handovers (tenant_id, store_id, body, for_date, created_by)
-     VALUES ($1, $2, $3, coalesce($4::date, current_date), $5)
+    `INSERT INTO handovers (tenant_id, store_id, body, for_date, created_by, labels)
+     VALUES ($1, $2, $3, coalesce($4::date, current_date), $5, $6::text[])
      RETURNING id, for_date::text AS for_date`,
-    [actor.tenantId, storeId, text, forDate ?? null, actor.userId],
+    [actor.tenantId, storeId, text, forDate ?? null, actor.userId, cleaned],
   );
   await record(db, actor, row.id, 'created');
   return { id: row.id, forDate: row.for_date };
+}
+
+/** その店で最近使われたラベル（よく使う順）。書くときの候補と、絞り込みの札に使う */
+export async function handoverLabels(db: Db, actor: Actor, storeId: string): Promise<string[]> {
+  assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗の引き継ぎは見られません');
+  await assertStore(db, storeId);
+  const rows = await db.query<{ label: string }>(
+    `SELECT label FROM handovers h, unnest(h.labels) AS label
+      WHERE h.store_id = $1 AND h.deleted_at IS NULL AND h.for_date >= current_date - $2::int
+      GROUP BY label ORDER BY count(*) DESC, max(h.created_at) DESC LIMIT 30`,
+    [storeId, LABEL_SUGGEST_DAYS],
+  );
+  return rows.map((r) => r.label);
 }
 
 async function load(db: Db, id: string) {

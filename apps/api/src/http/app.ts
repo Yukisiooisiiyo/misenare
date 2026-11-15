@@ -35,6 +35,7 @@ import {
   addHandover,
   deleteHandover,
   handoverBadge,
+  handoverLabels,
   handoverHistory,
   listHandovers,
   restoreHandover,
@@ -107,6 +108,8 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActorIn, type Authenticator, type Identity } from './auth.ts';
+import { addBookmark, listBookmarks, removeBookmark } from '../domain/bookmarks.ts';
+import { addMemo, deleteMemo, listMemos, updateMemo } from '../domain/memos.ts';
 import { handleOperator } from './operator.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
@@ -497,6 +500,17 @@ function routes(): Router<Ctx> {
   r.post('/notices/:noticeId/ack', async (c, _req, p) => json(await ackNotice(c.db, c.actor, p.noticeId!)));
   r.get('/notices/:noticeId/readers', async (c, _req, p) => json(await noticeReaders(c.db, c.actor, p.noticeId!)));
 
+  // --- ブックマーク（自分用の印。数は書いた本人にだけ見せる） ---------------------
+  r.get('/stores/:storeId/bookmarks', async (c, _req, p) => json(await listBookmarks(c.db, c.actor, p.storeId!)));
+  r.post('/knowledge/:id/bookmark', async (c, _req, p) => json(await addBookmark(c.db, c.actor, p.id!)));
+  r.delete('/knowledge/:id/bookmark', async (c, _req, p) => json(await removeBookmark(c.db, c.actor, p.id!)));
+
+  // --- 個人メモ（書いた本人だけが読める） ---------------------------------------
+  r.get('/memos', async (c) => json(await listMemos(c.db, c.actor)));
+  r.post('/memos', async (c, req) => json(await addMemo(c.db, c.actor, (await readJson<Record<string, unknown>>(req)) ?? {}), 201));
+  r.patch('/memos/:memoId', async (c, req, p) => json(await updateMemo(c.db, c.actor, p.memoId!, (await readJson<Record<string, unknown>>(req)) ?? {})));
+  r.delete('/memos/:memoId', async (c, _req, p) => json(await deleteMemo(c.db, c.actor, p.memoId!)));
+
   // --- 引き継ぎ -------------------------------------------------------------
   r.get('/stores/:storeId/handovers', async (c, req, p) => {
     const date = new URL(req.url).searchParams.get('date') ?? undefined;
@@ -507,8 +521,9 @@ function routes(): Router<Ctx> {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.body !== 'string') throw new HttpError(400, 'body（文字列）が必要です');
     if (b.forDate !== undefined && !isDateOnly(b.forDate)) throw new HttpError(400, 'forDate は YYYY-MM-DD の形の実在する日付にしてください');
-    return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined), 201);
+    return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined, b.labels), 201);
   });
+  r.get('/stores/:storeId/handover-labels', async (c, _req, p) => json({ labels: await handoverLabels(c.db, c.actor, p.storeId!) }));
   r.get('/stores/:storeId/handovers/history', async (c, req, p) => {
     const url = new URL(req.url);
     const scope = url.searchParams.get('scope') === 'all' ? 'all' : 'actions';
