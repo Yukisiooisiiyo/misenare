@@ -88,7 +88,7 @@ const ok = (name) => { passed += 1; console.log('ok -', name); };
     ['承認・管理', '#/manage', 'section.manage h1'],
   ]) {
     await page.evaluate(() => { location.hash = '#/home'; });
-    await page.waitForSelector('.search-launch');
+    await page.waitForSelector('.home-body');
     await page.evaluate((h) => { location.hash = h; }, hash);
     await page.evaluate(() => { location.hash = '#/search'; }); // 応答が来る前に別の画面へ
     await page.waitForSelector('#q');

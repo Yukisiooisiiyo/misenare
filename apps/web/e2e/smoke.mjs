@@ -35,7 +35,7 @@ const p = await phone();
 await p.goto(link('新人'));
 await p.waitForSelector('text=鈴木（新人）さん');
 await shot(p, '01-home');
-await p.click('a.search-launch');
+// 検索欄はホームにある（「探す」はホームに統合した）
 await p.fill('#q', '#冷');
 await p.waitForSelector('.suggest-item');
 await shot(p, '02-suggest-kana');
@@ -98,7 +98,8 @@ await shot(p, '10-scan-unknown');
 const m = await phone();
 await m.goto(link('店長'));
 await m.waitForSelector('text=佐藤店長さん');
-await m.click('text=承認・管理');
+await m.click('.tabbar a[href="#/settings"]');
+await m.click('a[href="#/manage"]');
 await m.waitForSelector('text=承認待ち（1件）');
 await shot(m, '11-manage');
 await m.click('text=公開する');
