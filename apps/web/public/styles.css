@@ -581,6 +581,9 @@ body.viewer-open { overflow: hidden; }
 .search-hint { display: none; margin: 8px 0 0; }
 .search-block:focus-within .search-hint, .search-block.searching .search-hint { display: block; }
 
+/* 上の帯の店舗名は、見出しと同じ明朝にそろえる（切り替えられるとき＝select も、1店舗だけのとき＝文字も） */
+.topbar .store-name, .topbar .store-select { font-family: var(--mincho); font-weight: 700; font-size: 18px; letter-spacing: 0.04em; }
+
 /* --- 太さがそろっていない枠 ---
    入力欄・ボタン・たたんだ欄の枠は、定規で引いた線にしない。手で引いたように、太さが少しずつ変わる。
    絵（SVG）を border-image で9つに切って伸ばす。色は絵の中に書くので、明るい画面用と暗い画面用を持つ。
