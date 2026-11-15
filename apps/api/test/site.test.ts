@@ -134,6 +134,13 @@ describe('紹介サイト（SITE_HOST）', () => {
     assert.equal((await at('tsugigami.example', '/..%2F..%2Fetc%2Fpasswd')).status, 404);
   });
 
+  it('サイトマップは XML として返す（検索エンジンが読む）', async () => {
+    await writeFile(join(siteDir, 'sitemap.xml'), '<?xml version="1.0"?><urlset/>');
+    const res = await at('tsugigami.example', '/sitemap.xml');
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /application\/xml/);
+  });
+
   it('SITE_HOST を決めなければ、何も変わらない', async () => {
     const res = await site(new Request('http://tsugigami.example/'));
     assert.equal(res.status, 302);
