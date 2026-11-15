@@ -134,8 +134,11 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
     for (const p of photos) {
       const img = h('img', { class: 'photo', alt: p.caption ?? `${p.createdBy ?? ''}さんが${relativeDate(p.createdAt)}に付けた写真`, loading: 'lazy' });
       void photoSrc(p).then(({ src, revoke }) => { img.src = src; revokers.push(revoke); }).catch(() => { img.alt = '写真を読み込めませんでした'; });
+      // 押すと大きく見られる（一覧では全体が見えるように縮めて出しているので、細かい字はここで読む）
+      const open = h('button', { type: 'button', class: 'photo-open', 'aria-label': '写真を大きく見る' }, img);
+      open.addEventListener('click', () => { if (img.src) openViewer(img.src, img.alt); });
       const figure = h('figure', { class: 'photo-item' },
-        img,
+        open,
         p.caption ? h('figcaption', {}, p.caption) : null,
         canEdit
           ? confirmAction('×', 'photo-remove', '消しますか？', async () => {
@@ -175,4 +178,145 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
   draw();
 
   return { el, dispose: () => { for (const r of revokers) r(); } };
+}
+
+// --- 大きく見る ---------------------------------------------------------------------
+
+const ZOOMS = [1, 2, 3.5];
+
+/**
+ * 写真を画面いっぱいに開く。拡大・縮小・回転ができる。拡大中は指でなぞって動かせる。
+ * 表や値札の細かい字を読むためのもの。回転は見るだけで、保存してある写真は変えない。
+ */
+export function openViewer(src: string, alt: string): void {
+  let zoom = 0;
+  let current = src;
+  let made: string | null = null; // 回したときに作った、この画面だけの URL
+  const img = h('img', { class: 'viewer-img', alt, src });
+  const stage = h('div', { class: 'viewer-stage' }, img);
+  const zoomLabel = h('span', { class: 'viewer-zoom', 'aria-live': 'polite' }, '');
+  const apply = () => {
+    const z = ZOOMS[zoom]!;
+    stage.classList.toggle('viewer-zoomed', z > 1);
+    img.style.width = z > 1 ? `${z * 100}%` : '';
+    zoomLabel.textContent = z > 1 ? `${z}倍` : '';
+    zoomIn.disabled = zoom === ZOOMS.length - 1;
+    zoomOut.disabled = zoom === 0;
+  };
+  /** 拡大するとき、見ていた場所（画面のまんなか）がずれないように、なぞる位置も同じ割合で動かす */
+  const setZoom = (next: number) => {
+    const before = ZOOMS[zoom]!;
+    const cx = (stage.scrollLeft + stage.clientWidth / 2) / Math.max(1, stage.scrollWidth);
+    const cy = (stage.scrollTop + stage.clientHeight / 2) / Math.max(1, stage.scrollHeight);
+    zoom = Math.max(0, Math.min(ZOOMS.length - 1, next));
+    apply();
+    if (ZOOMS[zoom]! > 1) {
+      const fx = before > 1 ? cx : 0.5;
+      const fy = before > 1 ? cy : 0.5;
+      requestAnimationFrame(() => {
+        stage.scrollLeft = fx * stage.scrollWidth - stage.clientWidth / 2;
+        stage.scrollTop = fy * stage.scrollHeight - stage.clientHeight / 2;
+      });
+    }
+  };
+  const rotate = async () => {
+    try {
+      const source = new Image();
+      source.src = current;
+      await source.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = source.naturalHeight;
+      canvas.height = source.naturalWidth;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(source, -source.naturalWidth / 2, -source.naturalHeight / 2);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+      if (!blob) return;
+      if (made) URL.revokeObjectURL(made);
+      made = URL.createObjectURL(blob);
+      current = made;
+      img.src = made;
+    } catch {
+      toast('回せませんでした');
+    }
+  };
+  const close = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+    document.body.classList.remove('viewer-open');
+    if (made) URL.revokeObjectURL(made);
+    previous?.focus();
+  };
+  const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+  const zoomIn = h('button', { type: 'button', class: 'viewer-button', onclick: () => setZoom(zoom + 1) }, '拡大');
+  const zoomOut = h('button', { type: 'button', class: 'viewer-button', onclick: () => setZoom(zoom - 1) }, '縮小');
+  const closeButton = h('button', { type: 'button', class: 'viewer-button viewer-close', onclick: () => close() }, '閉じる');
+  const overlay = h('div', { class: 'viewer', role: 'dialog', 'aria-modal': 'true', 'aria-label': '写真を大きく見る' },
+    h('div', { class: 'viewer-bar' },
+      zoomOut, zoomIn, zoomLabel,
+      h('button', { type: 'button', class: 'viewer-button', onclick: () => void rotate() }, '回す'),
+      closeButton),
+    stage);
+  // 2回続けて押すと、拡大と元の大きさを行き来する
+  let lastTap = 0;
+  img.addEventListener('click', () => {
+    const now = Date.now();
+    if (now - lastTap < 320) setZoom(zoom === 0 ? 1 : 0);
+    lastTap = now;
+  });
+  const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  document.addEventListener('keydown', onKey);
+  document.body.classList.add('viewer-open');
+  document.body.append(overlay);
+  apply();
+  closeButton.focus();
+}
+
+// --- 書きながら選んでおく ------------------------------------------------------------
+
+/**
+ * 書く画面に置く、写真の選び口。ここでは送らない（まだ送り先のナレッジが無い）。
+ * 選んだものを覚えておき、保存できたあとに呼び出し側が uploadPhoto で送る。
+ */
+export function photoPicker(): { el: HTMLElement; files: () => File[]; dispose: () => void } {
+  const chosen: Array<{ file: File; url: string }> = [];
+  const grid = h('div', { class: 'photos' });
+  const cameraFile = h('input', { type: 'file', accept: 'image/*', capture: 'environment', id: 'pick-camera', hidden: true });
+  const libraryFile = h('input', { type: 'file', accept: 'image/*', id: 'pick-library', hidden: true, multiple: true });
+  const cameraButton = h('button', { type: 'button', class: 'secondary' }, '写真を撮る');
+  const libraryButton = h('button', { type: 'button', class: 'secondary' }, 'アルバムから選ぶ');
+  cameraButton.addEventListener('click', () => cameraFile.click());
+  libraryButton.addEventListener('click', () => libraryFile.click());
+  const draw = () => {
+    while (grid.firstChild) grid.firstChild.remove();
+    for (const c of chosen) {
+      const img = h('img', { class: 'photo', alt: `これから付ける写真（${c.file.name}）`, src: c.url });
+      const open = h('button', { type: 'button', class: 'photo-open', 'aria-label': '写真を大きく見る', onclick: () => openViewer(c.url, img.alt) }, img);
+      grid.append(h('figure', { class: 'photo-item' }, open,
+        h('button', { type: 'button', class: 'photo-remove', 'aria-label': 'この写真をやめる', onclick: () => {
+          chosen.splice(chosen.indexOf(c), 1);
+          URL.revokeObjectURL(c.url);
+          draw();
+        } }, '×')));
+    }
+    if (chosen.length < MAX_PHOTOS) grid.append(h('div', { class: 'photo-add' }, cameraButton, libraryButton, cameraFile, libraryFile));
+  };
+  const onChosen = (input: HTMLInputElement) => {
+    const picked = [...(input.files ?? [])];
+    input.value = '';
+    const room = MAX_PHOTOS - chosen.length;
+    if (picked.length > room) toast(`写真は1件につき${MAX_PHOTOS}枚までです`);
+    for (const file of picked.slice(0, room)) chosen.push({ file, url: URL.createObjectURL(file) });
+    draw();
+  };
+  cameraFile.addEventListener('change', () => onChosen(cameraFile));
+  libraryFile.addEventListener('change', () => onChosen(libraryFile));
+  draw();
+  return {
+    el: h('section', { class: 'photo-section' }, grid),
+    files: () => chosen.map((c) => c.file),
+    dispose: () => { for (const c of chosen) URL.revokeObjectURL(c.url); },
+  };
 }

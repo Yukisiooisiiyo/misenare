@@ -8,7 +8,7 @@ import { accessRequestPanel, action, askReadings, confirmAction, countedList, ex
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { decodeImage } from './ean.ts';
 import { renderMemos } from './memo.ts';
-import { photoSection } from './photos.ts';
+import { photoPicker, photoSection, uploadPhoto } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
 
@@ -960,7 +960,19 @@ function renderWrite(existing: Knowledge | null): void {
         ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
         : await api<Saved>('POST', `/stores/${storeId()}/knowledge`, payload);
       writeDraft(draftKey, null);
-      toast(r.published ? '公開しました' : '承認を依頼しました');
+      // 一緒に選んでおいた写真を送る。メモはもう保存できているので、写真で失敗しても先へ進む
+      // （開いた画面から足し直せる）
+      const files = picker.files();
+      let failed = 0;
+      for (const [i, f] of files.entries()) {
+        message.textContent = `写真を送っています（${i + 1}/${files.length}）…`;
+        message.hidden = false;
+        try { await uploadPhoto(r.id, f); } catch { failed += 1; }
+      }
+      message.hidden = true;
+      toast(failed > 0
+        ? `${r.published ? '公開しました' : '承認を依頼しました'}。写真が${failed}枚送れませんでした（開いた画面から足せます）`
+        : r.published ? '公開しました' : '承認を依頼しました');
       await loadDictionary();
       const goOn = async () => { await loadDictionary(); location.hash = `#/k/${r.id}`; };
       // 新しいタグができたら、その場で読みを尋ねる。一番よく知っているのは、いま打った人。
@@ -976,6 +988,8 @@ function renderWrite(existing: Knowledge | null): void {
   };
 
   drawTags();
+  // 写真は、書きながら選んでおける。送るのは保存のあと（保存してはじめて、付ける先ができる）
+  const picker = photoPicker();
   const form = h('form', { class: 'page write' },
     existing ? null : writeSwitch('shared'),
     h('h1', {}, existing ? '共有メモを編集' : '共有メモを書く'),
@@ -983,6 +997,8 @@ function renderWrite(existing: Knowledge | null): void {
     draft ? h('p', { class: 'hint' }, '書きかけを戻しました') : null,
     h('label', { for: 'title' }, 'タイトル'), title,
     h('label', { for: 'body' }, '内容'), body,
+    h('span', { class: 'label-like' }, existing ? '写真を足す' : '写真'),
+    picker.el,
     h('label', { for: 'tag' }, 'ハッシュタグ'),
     tagList, tagField, suggest, proposals,
     message,
@@ -992,6 +1008,7 @@ function renderWrite(existing: Knowledge | null): void {
   // 送信中は押し直せないようにする。連打で同じナレッジが2件公開されるのを防ぐ
   submitOnce(form, submit);
   shell('write', form);
+  disposeView = picker.dispose;
   drawProposals();
   (existing ? body : title).focus();
 }
