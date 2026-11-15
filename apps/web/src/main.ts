@@ -990,6 +990,12 @@ function renderWrite(existing: Knowledge | null): void {
   drawTags();
   // 写真は、書きながら選んでおける。送るのは保存のあと（保存してはじめて、付ける先ができる）
   const picker = photoPicker();
+  // 編集のときは、いま付いている写真も並べる。**写真を消せるのはこの画面だけ**
+  // （読む画面に×を置くと、見ているだけのときに押してしまう）
+  const canAttach = existing
+    ? (existing.storeId === null ? me?.adminScope === 'tenant' : isTrusted() || existing.pendingEdits.some((p) => p.mine))
+    : false;
+  const current = existing ? photoSection(existing.id, canAttach, { allowDelete: true }) : null;
   const form = h('form', { class: 'page write' },
     existing ? null : writeSwitch('shared'),
     h('h1', {}, existing ? '共有メモを編集' : '共有メモを書く'),
@@ -997,8 +1003,10 @@ function renderWrite(existing: Knowledge | null): void {
     draft ? h('p', { class: 'hint' }, '書きかけを戻しました') : null,
     h('label', { for: 'title' }, 'タイトル'), title,
     h('label', { for: 'body' }, '内容'), body,
-    h('span', { class: 'label-like' }, existing ? '写真を足す' : '写真'),
-    picker.el,
+    h('span', { class: 'label-like' }, '写真'),
+    current ? current.el : picker.el,
+    current && !canAttach ? picker.el : null,
+    current && canAttach ? h('p', { class: 'hint' }, '写真の追加と削除は、保存を待たずにすぐ反映されます。') : null,
     h('label', { for: 'tag' }, 'ハッシュタグ'),
     tagList, tagField, suggest, proposals,
     message,
@@ -1008,7 +1016,7 @@ function renderWrite(existing: Knowledge | null): void {
   // 送信中は押し直せないようにする。連打で同じナレッジが2件公開されるのを防ぐ
   submitOnce(form, submit);
   shell('write', form);
-  disposeView = picker.dispose;
+  disposeView = () => { picker.dispose(); current?.dispose(); };
   drawProposals();
   (existing ? body : title).focus();
 }
