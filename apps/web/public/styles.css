@@ -575,6 +575,12 @@ body.viewer-open { overflow: hidden; }
 .viewer-zoomed { display: block; }
 .viewer-zoomed .viewer-img { max-width: none; max-height: none; height: auto; }
 
+/* --- ホームの検索：欄は幅いっぱい、その下に「または [バーコードで商品を調べる]」 --- */
+.search-block { margin-bottom: 6px; }
+.search-or { display: flex; align-items: center; gap: 12px; margin: 12px 0 0; color: var(--ink-soft); font-size: 15px; }
+.search-hint { display: none; margin: 8px 0 0; }
+.search-block:focus-within .search-hint, .search-block.searching .search-hint { display: block; }
+
 /* --- 太さがそろっていない枠 ---
    入力欄・ボタン・たたんだ欄の枠は、定規で引いた線にしない。手で引いたように、太さが少しずつ変わる。
    絵（SVG）を border-image で9つに切って伸ばす。色は絵の中に書くので、明るい画面用と暗い画面用を持つ。

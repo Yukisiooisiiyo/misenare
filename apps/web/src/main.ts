@@ -481,8 +481,8 @@ async function renderHome(initial: string): Promise<void> {
   const bookmarks = h('div', { class: 'home-bookmarks' });
   const homeStore = storeId();
   const greeting = h('h1', {}, `${me!.name}さん`);
+  const scanRow = h('p', { class: 'search-or' }, h('span', {}, 'または'), h('a', { href: '#/scan', class: 'secondary' }, 'バーコードで商品を調べる'));
   const homeBody = h('div', { class: 'home-body' },
-    h('a', { href: '#/scan', class: 'secondary block' }, 'バーコードで商品を調べる'),
     tags.length > 0 ? h('h2', {}, 'よく使われるタグ') : null,
     tags.length > 0 ? h('div', { class: 'tag-row' }, ...tags.map((t) => tagChip(t.name, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t.name)}`; } }))) : null,
     bookmarks,
@@ -494,6 +494,8 @@ async function renderHome(initial: string): Promise<void> {
   const showHome = (on: boolean) => {
     greeting.hidden = !on;
     homeBody.hidden = !on;
+    scanRow.hidden = !on;
+    scanRow.parentElement?.classList.toggle('searching', !on);
     alert.hidden = !on || !alertFilled;
   };
 
@@ -580,8 +582,13 @@ async function renderHome(initial: string): Promise<void> {
   shell('home', h('section', { class: 'page' },
     greeting,
     alert,
-    h('div', { class: 'search-bar' }, input, h('a', { href: '#/scan', class: 'icon-button', 'aria-label': 'バーコードで調べる' }, 'JAN')),
-    h('p', { class: 'hint' }, 'ひらがな・ローマ字でも候補が出ます（てれび／terebi → #テレビ）'),
+    // 検索欄は幅いっぱい。その下に「または」と、バーコードで調べる入口を並べる
+    // （JAN の小さなボタンは、行き先が同じなのでやめた）
+    h('div', { class: 'search-block' },
+      h('div', { class: 'search-bar' }, input),
+      // 打ち方の手がかりは、欄に入っているあいだ・探しているあいだだけ出す
+      h('p', { class: 'hint search-hint' }, 'ひらがな・ローマ字でも候補が出ます（てれび／terebi → #テレビ）'),
+      scanRow),
     suggest,
     results,
     homeBody,
