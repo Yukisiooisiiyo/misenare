@@ -126,7 +126,7 @@ export function renderMemos(container: HTMLElement): void {
   });
 
   container.append(
-    h('h1', {}, 'メモ'),
+    h('h1', {}, '個人メモ'),
     h('p', { class: 'hint' }, 'あなただけが見られるメモです。店長や本部、ほかのスタッフには見えません。'),
     form,
     lists);

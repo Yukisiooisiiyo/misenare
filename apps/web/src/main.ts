@@ -342,7 +342,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
 
 // --- 画面の枠 -------------------------------------------------------------------
 
-type Tab = 'home' | 'notices' | 'write' | 'memo' | 'settings';
+type Tab = 'home' | 'notices' | 'write' | 'settings';
 
 /** 前の画面が抱えている後始末（写真の表示用URLの解放など） */
 let disposeView: (() => void) | null = null;
@@ -371,7 +371,6 @@ function shell(tab: Tab | null, ...content: Node[]): void {
     navLink('#/home', 'ホーム', tab === 'home'),
     navLink('#/notices', '連絡', tab === 'notices', badgeCount()),
     navLink('#/write', '書く', tab === 'write'),
-    navLink('#/memo', 'メモ', tab === 'memo'),
     // 承認・管理と、この端末の設定への入口。利用の申請の数は、どの画面にいても目に入るようにここに出す
     navLink('#/settings', '設定', tab === 'settings', manageCount()),
   ) : null;
@@ -460,7 +459,8 @@ function route(): void {
   // 「探す」はホームに統合した。前からある #/search?q=… の行き先も、同じ画面で受ける
   if (path === '/search') return void renderHome(params.get('q') ?? '');
   if (path === '/settings') return renderSettings();
-  if (path === '/write') return renderWrite(null);
+  // 「書く」は2つ：みんなと共有するメモ（＝ナレッジ）と、自分だけの個人メモ。#/memo は前の行き先
+  if (path === '/write') return params.get('kind') === 'personal' ? renderMemoTab() : renderWrite(null);
   if (edit) return void loadAndEdit(edit[1]!, stale);
   if (k) return void renderKnowledge(k[1]!, stale);
   if (path === '/scan') return renderScan(params.get('jan') ?? '', stale);
@@ -660,11 +660,24 @@ function renderNoticesTab(): void {
   });
 }
 
-// --- メモ -------------------------------------------------------------------------
+// --- 書く：共有メモと個人メモの切り替え ---------------------------------------------
+
+/**
+ * 「書く」の上に出す切り替え。
+ *   共有メモ … 店のみんなと共有する。承認を経てナレッジになり、検索に出る
+ *   個人メモ … 自分だけが見られる
+ */
+function writeSwitch(current: 'shared' | 'personal'): HTMLElement {
+  const item = (kind: 'shared' | 'personal', href: string, label: string) =>
+    h('a', { href, class: `seg${current === kind ? ' seg-on' : ''}`, ...(current === kind ? { 'aria-current': 'page' } : {}) }, label);
+  return h('nav', { class: 'seg-row', 'aria-label': '書くものの種類' },
+    item('shared', '#/write', '共有メモ'),
+    item('personal', '#/write?kind=personal', '個人メモ'));
+}
 
 function renderMemoTab(): void {
-  const section = h('section', { class: 'page' });
-  shell('memo', section);
+  const section = h('section', { class: 'page' }, writeSwitch('personal'));
+  shell('write', section);
   renderMemos(section);
 }
 
@@ -676,7 +689,7 @@ function renderResults(container: HTMLElement, r: SearchResult, q: string, addTa
     container.append(h('div', { class: 'empty' },
       h('p', {}, `「${q}」に当てはまるナレッジはまだありません。`),
       h('p', {}, '近くの社員に聞いて、教わった内容を残しておくと次の人が助かります。'),
-      h('a', { href: '#/write', class: 'primary block' }, 'ナレッジを書く')));
+      h('a', { href: '#/write', class: 'primary block' }, '共有メモを書く')));
     return;
   }
   if (r.chips.length > 0) {
@@ -964,7 +977,9 @@ function renderWrite(existing: Knowledge | null): void {
 
   drawTags();
   const form = h('form', { class: 'page write' },
-    h('h1', {}, existing ? 'ナレッジを編集' : 'ナレッジを書く'),
+    existing ? null : writeSwitch('shared'),
+    h('h1', {}, existing ? '共有メモを編集' : '共有メモを書く'),
+    existing ? null : h('p', { class: 'hint' }, '店のみんなと共有するメモです。ナレッジとして、検索に出るようになります。'),
     draft ? h('p', { class: 'hint' }, '書きかけを戻しました') : null,
     h('label', { for: 'title' }, 'タイトル'), title,
     h('label', { for: 'body' }, '内容'), body,

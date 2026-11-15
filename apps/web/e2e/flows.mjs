@@ -139,6 +139,8 @@ for (const [role, label] of [['新人', '新人'], ['店長', '店長']]) {
   await p.fill('#body', 'マンションの冷凍冷蔵庫の搬入は、窓からの吊り上げになることがある。配送センターに相談する。');
   await p.waitForSelector('.proposals .tag').catch(() => {});
   await collect(p, `${role} 07 書く`);
+  await to(p, '#/write?kind=personal', '#memo-body');
+  await collect(p, `${role} 07 書く 個人メモ`);
   await to(p, '#/scan', '#jan');
   await collect(p, `${role} 08 バーコード`);
   await p.fill('#jan', line('冷蔵庫のJAN'));

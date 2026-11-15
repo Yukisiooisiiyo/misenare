@@ -540,3 +540,8 @@ button.tag { cursor: pointer; }
 .settings-link { display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 6px 2px; text-decoration: none; }
 .settings-title { display: inline-flex; align-items: center; gap: 8px; font-size: 17px; font-weight: 700; color: var(--sign); }
 .settings-link .hint { font-weight: 400; }
+
+/* --- 「書く」の切り替え（共有メモ／個人メモ） --- */
+.seg-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0; margin: 0 0 18px; border: 1.5px solid var(--sign); border-radius: 4px; overflow: hidden; }
+.seg { display: flex; align-items: center; justify-content: center; min-height: 44px; font-weight: 700; text-decoration: none; color: var(--sign); background: var(--surface); }
+.seg-on { background: var(--sign); color: var(--surface); }
