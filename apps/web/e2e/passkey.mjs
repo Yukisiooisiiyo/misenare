@@ -57,7 +57,8 @@ await page.goto(link('新人'));
 await page.waitForSelector('text=鈴木（新人）さん');
 ok('招待リンクで入れた');
 
-await page.click('.home-foot a');
+await page.click('.tabbar a[href="#/settings"]');
+await page.click('a[href="#/device"]');
 await page.waitForSelector('h1:text("この端末の設定")');
 await shot('01-device');
 
