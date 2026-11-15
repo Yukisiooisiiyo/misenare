@@ -105,9 +105,12 @@ export async function photoSrc(photo: Photo): Promise<{ src: string; revoke: () 
 
 /**
  * ナレッジの写真の一覧と追加。
- * canEdit が false なら見るだけ。戻り値の dispose は画面を離れるときに呼ぶ。
+ * canEdit が false なら見るだけ。写真を消せるのは allowDelete を渡したとき（編集画面）だけ。
+ * 戻り値の dispose は画面を離れるときに呼ぶ。
  */
-export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLElement; dispose: () => void } {
+export function photoSection(knowledgeId: string, canEdit: boolean, options: { allowDelete?: boolean } = {}): { el: HTMLElement; dispose: () => void } {
+  // 消す×は、編集画面でだけ出す。読んでいるだけのときに、指が当たって写真を消してしまわないように
+  const canDelete = canEdit && options.allowDelete === true;
   const grid = h('div', { class: 'photos' });
   const status = h('p', { class: 'hint', hidden: true });
   const el = h('section', { class: 'photo-section' }, grid, status);
@@ -140,7 +143,7 @@ export function photoSection(knowledgeId: string, canEdit: boolean): { el: HTMLE
       const figure = h('figure', { class: 'photo-item' },
         open,
         p.caption ? h('figcaption', {}, p.caption) : null,
-        canEdit
+        canDelete
           ? confirmAction('×', 'photo-remove', '消しますか？', async () => {
               await api('DELETE', `/photos/${p.id}`);
               photos = photos.filter((x) => x.id !== p.id);
