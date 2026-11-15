@@ -4,7 +4,7 @@
 import { api, ApiError, fetchDictionary, onUnauthorized, session, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { accessRequestPanel, action, askReadings, confirmAction, countedList, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
+import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { decodeImage } from './ean.ts';
 import { renderMemos } from './memo.ts';
@@ -1243,6 +1243,8 @@ async function renderManage(stale: () => boolean): Promise<void> {
   staleList.apply(c);
   section.append(pendingList.box, zeroList.box, staleList.box);
   section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
+  // 書き出しは会社全体のデータなので、本部（会社全体の管理者）にだけ出す
+  if (me!.adminScope === 'tenant') section.append(exportPanel());
   if (isAdmin()) {
     section.append(
       accessRequestPanel(me!.stores, storeId(), () => { void refreshBadges().then(updateManageCount); }),

@@ -1,6 +1,6 @@
 // 承認・管理の画面の部品：タグ辞書、商品の承認待ち、スタッフ。
 
-import { api, ApiError } from './api.ts';
+import { api, ApiError, session } from './api.ts';
 import { clear, h, relativeDate, submitOnce, tagChip, tagLabel, toast } from './dom.ts';
 
 /**
@@ -749,5 +749,51 @@ export function ssoPanel(stores: Array<{ id: string; name: string }>): HTMLEleme
       problem,
     );
     await refresh();
+  });
+}
+
+// --- データの書き出し（本部） ---------------------------------------------------------
+
+/**
+ * 本部が持ち帰って分析するための書き出し。CSV は Excel でそのまま開ける。JSON はプログラムから読む用。
+ * ログインの印を付けて取り、端末に保存する（リンクを開くだけでは印が付かないので、取ってから渡す）。
+ */
+export function exportPanel(): HTMLElement {
+  return panel('データの書き出し（本部）', async (body) => {
+    const download = async (kind: string, format: 'csv' | 'json'): Promise<void> => {
+      const headers: Record<string, string> = {};
+      if (session.token) headers.authorization = `Bearer ${session.token}`;
+      let res: Response;
+      try {
+        res = await fetch(`/api/exports/${kind}?format=${format}`, { headers });
+      } catch {
+        throw new Error('通信できませんでした。電波の届く場所で、もう一度お試しください。');
+      }
+      if (!res.ok) {
+        let message = `書き出せませんでした（${res.status}）`;
+        try { message = ((await res.json()) as { message?: string }).message ?? message; } catch { /* 本文なし */ }
+        throw new Error(message);
+      }
+      const named = /filename\*=UTF-8''([^;]+)/.exec(res.headers.get('content-disposition') ?? '');
+      const name = named ? decodeURIComponent(named[1]!) : `${kind}.${format}`;
+      const url = URL.createObjectURL(await res.blob());
+      const a = h('a', { href: url, download: name, hidden: true });
+      document.body.append(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      toast(`${name} を保存しました`);
+    };
+    const row = (kind: string, title: string, note: string) => h('li', { class: 'row' },
+      h('span', { class: 'grow' }, h('b', {}, title), h('span', { class: 'hint export-note' }, note)),
+      h('span', { class: 'row-actions' },
+        action('CSV', 'secondary small', () => download(kind, 'csv')),
+        action('JSON', 'secondary small', () => download(kind, 'json'))));
+    body.append(
+      h('p', { class: 'hint' }, '会社全体（すべての店舗）のデータです。CSV は Excel でそのまま開けます。JSON はプログラムで読むときに使います。'),
+      h('ul', { class: 'rows' },
+        row('knowledge', 'ナレッジ', '公開中のもの。タイトル・本文・タグ・書いた人・更新日・検索から開かれた回数'),
+        row('searches', '検索の記録', '直近180日。探した言葉・見つかった件数・開いたナレッジ（だれが探したかは入りません）'),
+        row('tags', 'タグ', 'タグごとの、付いているナレッジの数と探された回数')));
   });
 }

@@ -108,7 +108,9 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { resolveTxt as dnsResolveTxt } from 'node:dns/promises';
 import { storageFromEnv, type Storage } from '../storage/storage.ts';
 import { loadActorIn, type Authenticator, type Identity } from './auth.ts';
+import { appTimeZone, todayIn } from '../config.ts';
 import { addBookmark, listBookmarks, removeBookmark } from '../domain/bookmarks.ts';
+import { EXPORT_KINDS, exportTable, toCsv, toJson, type ExportKind } from '../domain/exports.ts';
 import { addMemo, deleteMemo, listMemos, updateMemo } from '../domain/memos.ts';
 import { handleOperator } from './operator.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
@@ -132,7 +134,7 @@ interface Ctx {
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const NON_UUID_PARAMS = new Set(['jan', 'version', 'logId']);
+const NON_UUID_PARAMS = new Set(['jan', 'version', 'logId', 'kind']);
 const MAX_DEVICE_NAME = 60;
 /** 1件に付けられるタグの数。タグごとに辞書の行と読みの候補が増えるので、件数で止める */
 const MAX_TAGS = 20;
@@ -499,6 +501,27 @@ function routes(): Router<Ctx> {
   r.post('/notices/:noticeId/read', async (c, _req, p) => json(await markRead(c.db, c.actor, p.noticeId!)));
   r.post('/notices/:noticeId/ack', async (c, _req, p) => json(await ackNotice(c.db, c.actor, p.noticeId!)));
   r.get('/notices/:noticeId/readers', async (c, _req, p) => json(await noticeReaders(c.db, c.actor, p.noticeId!)));
+
+  // --- 書き出し（本部が持ち帰って分析する。CSV か JSON） -------------------------
+  r.get('/exports/:kind', async (c, req, p) => {
+    await heavy(c);
+    const kind = p.kind as ExportKind;
+    if (!EXPORT_KINDS.includes(kind)) throw new HttpError(404, '書き出せるのは knowledge・searches・tags です');
+    const params = new URL(req.url).searchParams;
+    const format = params.get('format') ?? 'csv';
+    if (format !== 'csv' && format !== 'json') throw new HttpError(400, 'format は csv か json です');
+    const days = params.get('days');
+    const table = await exportTable(c.db, c.actor, kind, days === null ? undefined : Number(days));
+    const stamp = todayIn(appTimeZone());
+    const fileName = `${table.name}_${stamp}.${format}`;
+    return new Response(format === 'csv' ? toCsv(table) : toJson(table), {
+      headers: {
+        'content-type': format === 'csv' ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8',
+        // 日本語の名前は filename* で渡す（古い読み手のために、ASCII の名前も添える）
+        'content-disposition': `attachment; filename="${kind}_${stamp}.${format}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+      },
+    });
+  });
 
   // --- ブックマーク（自分用の印。数は書いた本人にだけ見せる） ---------------------
   r.get('/stores/:storeId/bookmarks', async (c, _req, p) => json(await listBookmarks(c.db, c.actor, p.storeId!)));
