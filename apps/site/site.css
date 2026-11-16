@@ -235,6 +235,13 @@
   .pill{border:2px solid var(--sumi);border-image:var(--fr-sumi) 16 stretch;border-radius:0}
   .cform input,.cform textarea{border:2px solid rgba(255,255,255,.28);border-image:var(--fr-field) 16 stretch}
   .aud{border:2px solid var(--line);border-image:var(--fr-line) 16 stretch}
+  /* 料金：一律なので表にしない。金額を1つ、大きく */
+  .price{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 28px;margin-top:34px;padding:28px 30px;background:var(--paper);border:2px solid var(--line);border-image:var(--fr-line) 16 stretch}
+  .price-l{display:flex;flex-direction:column;gap:6px}
+  .price-l b{font-family:"Shippori Mincho B1",serif;font-weight:600;font-size:17px;color:var(--sumi)}
+  .price-l span{font-size:14px;color:var(--muted)}
+  .price-amt{font-family:"Shippori Mincho B1",serif;font-weight:700;font-size:20px;color:var(--sumi);white-space:nowrap}
+  .price-amt .num{font-size:clamp(40px,9vw,56px);letter-spacing:.01em;margin-right:4px}
   /* 表は、マスの線を1本ずつ描けるように、線を重ねない形にする */
   .ptable{border-collapse:separate;border-spacing:0;border:2px solid var(--line);border-image:var(--fr-line) 16 stretch}
   .ptable th,.ptable td{border-bottom:2px solid var(--line);border-image:var(--hl-line) 8 0 stretch}
