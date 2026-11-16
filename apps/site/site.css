@@ -188,3 +188,20 @@
   .cstatus.ok{color:#BFE0A8}
   .cstatus.ng{color:#F2B8A2}
   a:focus-visible,button:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+
+  /* --- 実際の画面 --- スマホでは横に送る帯、広い画面では3列。枠は電話機の形をまねず、角を丸めた紙1枚にする */
+  .shots{display:flex;gap:22px;margin:40px -26px 0;padding:6px 26px 18px;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
+  .shots:focus-visible{outline:2px solid var(--gold-deep);outline-offset:4px}
+  .shot{flex:0 0 min(68vw,270px);margin:0;scroll-snap-align:center;display:flex;flex-direction:column;gap:16px}
+  .phone{border-radius:22px;overflow:hidden;border:1.5px solid #131D38;background:#131D38;box-shadow:0 14px 30px -18px rgba(19,29,56,.55)}
+  .phone img{display:block;width:100%;height:auto;aspect-ratio:1/2}
+  .shot figcaption{display:flex;flex-direction:column;gap:6px}
+  .shot-k{font-family:"Shippori Mincho B1",serif;font-weight:600;font-size:12px;letter-spacing:.2em;color:var(--gold-deep)}
+  .shot figcaption b{font-family:"Shippori Mincho B1",serif;font-weight:700;font-size:18px;line-height:1.55;color:var(--sumi)}
+  .shot-d{font-size:14px;line-height:1.85;color:var(--sumi);opacity:.82}
+  .shots-note{margin-top:8px;font-size:12.5px;opacity:.6}
+  @media (min-width:900px){
+    .shots{display:grid;grid-template-columns:repeat(3,1fr);gap:48px 40px;margin:48px 0 0;padding:0;overflow:visible}
+    .shot{flex:none}
+    .phone{max-width:270px}
+  }
