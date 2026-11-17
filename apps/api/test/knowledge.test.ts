@@ -128,10 +128,18 @@ describe('編集と版', () => {
   });
 
   it('visitor は期限を使って、承認なしに公開中のナレッジを隠せない', async () => {
-    await run((q) => editKnowledge(q, tokenizer, visitor, id, {
+    // 過ぎた期限は、出すときに断る（どのみち承認できない案を、承認待ちに積まない）
+    await rejects(run((q) => editKnowledge(q, tokenizer, visitor, id, {
       title: '搬入の確認事項', body: '最新の内容', tagNames: ['#搬入'], expiresAt: '2000-01-01T00:00:00Z',
+    })), 'invalid');
+    // 先の期限を付けた案を出し、承認されないまま、その期限が過ぎたとする
+    const r = await run((q) => editKnowledge(q, tokenizer, visitor, id, {
+      title: '搬入の確認事項', body: '最新の内容', tagNames: ['#搬入'], expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     }));
+    await run((q) => q.query(`UPDATE knowledge_versions SET expires_at = now() - interval '1 minute' WHERE knowledge_id = $1 AND version = $2`, [id, r.version]));
+    // 案の期限は、承認されるまで効かない。公開中のナレッジは検索に出たまま
     assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#搬入'))), [id]);
+    assert.equal((await run((q) => getKnowledge(q, trusted, id))).expiresAt, null);
   });
 
   // 承認待ちは**全員に見せる**。隠すと、同じところを2人が別々に直して、
@@ -367,5 +375,131 @@ describe('ナレッジを消す', () => {
 
     await run((q) => deleteKnowledge(q, storage, hq, all.id));
     await gone(all.id);
+  });
+});
+
+describe('有効期限・期限切れ・戻せる版・自分の投稿', () => {
+  const tomorrow = () => new Date(Date.now() + 24 * 3600_000).toISOString();
+  /** 夜間バッチが期限切れにしたのと同じ状態にする */
+  const expire = (id: string) => run((q) => q.query(`UPDATE knowledge SET status = 'expired', expires_at = now() - interval '1 hour' WHERE id = $1`, [id]));
+
+  it('有効期限を付けて出せ、詳細に出る。過ぎた期限では出せない', async () => {
+    await rejects(run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '歳末セール', body: '本文', tagNames: ['#セール'], expiresAt: '2000-01-01T00:00:00Z' })), 'invalid');
+    const until = tomorrow();
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '歳末セール', body: '本文', tagNames: ['#セール'], expiresAt: until }));
+    const view = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.equal(Date.parse(view.expiresAt!.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')), Date.parse(until));
+    // 期限を送らずに直すと、いまの期限を引き継ぐ。null を送ると、期限なしになる
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '歳末セール', body: '直した', tagNames: ['#セール'] }));
+    assert.ok((await run((q) => getKnowledge(q, visitor, k.id))).expiresAt);
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '歳末セール', body: '直した', tagNames: ['#セール'], expiresAt: null }));
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).expiresAt, null);
+    // まだ公開されていない投稿は、その案に付けた期限が出る
+    const draft = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '下書きの期限', body: '本文', tagNames: ['#セール'], expiresAt: until }));
+    assert.ok((await run((q) => getKnowledge(q, visitor, draft.id))).expiresAt);
+    await run((q) => deleteKnowledge(q, new LocalStorage('/tmp/unused'), manager, draft.id));
+  });
+
+  it('期限が切れたものは、承認できる人の一覧に出る。期限を直すと、もう一度公開される', async () => {
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '夏の催事', body: '本文', tagNames: ['#催事'], expiresAt: tomorrow() }));
+    await expire(k.id);
+    const { listExpired } = await import('../src/domain/knowledge.ts');
+    const list = await run((q) => listExpired(q, trusted, STORE_A));
+    assert.deepEqual(list.map((x) => [x.id, x.title, x.all_stores]), [[k.id, '夏の催事', false]]);
+    await rejects(run((q) => listExpired(q, visitor, STORE_A)), 'forbidden');
+    assert.deepEqual(await run((q) => listExpired(q, storeBStaff, STORE_B)), [], '他店には出ない');
+
+    // 詳細：承認できる人と書いた本人には見える。「承認待ち」とは言わない。ほかの人には、期限切れだと伝える
+    const view = await run((q) => getKnowledge(q, manager, k.id));
+    assert.equal(view.status, 'expired');
+    assert.equal(view.draftState, undefined);
+    await assert.rejects(run((q) => getKnowledge(q, visitor, k.id)), /有効期限が過ぎた/);
+
+    // 期限を直さずに保存しようとすると断る（そのまま公開しても、その晩にまた消える）
+    await assert.rejects(run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '夏の催事', body: '本文', tagNames: ['#催事'] })), /有効期限が過ぎています/);
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '夏の催事', body: '本文', tagNames: ['#催事'], expiresAt: tomorrow() }));
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).status, 'published');
+    assert.ok(ids(await run((q) => search(q, tokenizer, visitor, STORE_A, '#催事'))).includes(k.id));
+    assert.deepEqual(await run((q) => listExpired(q, trusted, STORE_A)), []);
+  });
+
+  it('全店共通の期限切れ・見直しは、本部にだけ出る', async () => {
+    const { listExpired, listStale } = await import('../src/domain/knowledge.ts');
+    const k = await run((q) => createKnowledge(q, tokenizer, hq, { storeId: null, title: '全店の催事', body: '本文', tagNames: ['#催事'], expiresAt: tomorrow() }));
+    await expire(k.id);
+    assert.deepEqual((await run((q) => listExpired(q, hq, STORE_A))).map((x) => [x.id, x.all_stores]), [[k.id, true]]);
+    assert.deepEqual(await run((q) => listExpired(q, manager, STORE_A)), []);
+    // 見直しの一覧も同じ：全店共通で古くなったものは、本部にだけ
+    const old = await run((q) => createKnowledge(q, tokenizer, hq, { storeId: null, title: '全店の古い手順', body: '本文', tagNames: ['#手順'] }));
+    await run((q) => q.query(`UPDATE knowledge SET verified_at = now() - interval '400 days' WHERE id = $1`, [old.id]));
+    await run((q) => q.query(`UPDATE knowledge_versions SET edited_at = now() - interval '400 days' WHERE knowledge_id = $1`, [old.id]));
+    assert.ok((await run((q) => listStale(q, hq, STORE_A))).some((x) => x.id === old.id && x.all_stores));
+    assert.ok(!(await run((q) => listStale(q, manager, STORE_A))).some((x) => x.id === old.id));
+    await run((q) => deleteKnowledge(q, new LocalStorage('/tmp/unused'), hq, k.id));
+    await run((q) => deleteKnowledge(q, new LocalStorage('/tmp/unused'), hq, old.id));
+  });
+
+  it('版の一覧に「戻せるか」が付く。戻せるのは、前に公開されていた版だけ', async () => {
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '返品の手順', body: '第1版', tagNames: ['#返品'] }));
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '返品の手順', body: '第2版', tagNames: ['#返品'] }));
+    // 新人の案（第3版）が承認されないまま、ベテランが第4版を公開する → 第3版は、公開されないまま過去版になる
+    const proposal = await run((q) => editKnowledge(q, tokenizer, visitor, k.id, { title: '返品の手順', body: '新人の案', tagNames: ['#返品'] }));
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '返品の手順', body: '第4版', tagNames: ['#返品'] }));
+    const forTrusted = await run((q) => listVersions(q, trusted, k.id));
+    assert.deepEqual(forTrusted.map((v) => [v.version, v.state, v.can_revert]), [
+      [4, 'published', false], [3, 'superseded', false], [2, 'superseded', true], [1, 'superseded', true],
+    ]);
+    // 承認できない人には、どれも「戻せる」と出さない
+    assert.ok((await run((q) => listVersions(q, visitor, k.id))).every((v) => v.can_revert === false));
+    // 公開されないまま閉じられた案には、戻せない（承認を飛ばして公開することになる）
+    await rejects(run((q) => revertToVersion(q, tokenizer, trusted, k.id, proposal.version)), 'conflict');
+    await rejects(run((q) => revertToVersion(q, tokenizer, visitor, k.id, 1)), 'forbidden');
+    const back = await run((q) => revertToVersion(q, tokenizer, trusted, k.id, 1));
+    assert.equal(back.version, 5);
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).body, '第1版');
+  });
+
+  it('過ぎた期限が付いていた版に戻しても、その晩に消えない（いまの期限を引き継ぐ）', async () => {
+    const k = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: '期間限定の手順', body: '第1版', tagNames: ['#期間限定'], expiresAt: tomorrow() }));
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '期間限定の手順', body: '第2版', tagNames: ['#期間限定'], expiresAt: null }));
+    await run((q) => q.query(`UPDATE knowledge_versions SET expires_at = now() - interval '1 day' WHERE knowledge_id = $1 AND version = 1`, [k.id]));
+    await run((q) => revertToVersion(q, tokenizer, trusted, k.id, 1));
+    const view = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.deepEqual([view.body, view.expiresAt], ['第1版', null]);
+  });
+
+  it('自分が書いたもの・直したものを、状態つきで一覧できる（承認待ち・承認されなかったものへ戻れる）', async () => {
+    const { listMyPosts } = await import('../src/domain/knowledge.ts');
+    const waiting = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '新人の新規（待ち）', body: '本文', tagNames: ['#自分の投稿'] }));
+    const rejected = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '新人の新規（通らず）', body: '本文', tagNames: ['#自分の投稿'] }));
+    await run((q) => rejectVersion(q, trusted, rejected.id, 1));
+    const base = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: 'ベテランの手順', body: '本文', tagNames: ['#自分の投稿'] }));
+    await run((q) => editKnowledge(q, tokenizer, visitor, base.id, { title: 'ベテランの手順', body: '新人の修正案', tagNames: ['#自分の投稿'] }));
+    const base2 = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: 'ベテランの手順2', body: '本文', tagNames: ['#自分の投稿'] }));
+    const p2 = await run((q) => editKnowledge(q, tokenizer, visitor, base2.id, { title: 'ベテランの手順2', body: '通らない修正案', tagNames: ['#自分の投稿'] }));
+    await run((q) => rejectVersion(q, trusted, base2.id, p2.version));
+    const base3 = await run((q) => createKnowledge(q, tokenizer, trusted, { storeId: STORE_A, title: 'ベテランの手順3', body: '本文', tagNames: ['#自分の投稿'] }));
+    await run((q) => editKnowledge(q, tokenizer, visitor, base3.id, { title: 'ベテランの手順3', body: '先を越される修正案', tagNames: ['#自分の投稿'] }));
+    await run((q) => editKnowledge(q, tokenizer, trusted, base3.id, { title: 'ベテランの手順3', body: 'ベテランが先に直した', tagNames: ['#自分の投稿'] }));
+    const approved = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '新人の新規（通った）', body: '本文', tagNames: ['#自分の投稿'] }));
+    await run((q) => approveVersion(q, tokenizer, trusted, approved.id, 1));
+
+    const mine = await run((q) => listMyPosts(q, visitor, STORE_A));
+    const state = (id: string) => mine.find((m) => m.id === id)?.state;
+    assert.deepEqual(
+      [state(waiting.id), state(rejected.id), state(base.id), state(base2.id), state(base3.id), state(approved.id)],
+      ['waiting', 'rejected', 'editWaiting', 'editRejected', 'editClosed', 'published']);
+    assert.equal(mine.find((m) => m.id === base.id)!.title, 'ベテランの手順', '公開中のものは、公開中の題名で出す');
+    // 新しい順
+    assert.deepEqual(mine.slice(0, 2).map((m) => m.id), [approved.id, base3.id]);
+    // ほかの人の一覧には、自分が手を入れていないものは出ない
+    const others = await run((q) => listMyPosts(q, manager, STORE_A));
+    assert.ok(!others.some((m) => [waiting.id, rejected.id, approved.id].includes(m.id)));
+    // 他店の人には、この店舗の一覧は見せない
+    await rejects(run((q) => listMyPosts(q, storeBStaff, STORE_A)), 'forbidden');
+    // 全店共通に書いたものは、どの店舗から見ても出る
+    const all = await run((q) => createKnowledge(q, tokenizer, hq, { storeId: null, title: '本部の全店共通', body: '本文', tagNames: ['#自分の投稿'] }));
+    const forHq = await run((q) => listMyPosts(q, hq, STORE_B));
+    assert.deepEqual(forHq.filter((m) => m.id === all.id).map((m) => [m.state, m.allStores]), [['published', true]]);
   });
 });

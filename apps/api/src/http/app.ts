@@ -8,6 +8,8 @@ import {
   createKnowledge,
   editKnowledge,
   getKnowledge,
+  listExpired,
+  listMyPosts,
   listPending,
   listStale,
   listVersions,
@@ -812,6 +814,10 @@ function routes(): Router<Ctx> {
   // --- 育てる・管理 ---------------------------------------------------------
   r.get('/stores/:storeId/pending', async (c, _req, p) => json(await listPending(c.db, c.actor, p.storeId!)));
   r.get('/stores/:storeId/stale', async (c, _req, p) => json(await listStale(c.db, c.actor, p.storeId!)));
+  // 有効期限が過ぎて、検索から外れたもの（承認できる人が、期限を直して出し直す入口）
+  r.get('/stores/:storeId/expired', async (c, _req, p) => json(await listExpired(c.db, c.actor, p.storeId!)));
+  // 自分が書いたもの・直したもの（承認待ち・承認されなかったものへ戻る道）
+  r.get('/stores/:storeId/my-posts', async (c, _req, p) => json(await listMyPosts(c.db, c.actor, p.storeId!)));
   r.post('/knowledge/:id/verify', async (c, _req, p) => json(await verifyKnowledge(c.db, c.actor, p.id!)));
   r.get('/stores/:storeId/zero-hits', async (c, _req, p) => json(await zeroHitQueries(c.db, c.actor, p.storeId!)));
 

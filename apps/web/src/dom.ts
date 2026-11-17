@@ -92,6 +92,17 @@ export function dayLabel(iso: string | null): string {
   return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}年${md}`;
 }
 
+/** 日付の欄（<input type="date">）に入れる形。端末の暦で読む */
+export function dateValue(iso: string | null | undefined): string {
+  const d = parseDate(iso ?? null);
+  if (!d) return '';
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+// 日付だけを選んでもらい、「いつから」はその日の始まり、「いつまで」はその日の終わりにする
+export const startOfDay = (date: string): string => new Date(`${date}T00:00:00`).toISOString();
+export const endOfDay = (date: string): string => new Date(`${date}T23:59:59`).toISOString();
+
 /** タグの中身。「#」だけ色を変えるために分ける（読み上げや文字としては「#名前」のまま） */
 export function tagLabel(name: string): [HTMLElement, string] {
   return [h('span', { class: 'tag-hash' }, '#'), name];

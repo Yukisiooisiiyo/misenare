@@ -2,7 +2,7 @@
 // 画面は URL のハッシュで切り替える：#/home（#/search?q= も同じ画面） #/k/<id> #/write #/edit/<id> #/scan #/memo #/settings #/manage #/device
 
 import { api, ApiError, fetchDictionary, onUnauthorized, session, ssoSecret, type BookmarkItem, type Device, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
-import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
+import { busyGuard, clear, dateValue, dayLabel, endOfDay, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, roleLabel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
@@ -934,8 +934,10 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
     ? me?.adminScope === 'tenant'
     : isTrusted() || k.pendingEdits.some((p) => p.mine);
   const photos = photoSection(k.id, canAttach);
-  // 確認できるのは trusted 以上。押したところだけを描き直す（写真や読んでいた位置を保つため）
-  const canVerify = isTrusted() && k.status === 'published';
+  // 全店共通のものを直せるのは本部だけ（修正の提案も受け付けない）。直せない人に、行き止まりの入口を見せない
+  const canEdit = k.storeId !== null || me?.adminScope === 'tenant';
+  // 確認できるのは trusted 以上（全店共通は本部だけ）。押したところだけを描き直す（写真や読んでいた位置を保つため）
+  const canVerify = isTrusted() && k.status === 'published' && canEdit;
   const freshBox = h('div');
   const drawFresh = () => {
     clear(freshBox);
@@ -979,19 +981,24 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
   shell('home', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
     k.status === 'published' ? null
+      : k.status === 'expired'
+        ? h('p', { class: 'pending' }, '有効期限が過ぎたので、いまは検索に出ていません。編集して期限を直すと、もう一度出ます。')
       // 却下されたものを「承認待ち」と出し続けない。直して出し直せることも伝える
       : k.draftState === 'rejected'
         ? h('p', { class: 'pending' }, 'この投稿は承認されませんでした。まだ公開されていません。直して出し直すと、もう一度承認待ちになります。')
         : h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。'),
     pendingEditsBlock(k),
+    k.storeId === null ? h('p', { class: 'kind-row' }, h('span', { class: 'notice-badge notice-all' }, '全店共通')) : null,
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
     bookmarkBox,
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
     photos.el,
     freshBox,
-    h('div', { class: 'actions' },
-      h('a', { href: `#/edit/${k.id}`, class: 'secondary' }, isTrusted() ? '編集する' : '修正を提案する')),
+    canEdit
+      ? h('div', { class: 'actions' },
+          h('a', { href: `#/edit/${k.id}`, class: 'secondary' }, isTrusted() ? '編集する' : '修正を提案する'))
+      : h('p', { class: 'hint' }, '全店共通のナレッジは、本部だけが直せます。直したほうがよいところは、店長か本部に伝えてください。'),
   ));
   disposeView = photos.dispose;
 }
@@ -1047,6 +1054,7 @@ function freshnessDetail(k: Knowledge, onVerify?: () => Promise<void>): HTMLElem
     // 最初に書いた人も出す：同じ人の下書きが何度も直されるなら、その人に教え直したほうが早い
     k.approvedBy ? h('p', {}, `承認：${relativeDate(k.approvedAt)}（${k.approvedBy}さん）`) : null,
     k.createdBy && k.createdBy !== k.updatedBy ? h('p', {}, `最初に書いた人：${k.createdBy}さん`) : null,
+    k.expiresAt ? h('p', {}, k.status === 'expired' ? `有効期限：${dayLabel(k.expiresAt)}まで（過ぎています）` : `有効期限：${dayLabel(k.expiresAt)}まで（過ぎると、検索に出なくなります）`) : null,
     f.stale ? h('p', { class: 'fresh-warn' }, `${staleLabel()}、更新も確認もされていません。今も正しいか社員に確かめてから案内してください。`) : null,
     // 古いものほど押してほしいので、古いときだけ目立たせる
     ...(onVerify ? [action(f.stale ? '今も正しい（確認日を更新）' : '今も正しい', f.stale ? 'primary' : 'secondary small', onVerify)] : []),
@@ -1116,6 +1124,12 @@ function renderWrite(existing: Knowledge | null): void {
     const now: Draft = { title: title.value, body: body.value, tags: [...tags] };
     writeDraft(draftKey, JSON.stringify(now) === JSON.stringify(initial) ? null : now);
   };
+  // 全店共通で書けるのは本部だけ（新しく書くときに選ぶ。書いたあとで、出す先は変えられない）
+  const scope = h('select', { id: 'scope' }, h('option', { value: 'store' }, 'この店舗だけ'), h('option', { value: 'all' }, 'すべての店舗（全店共通）'));
+  const canPickScope = !existing && me?.adminScope === 'tenant';
+  // 有効期限。日付だけを選んでもらい、その日の終わりまで出す
+  const initialExpires = dateValue(existing?.expiresAt);
+  const expires = h('input', { id: 'expires', type: 'date', value: initialExpires });
   const tagField = h('input', { id: 'tag', type: 'text', placeholder: '#を付けずに入力してもOK', autocomplete: 'off', enterkeyhint: 'done' });
   const tagList = h('div', { class: 'tag-row' });
   const suggest = h('div', { class: 'suggest', hidden: true });
@@ -1163,12 +1177,17 @@ function renderWrite(existing: Knowledge | null): void {
     if (tagField.value.trim()) addTag(tagField.value);
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; setTimeout(() => tagField.focus(), 0); return; } // 送信中は欄が無効なので、戻ってから合わせる
     // 開いたときの版を添える。開いたあとに別の人が直していたら、サーバーが止めて教えてくれる
-    const payload = { title: title.value, body: body.value, tagNames: tags, ...(existing ? { baseVersion: existing.version } : {}) };
+    const payload = {
+      title: title.value, body: body.value, tagNames: tags,
+      ...(existing ? { baseVersion: existing.version } : {}),
+      // 期限は、変えたときだけ送る（送らなければ、いまの期限のまま）。空にしたら、期限なし
+      ...(expires.value !== initialExpires ? { expiresAt: expires.value ? endOfDay(expires.value) : null } : {}),
+    };
     try {
       type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing
         ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
-        : await api<Saved>('POST', `/stores/${storeId()}/knowledge`, payload);
+        : await api<Saved>('POST', canPickScope && scope.value === 'all' ? '/knowledge' : `/stores/${storeId()}/knowledge`, payload);
       writeDraft(draftKey, null);
       // 一緒に選んでおいた写真を送る。メモはもう保存できているので、写真で失敗しても先へ進む
       // （開いた画面から足し直せる）
@@ -1211,6 +1230,9 @@ function renderWrite(existing: Knowledge | null): void {
     h('h1', {}, existing ? '共有メモを編集' : '共有メモを書く'),
     existing ? null : h('p', { class: 'hint' }, '店のみんなと共有するメモです。ナレッジとして、検索に出るようになります。'),
     draft ? h('p', { class: 'hint' }, '書きかけを戻しました') : null,
+    existing?.status === 'expired' ? h('p', { class: 'pending' }, '有効期限が過ぎています。下の「有効期限」を先の日付にするか、空にして保存すると、もう一度出ます。') : null,
+    existing?.storeId === null ? h('p', { class: 'kind-row' }, h('span', { class: 'notice-badge notice-all' }, '全店共通')) : null,
+    ...(canPickScope ? [h('label', { for: 'scope' }, '出す先'), scope] : []),
     h('label', { for: 'title' }, 'タイトル'), title,
     h('label', { for: 'body' }, '内容'), body,
     h('span', { class: 'label-like' }, '写真'),
@@ -1219,9 +1241,13 @@ function renderWrite(existing: Knowledge | null): void {
     current && canAttach ? h('p', { class: 'hint' }, '写真の追加と削除は、保存を待たずにすぐ反映されます。') : null,
     h('label', { for: 'tag' }, 'ハッシュタグ'),
     tagList, tagField, suggest, proposals,
+    h('label', { for: 'expires' }, '有効期限（空なら期限なし）'), expires,
+    h('p', { class: 'hint' }, 'キャンペーンなど、終わりが決まっているものに。その日を過ぎると、検索に出なくなります。'),
     message,
     h('button', { type: 'submit', class: 'primary' }, isTrusted() ? '公開する' : '承認を依頼する'),
     isTrusted() ? null : h('p', { class: 'note' }, 'trusted のメンバーが承認すると公開されます。'),
+    // これまでの版。前の版に戻すのも、この画面からだけ（読む画面には置かない）
+    ...(existing ? [versionsPanel(existing)] : []),
     // 消すのは、この画面からだけ（読む画面に置くと、見ているだけのときに押してしまう）。
     // 直しただけでは前の版が履歴に残るので、書いてはいけないものを書いたときは、丸ごと消す
     ...(existing?.canDelete ? [
@@ -1238,10 +1264,104 @@ function renderWrite(existing: Knowledge | null): void {
   );
   // 送信中は押し直せないようにする。連打で同じナレッジが2件公開されるのを防ぐ
   submitOnce(form, submit);
-  shell('write', form);
+  // 新しく書く画面の下に、自分が書いたものの行方を置く（承認待ち・承認されなかったものへ戻る道）
+  shell('write', form, ...(existing ? [] : [myPostsPanel()]));
   disposeView = () => { picker.dispose(); current?.dispose(); };
   drawProposals();
   (existing ? body : title).focus();
+}
+
+interface VersionRow {
+  version: number; state: 'pending' | 'published' | 'superseded' | 'rejected'; title: string; body: string;
+  edited_at: string; edited_by: string; decided_by: string | null; decided_at: string | null; can_revert?: boolean;
+}
+
+/**
+ * これまでの版（開いたときに読む）。中身は「見る」で開く。
+ * 承認できる人は、前に公開されていた版に戻せる（その内容で新しい版を作って公開する。履歴は消えない）。
+ */
+function versionsPanel(k: Knowledge): HTMLElement {
+  const box = h('div', { class: 'panel-body' });
+  const panel = h('details', { class: 'panel versions' }, h('summary', {}, 'これまでの版'), box);
+  const label = (v: VersionRow): string => (
+    v.state === 'published' ? 'いま公開中'
+      : v.state === 'pending' ? '承認待ち'
+      : v.state === 'rejected' ? '承認されなかった案'
+      : v.decided_at ? '前に公開されていた版' : '公開されなかった案');
+  panel.addEventListener('toggle', () => {
+    if (!panel.open) return;
+    clear(box);
+    box.append(h('p', { class: 'hint' }, '読み込んでいます…'));
+    void api<VersionRow[]>('GET', `/knowledge/${k.id}/versions`).then((versions) => {
+      clear(box);
+      box.append(h('ul', { class: 'rows' }, ...versions.map((v) => {
+        const shown = h('div', { class: 'body version-body' });
+        const toggle = h('button', { type: 'button', class: 'secondary small' }, '見る');
+        toggle.addEventListener('click', () => {
+          if (shown.childElementCount > 0) { shown.replaceChildren(); toggle.textContent = '見る'; return; }
+          shown.replaceChildren(h('h3', {}, v.title), ...v.body.split(/\n{2,}/).map((t) => h('p', {}, t)));
+          toggle.textContent = '閉じる';
+        });
+        return h('li', { class: 'row version' },
+          h('span', {}, h('b', {}, `第${v.version}版`), `　${label(v)}`),
+          h('span', { class: 'hint' }, `${v.edited_by}さん・${relativeDate(v.edited_at)}`
+            + (v.decided_by && v.state !== 'rejected' ? `・承認 ${v.decided_by}さん` : '')),
+          h('span', { class: 'row-actions' },
+            toggle,
+            ...(v.can_revert
+              ? [confirmAction('この版に戻す', 'secondary small', 'この版の内容で、新しい版を作って公開します。戻しますか？', async () => {
+                  const r = await api<{ closed: Array<{ version: number }> }>('POST', `/knowledge/${k.id}/versions/${v.version}/revert`);
+                  toast(r.closed.length > 0 ? `第${v.version}版の内容に戻しました（承認待ちの修正案 ${r.closed.length}件は閉じました）` : `第${v.version}版の内容に戻しました`);
+                  await loadDictionary();
+                  location.hash = `#/k/${k.id}`;
+                })]
+              : [])),
+          shown);
+      })));
+    }).catch((e) => {
+      clear(box);
+      box.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    });
+  });
+  return panel;
+}
+
+interface MyPost { id: string; title: string; state: 'waiting' | 'rejected' | 'editWaiting' | 'editRejected' | 'editClosed' | 'published' | 'expired'; at: string; allStores: boolean }
+
+const MY_POST_STATE: Record<MyPost['state'], string> = {
+  waiting: '承認待ち',
+  rejected: '承認されませんでした',
+  editWaiting: '修正案が承認待ち',
+  editRejected: '修正案は承認されませんでした',
+  editClosed: '修正案は、先に別の修正が公開されたので閉じられました',
+  published: '公開中',
+  expired: '期限切れ',
+};
+
+/** 自分が書いたもの・直したもの（開いたときに読む）。承認待ち・承認されなかったものは検索に出ないので、ここから戻る */
+function myPostsPanel(): HTMLElement {
+  const box = h('div', { class: 'panel-body' });
+  const panel = h('details', { class: 'panel my-posts' }, h('summary', {}, '自分が書いたもの'), box);
+  panel.addEventListener('toggle', () => {
+    if (!panel.open) return;
+    clear(box);
+    box.append(h('p', { class: 'hint' }, '読み込んでいます…'));
+    void api<MyPost[]>('GET', `/stores/${storeId()}/my-posts`).then((posts) => {
+      clear(box);
+      if (posts.length === 0) {
+        box.append(h('p', { class: 'hint' }, 'まだありません。書いたものは、ここに並びます。'));
+        return;
+      }
+      box.append(h('ul', { class: 'rows' }, ...posts.map((p) => h('li', { class: 'row' },
+        h('a', { href: `#/k/${p.id}` }, p.title),
+        h('span', { class: p.state === 'published' ? 'hint' : 'pending my-post-state' }, MY_POST_STATE[p.state]),
+        h('span', { class: 'hint' }, `${relativeDate(p.at)}${p.allStores ? '・全店共通' : ''}`)))));
+    }).catch((e) => {
+      clear(box);
+      box.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    });
+  });
+  return h('section', { class: 'page after-form' }, panel);
 }
 
 // --- バーコード -------------------------------------------------------------------
@@ -1459,7 +1579,8 @@ async function renderManage(stale: () => boolean): Promise<void> {
   shell('settings', section);
   const sid = storeId();
   type PendingRow = { id: string; version: number; title: string; edited_by: string; is_new: boolean };
-  type StaleRow = { id: string; title: string; verified_at: string | null };
+  type StaleRow = { id: string; title: string; verified_at: string | null; all_stores?: boolean };
+  type ExpiredRow = { id: string; title: string; expires_at: string; all_stores: boolean };
   const pendingList: ListFrame<PendingRow[]> = listFrame(
     () => api<PendingRow[]>('GET', `/stores/${sid}/pending`),
     (pending) => countedList('承認待ち', pending, (p, remove) =>
@@ -1481,15 +1602,25 @@ async function renderManage(stale: () => boolean): Promise<void> {
     (old) => countedList(`${staleLabel()}確認されていないナレッジ`, old, (s, remove) =>
       h('li', { class: 'row' },
         h('a', { href: `#/k/${s.id}` }, s.title),
+        s.all_stores ? h('span', { class: 'hint' }, '全店共通') : null,
         h('span', { class: 'row-actions' },
           action('今も正しい', 'secondary small', async () => { await api('POST', `/knowledge/${s.id}/verify`); toast('確認済みにしました'); remove(); }, () => staleList.reload()))), 'h2'));
-  // 3本は互いに待たない。1本が失敗しても、取れたものは出す
-  const [a, b, c] = await Promise.allSettled([pendingList.fetcher(), zeroList.fetcher(), staleList.fetcher()]);
+  // 有効期限が過ぎて、検索から外れたもの。期限を付けて出したものがあるときだけ出す
+  const expiredList: ListFrame<ExpiredRow[]> = listFrame(
+    () => api<ExpiredRow[]>('GET', `/stores/${sid}/expired`),
+    (gone) => (gone.length === 0 ? [] : countedList('有効期限が切れたナレッジ', gone, (x) =>
+      h('li', { class: 'row' },
+        h('a', { href: `#/k/${x.id}` }, x.title),
+        h('span', { class: 'hint' }, `${dayLabel(x.expires_at)}まで${x.all_stores ? '・全店共通' : ''}`),
+        h('span', { class: 'row-actions' }, h('a', { href: `#/edit/${x.id}`, class: 'secondary small' }, '期限を直す'))), 'h2')));
+  // 4本は互いに待たない。1本が失敗しても、取れたものは出す
+  const [a, b, c, d] = await Promise.allSettled([pendingList.fetcher(), zeroList.fetcher(), staleList.fetcher(), expiredList.fetcher()]);
   if (stale()) return; // 待つ間に別の画面へ移っていた
   pendingList.apply(a);
   zeroList.apply(b);
   staleList.apply(c);
-  section.append(pendingList.box, zeroList.box, staleList.box);
+  expiredList.apply(d);
+  section.append(pendingList.box, zeroList.box, staleList.box, expiredList.box);
   section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
   // 書き出しは会社全体のデータなので、本部（会社全体の管理者）にだけ出す
   if (me!.adminScope === 'tenant') section.append(exportPanel());

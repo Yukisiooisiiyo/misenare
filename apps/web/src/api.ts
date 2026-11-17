@@ -231,6 +231,8 @@ export interface Knowledge {
   approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
+  /** 有効期限。過ぎると検索に出なくなる。無ければ期限なし */
+  expiresAt?: string | null;
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
   /** まだ一度も公開されていないときの、いちばん新しい案の状態（公開済みなら無い） */
   draftState?: 'pending' | 'rejected';

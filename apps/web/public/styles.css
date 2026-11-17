@@ -349,6 +349,14 @@ button.tag { cursor: pointer; }
 .notice-new { background: var(--pending); color: var(--paper); }
 .notice-acked { color: var(--sign); font-weight: 700; }
 .notice .primary { margin-top: 10px; }
+/* ナレッジ：全店共通の印、これまでの版、自分が書いたもの */
+.kind-row { margin: 0; }
+.version .hint, .my-posts .row .hint, .my-post-state { flex: 1 1 100%; }
+.my-post-state { font-size: 14px; }
+.version-body { flex: 1 1 100%; font-size: 15px; white-space: pre-wrap; }
+.version-body:empty { display: none; }
+.version-body h3 { margin: 6px 0 0; font-size: 15px; }
+.after-form { margin-top: 20px; }
 /* 連絡を直す・確認した人を見る。消す・掲示をやめるは、直す画面の中にだけ置く */
 .notice-tools { display: flex; justify-content: flex-end; }
 .notice-readers { margin-top: 8px; }
