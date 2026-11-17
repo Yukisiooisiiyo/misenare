@@ -52,6 +52,11 @@ export interface KnowledgeView {
    * 中身は「見る」で開く（listVersions）。検索には出ない。
    */
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
+  /**
+   * まだ一度も公開されていないときの、いちばん新しい案の状態。
+   * 却下された投稿を、書いた本人の画面で「承認待ち」のまま見せないために返す（公開済みなら項目ごと無い）
+   */
+  draftState?: 'pending' | 'rejected';
   /** 自分がブックマークしているか */
   bookmarked: boolean;
   /** ブックマークを付けられるか（自分が書いたものには付けられない） */
@@ -120,6 +125,32 @@ async function publish(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, v
     [id, version, v.expires_at, actor.userId],
   );
   await indexKnowledge(db, tokenizer, id);
+}
+
+/**
+ * 写真の待ちを、版の決着に合わせる（承認・却下・出し直し・戻しのあとに呼ぶ）。
+ *
+ *   案が公開された       … 待ちを解く（全員に見える）
+ *   案が通らなかった     … 捨てる（一覧から消える。実体は夜間バッチが片付ける）
+ *
+ * 写真は、承認できない人が公開中のナレッジへの修正案と一緒に付けたときだけ待つ（photos.ts）。
+ */
+async function settlePhotos(db: Db, id: string): Promise<void> {
+  await db.query(
+    `UPDATE knowledge_photos p SET pending_version = NULL
+       FROM knowledge_versions v
+      WHERE p.knowledge_id = $1 AND p.pending_version IS NOT NULL
+        AND v.knowledge_id = p.knowledge_id AND v.version = p.pending_version AND v.state = 'published'`,
+    [id],
+  );
+  await db.query(
+    `UPDATE knowledge_photos p SET state = 'discarded'
+      WHERE p.knowledge_id = $1 AND p.pending_version IS NOT NULL AND p.state <> 'discarded'
+        AND NOT EXISTS (
+          SELECT 1 FROM knowledge_versions v
+           WHERE v.knowledge_id = p.knowledge_id AND v.version = p.pending_version AND v.state = 'pending')`,
+    [id],
+  );
 }
 
 async function insertVersion(
@@ -259,8 +290,15 @@ export async function editKnowledge(
     title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [],
     expiresAt: input.expiresAt !== undefined ? input.expiresAt : k.expires_at,
   }, k.current_version);
+  // 前の案と一緒に待っていた本人の写真は、出し直した案に付け替える（前の案は上で閉じた）
+  await db.query(
+    `UPDATE knowledge_photos SET pending_version = $3
+      WHERE knowledge_id = $1 AND created_by = $2 AND pending_version IS NOT NULL AND state <> 'discarded'`,
+    [id, actor.userId, version],
+  );
   const published = isTrusted(actor);
   if (published) await publish(db, tokenizer, actor, id, version);
+  await settlePhotos(db, id);
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version, published };
 }
@@ -295,6 +333,7 @@ export async function approveVersion(db: Db, tokenizer: Tokenizer, actor: Actor,
     [id, version],
   );
   await publish(db, tokenizer, actor, id, version);
+  await settlePhotos(db, id);
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version, closed: closing.map((c) => ({ version: c.version, editedBy: c.editor })) };
 }
@@ -308,6 +347,8 @@ export async function rejectVersion(db: Db, actor: Actor, id: string, version: n
     [id, version, actor.userId],
   );
   assert(rows.length === 1, 'conflict', 'この版は承認待ちではありません');
+  // 却下した案と一緒に待っていた写真は捨てる（残すと、通らなかった案の写真だけが出続ける）
+  await settlePhotos(db, id);
   // 一度も公開されていないナレッジの唯一の案を却下した場合、pending のタグも辞書に入らないまま残る
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version };
@@ -340,6 +381,7 @@ export async function revertToVersion(db: Db, tokenizer: Tokenizer, actor: Actor
     [id, next],
   );
   await publish(db, tokenizer, actor, id, next);
+  await settlePhotos(db, id);
   await syncApprovalNotice(db, actor.tenantId, k.store_id);
   return { id, version: next, closed: closing.map((c) => ({ version: c.version, editedBy: c.editor })) };
 }
@@ -348,9 +390,9 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
   // 公開中の版。未公開なら最新の案（投稿者本人と承認者だけが見られる）
-  const v = await maybeOne<{ version: number; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null }>(
+  const v = await maybeOne<{ version: number; state: string; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null }>(
     db,
-    `SELECT version, title, body, tag_ids, edited_by, edited_at::text AS edited_at,
+    `SELECT version, state, title, body, tag_ids, edited_by, edited_at::text AS edited_at,
             (SELECT name FROM users WHERE id = edited_by) AS editor,
             (SELECT name FROM users WHERE id = decided_by) AS approver,
             decided_at::text AS decided_at
@@ -402,6 +444,7 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
     pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
+    ...(k.status === 'published' ? {} : { draftState: v.state === 'rejected' ? 'rejected' as const : 'pending' as const }),
     ...(await bookmarkState(db, actor, id, meta.created_by_id)),
   };
 }

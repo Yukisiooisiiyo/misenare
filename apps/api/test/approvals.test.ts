@@ -60,6 +60,24 @@ describe('誰が承認したかを残す', () => {
     assert.equal(view.createdBy, '新人バイト', '最初に書いた人が出ること');
   });
 
+  it('却下された新規投稿は、本人の画面で「承認待ち」のままにしない（出し直すと、また承認待ちになる）', async () => {
+    const { editKnowledge, rejectVersion } = await import('../src/domain/knowledge.ts');
+    const k = await run((q) => createKnowledge(q, tokenizer, visitor, {
+      storeId: STORE_A, title: '却下される投稿', body: '本文。', tagNames: ['#x'],
+    }));
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).draftState, 'pending');
+    await run((q) => rejectVersion(q, trusted, k.id, 1));
+    const rejected = await run((q) => getKnowledge(q, visitor, k.id));
+    assert.equal(rejected.status, 'draft');
+    assert.equal(rejected.draftState, 'rejected');
+    // 直して出し直すと、もう一度承認待ちになる
+    await run((q) => editKnowledge(q, tokenizer, visitor, k.id, { title: '却下される投稿', body: '直した本文。', tagNames: ['#x'] }));
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).draftState, 'pending');
+    // 公開されたものには、この項目は付かない
+    await run((q) => approveVersion(q, tokenizer, trusted, k.id, 2));
+    assert.equal('draftState' in (await run((q) => getKnowledge(q, visitor, k.id))), false);
+  });
+
   it('却下した人も残る（誰が止めたか分かる）', async () => {
     await clean();
     const k = await run((q) => createKnowledge(q, tokenizer, visitor, {

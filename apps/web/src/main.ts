@@ -827,7 +827,11 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
   drawBookmark();
   shell('home', h('article', { class: 'page knowledge' },
     h('button', { type: 'button', class: 'back', onclick: () => history.back() }, '戻る'),
-    k.status !== 'published' ? h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。') : null,
+    k.status === 'published' ? null
+      // 却下されたものを「承認待ち」と出し続けない。直して出し直せることも伝える
+      : k.draftState === 'rejected'
+        ? h('p', { class: 'pending' }, 'この投稿は承認されませんでした。まだ公開されていません。直して出し直すと、もう一度承認待ちになります。')
+        : h('p', { class: 'pending' }, '承認待ちです。承認されると全員に公開されます。'),
     pendingEditsBlock(k),
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
