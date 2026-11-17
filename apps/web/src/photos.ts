@@ -6,7 +6,7 @@
 // 閲覧も同じで、相対パスなら印を付けて取ってから表示し、絶対URLならそのまま表示する。
 
 import { api, session } from './api.ts';
-import { h, relativeDate, toast } from './dom.ts';
+import { busyGuard, clear, h, relativeDate, toast } from './dom.ts';
 import { confirmAction } from './manage.ts';
 
 export interface Photo {
@@ -142,11 +142,44 @@ export function photoSection(knowledgeId: string, canEdit: boolean, options: { a
       // 押すと大きく見られる（一覧では全体が見えるように縮めて出しているので、細かい字はここで読む）
       const open = h('button', { type: 'button', class: 'photo-open', 'aria-label': '写真を大きく見る' }, img);
       open.addEventListener('click', () => { if (img.src) openViewer(img.src, img.alt); });
+      // 説明を付ける・直すのも、消すのと同じく編集画面でだけ。何の写真かを、あとから見る人や読み上げで聞く人に伝える
+      const captionBox = h('div', { class: 'photo-caption' });
+      const drawCaption = (): void => {
+        clear(captionBox);
+        if (p.caption) captionBox.append(h('figcaption', {}, p.caption));
+        if (!canDelete) return;
+        captionBox.append(h('button', { type: 'button', class: 'link', onclick: () => editCaption() }, p.caption ? '説明を直す' : '説明を付ける'));
+      };
+      const editCaption = (): void => {
+        const field = h('input', { type: 'text', maxlength: 200, value: p.caption ?? '', placeholder: '例：レジ横の棚の配置', 'aria-label': '写真の説明', enterkeyhint: 'done' });
+        const saveButton = h('button', { type: 'button', class: 'primary small' }, '保存');
+        const cancelButton = h('button', { type: 'button', class: 'secondary small', onclick: () => drawCaption() }, 'やめる');
+        const save = busyGuard(() => [field, saveButton, cancelButton], async () => {
+          try {
+            const r = await api<{ caption: string | null }>('PATCH', `/photos/${p.id}`, { caption: field.value });
+            p.caption = r.caption;
+            img.alt = p.caption ?? `${p.createdBy ?? ''}さんが${relativeDate(p.createdAt)}に付けた写真`;
+            toast(p.caption ? '説明を付けました' : '説明を外しました');
+            drawCaption();
+          } catch (e) {
+            toast(e instanceof Error ? e.message : String(e));
+          }
+        });
+        saveButton.addEventListener('click', () => void save());
+        // この欄は、ナレッジを書くフォームの中にある。フォームを入れ子にはせず、Enter は説明の保存として受ける
+        // （受けないと、Enter でナレッジそのものが保存されてしまう）
+        field.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void save(); } });
+        clear(captionBox);
+        captionBox.append(h('div', { class: 'write', role: 'group', 'aria-label': '写真の説明を直す' }, field,
+          h('div', { class: 'row-actions' }, saveButton, cancelButton)));
+        field.focus();
+      };
+      drawCaption();
       const figure = h('figure', { class: 'photo-item' },
         open,
         // 修正案と一緒に付けた写真は、案が承認されるまで全員には出ない。出ていると思い込ませないように書く
         p.pending ? h('figcaption', { class: 'pending' }, '承認待ち（承認されると全員に見えます）') : null,
-        p.caption ? h('figcaption', {}, p.caption) : null,
+        captionBox,
         canDelete
           ? confirmAction('×', 'photo-remove', '消しますか？', async () => {
               await api('DELETE', `/photos/${p.id}`);

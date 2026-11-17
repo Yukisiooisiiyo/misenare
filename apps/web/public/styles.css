@@ -349,6 +349,14 @@ button.tag { cursor: pointer; }
 .notice-new { background: var(--pending); color: var(--paper); }
 .notice-acked { color: var(--sign); font-weight: 700; }
 .notice .primary { margin-top: 10px; }
+/* 写真の説明を付ける・直す（編集画面だけ）、ほかの日の引き継ぎ */
+.photo-caption { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.photo-caption:empty { display: none; }
+.photo-caption .write { width: 100%; }
+.photo-caption .row-actions { justify-content: flex-start; margin: 0; }
+.photo-caption .row-actions .primary { margin-top: 0; }
+.other-day { display: flex; flex-direction: column; gap: 8px; }
+.other-day h3 { margin: 10px 0 4px; }
 /* 商品と売場：直す画面の下の操作、売場の名前、売場を選ぶ欄 */
 .product-edit { display: flex; flex-direction: column; gap: 16px; }
 .product-save { justify-content: flex-start; margin-left: 0; }

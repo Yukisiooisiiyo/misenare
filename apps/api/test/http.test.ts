@@ -158,6 +158,21 @@ describe('入力の範囲と長さ', () => {
   it('0000年の日付は 400', async () => {
     assert.equal((await call(trusted, 'GET', `/stores/${STORE_A}/handovers?date=0000-01-01`)).status, 400);
     assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: 'x', forDate: '0000-01-01' })).status, 400);
+    // 日付を指定して書けるのは、今日から60日先まで。前の日付では書けない
+    const day = (offset: number): string => {
+      const d = new Date(`${new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(new Date())}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() + offset);
+      return d.toISOString().slice(0, 10);
+    };
+    assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: '昨日の分', forDate: day(-1) })).status, 400);
+    assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: '遠い先の分', forDate: day(61) })).status, 400);
+    const tomorrow = await call(trusted, 'POST', `/stores/${STORE_A}/handovers`, { body: '明日の朝いちばんに、展示機の電源を入れる', forDate: day(1) });
+    assert.equal(tomorrow.status, 201);
+    // その日が来るまで、今日の一覧には出ない。日付を指定すれば見える
+    const todayList = (await call(trusted, 'GET', `/stores/${STORE_A}/handovers`)).body as Array<{ body: string }>;
+    assert.ok(!todayList.some((x) => x.body.startsWith('明日の朝いちばん')));
+    const tomorrowList = (await call(trusted, 'GET', `/stores/${STORE_A}/handovers?date=${day(1)}`)).body as Array<{ body: string; forDate: string; carriedOver: boolean }>;
+    assert.deepEqual(tomorrowList.filter((x) => x.body.startsWith('明日の朝いちばん')).map((x) => [x.forDate, x.carriedOver]), [[day(1), false]]);
   });
 
   it('商品の編集で name: null を送ると 400', async () => {

@@ -4,7 +4,7 @@
 // 引き継ぎ … その日のメモ。承認はなく、誰でも書けて誰でも片付けられる
 
 import { api } from './api.ts';
-import { clear, dateValue, dayLabel, endOfDay, h, parseDate, relativeDate, startOfDay, submitOnce, toast } from './dom.ts';
+import { clear, dateOnlyLabel, dateValue, dayLabel, endOfDay, h, parseDate, relativeDate, startOfDay, submitOnce, toast } from './dom.ts';
 import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
@@ -309,6 +309,66 @@ function handoverRow(item: Handover, canDelete: boolean, redraw: () => void): HT
 }
 
 /**
+ * ほかの日の引き継ぎ。前の日を選ぶと、その日の引き継ぎを見られる。
+ * 先の日を選ぶと、その日の分として書ける（その日になると、ふつうの引き継ぎに出る）。
+ */
+function otherDayPanel(storeId: string, canDelete: (item: Handover) => boolean, onChange: () => void): HTMLElement {
+  const today = dateValue(new Date().toISOString());
+  const date = h('input', { type: 'date', id: 'hdate' });
+  const list = h('div');
+  const input = h('textarea', { rows: 2, maxlength: 1000, placeholder: 'その日の人に伝えること', 'aria-label': 'その日の分として書く引き継ぎ' });
+  const form = h('form', { class: 'write handover-form', hidden: true }, input, h('button', { type: 'submit', class: 'primary' }, 'その日の分として書く'));
+  let seq = 0; // 日付を続けて変えたとき、最後に選んだ日の分だけを描く
+  const load = async (): Promise<void> => {
+    const mine = ++seq;
+    clear(list);
+    form.hidden = !(date.value > today);
+    if (!date.value) return;
+    list.append(h('p', { class: 'hint' }, '読み込んでいます…'));
+    try {
+      const items = await api<Handover[]>('GET', `/stores/${storeId}/handovers?date=${date.value}`);
+      if (mine !== seq) return;
+      clear(list);
+      const reload = (): void => { void load(); onChange(); };
+      const open = items.filter((x) => x.state === 'open');
+      const done = items.filter((x) => x.state === 'done');
+      list.append(...countedList(`${dateOnlyLabel(date.value)}の引き継ぎ`, open, (item) => handoverRow(item, canDelete(item), reload), 'h3'));
+      if (done.length > 0) {
+        list.append(h('h3', {}, `片付いたもの（${done.length}件）`),
+          h('ul', { class: 'rows' }, ...done.map((item) => h('li', { class: 'row' },
+            h('span', { class: 'handover-body done' }, item.body),
+            labelTags(item.labels),
+            h('span', { class: 'hint' }, `${item.doneBy ?? ''}さんが片付けた`)))));
+      }
+    } catch (e) {
+      if (mine !== seq) return;
+      clear(list);
+      list.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    }
+  };
+  date.addEventListener('change', () => void load());
+  submitOnce(form, async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    try {
+      await api('POST', `/stores/${storeId}/handovers`, { body: text, forDate: date.value });
+      input.value = '';
+      toast(`${dateOnlyLabel(date.value)}の分として書きました`);
+      await load();
+      onChange();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e));
+    }
+  });
+  return h('details', { class: 'panel' },
+    h('summary', {}, 'ほかの日の引き継ぎを見る・書く'),
+    h('div', { class: 'panel-body other-day' },
+      h('label', { for: 'hdate' }, '日付'), date,
+      h('p', { class: 'hint' }, '前の日を選ぶと、その日の引き継ぎを見られます。先の日を選ぶと、その日の分として書けます（その日になると、引き継ぎに出ます）。'),
+      form, list));
+}
+
+/**
  * 引き継ぎの履歴。誰が何をしたかを時系列で見る。
  * 「操作された分」と「すべて」を切り替えられる。押し間違いはここから戻せる。
  */
@@ -577,6 +637,7 @@ export function renderNotices(
       h('span', { class: 'label-add' }, newLabel, h('button', { type: 'button', class: 'secondary small', onclick: () => addNewLabel() }, 'ラベルを足す'))),
     filterBar,
     handoverList,
+    otherDayPanel(options.storeId, (item) => options.isTrusted || item.createdBy === options.userName, () => { void loadHandovers(); options.onBadges?.(); }),
     historyPanel(options.storeId, () => { void loadHandovers(); options.onBadges?.(); }),
   );
   void loadNotices();

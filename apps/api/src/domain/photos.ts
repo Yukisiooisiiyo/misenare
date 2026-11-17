@@ -273,6 +273,22 @@ export async function openPhoto(
   return { kind: 'body', body: await storage.get(p.storage_key), contentType: p.content_type };
 }
 
+/**
+ * 写真の説明を付ける・直す・外す（空にすると外れる）。できるのは、消せる人と同じ：付けた本人と承認できる人。
+ * 説明は、写真を読み上げで聞く人や、何の写真かを後から見る人のためのもの。
+ */
+export async function updatePhotoCaption(db: Db, actor: Actor, photoId: string, caption: unknown): Promise<{ id: string; caption: string | null }> {
+  const p = await loadPhoto(db, photoId);
+  assert(canAccessStore(actor, p.store_id), 'forbidden', 'この写真の説明は直せません');
+  assert(p.created_by === actor.userId || canModerate(actor, p.store_id), 'forbidden', 'この写真の説明は直せません');
+  assert(p.state === 'active', 'not_found', '写真が見つかりません');
+  assert(caption === null || typeof caption === 'string', 'invalid', '説明は文字で入力してください');
+  const text = typeof caption === 'string' ? caption.replace(/[\r\n\t]+/g, ' ').trim() : '';
+  assert(text.length <= MAX_CAPTION, 'invalid', `説明は${MAX_CAPTION}文字以内にしてください`);
+  await db.query(`UPDATE knowledge_photos SET caption = $2 WHERE id = $1`, [photoId, text === '' ? null : text]);
+  return { id: photoId, caption: text === '' ? null : text };
+}
+
 /** 消すのは、付けた本人と承認できる人だけ */
 export async function deletePhoto(db: Db, storage: Storage, actor: Actor, photoId: string): Promise<{ ok: true }> {
   const p = await loadPhoto(db, photoId);
