@@ -15,6 +15,7 @@ import {
   revertToVersion,
   verifyKnowledge,
   type KnowledgeInput,
+  deleteKnowledge,
 } from '../domain/knowledge.ts';
 import {
   approveProduct,
@@ -470,6 +471,8 @@ function routes(): Router<Ctx> {
   r.get('/knowledge/:id', async (c, _req, p) => json(await getKnowledge(c.db, c.actor, p.id!)));
   r.put('/knowledge/:id', async (c, req, p) =>
     json(await editKnowledge(c.db, c.tokenizer, c.actor, p.id!, knowledgeBody(await readJson(req)))));
+  // 消す（過去の版・写真も一緒に消える）。店長・本部か、書いて間もない本人だけ
+  r.delete('/knowledge/:id', async (c, _req, p) => json(await deleteKnowledge(c.db, c.storage, c.actor, p.id!)));
   r.get('/knowledge/:id/versions', async (c, _req, p) => json(await listVersions(c.db, c.actor, p.id!)));
   r.post('/knowledge/:id/versions/:version/approve', async (c, _req, p) =>
     json(await approveVersion(c.db, c.tokenizer, c.actor, p.id!, intParam(p.version, 'version'))));

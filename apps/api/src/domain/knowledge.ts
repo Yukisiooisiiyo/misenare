@@ -5,7 +5,8 @@
 import { bookmarkState } from './bookmarks.ts';
 import { readingCandidates, suggestReading, type Tokenizer } from '@misenare/search-core';
 import { maybeOne, one, type Db } from '../db/db.ts';
-import { assert, canAccessStore, canModerate, isTrusted, type Actor } from './actor.ts';
+import { assert, canAccessStore, canAdminister, canModerate, isTrusted, type Actor } from './actor.ts';
+import type { Storage } from '../storage/storage.ts';
 import { indexKnowledge } from './indexer.ts';
 import { assertStore } from './scope.ts';
 import { syncApprovalNotice } from './notices.ts';
@@ -57,6 +58,8 @@ export interface KnowledgeView {
    * 却下された投稿を、書いた本人の画面で「承認待ち」のまま見せないために返す（公開済みなら項目ごと無い）
    */
   draftState?: 'pending' | 'rejected';
+  /** 消せるか（deleteKnowledge と同じ判定。消すボタンを出すかどうかに使う） */
+  canDelete: boolean;
   /** 自分がブックマークしているか */
   bookmarked: boolean;
   /** ブックマークを付けられるか（自分が書いたものには付けられない） */
@@ -445,8 +448,62 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     verifiedBy: meta.verified_by,
     pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
     ...(k.status === 'published' ? {} : { draftState: v.state === 'rejected' ? 'rejected' as const : 'pending' as const }),
+    canDelete: await canDeleteKnowledge(db, actor, k),
     ...(await bookmarkState(db, actor, id, meta.created_by_id)),
   };
+}
+
+/** 書いた本人が、公開されたあとでも自分で消せる時間。書き間違いにすぐ気づいたときのため */
+export const SELF_DELETE_HOURS = 24;
+
+/**
+ * このナレッジを消せるか。
+ *
+ *   全店共通           … 本部だけ
+ *   店舗のナレッジ     … その店舗の店長・本部
+ *   書いた本人         … まだ一度も公開されていないもの（取り下げ）と、公開から間もなく、ほかの人の手が入っていないもの
+ *
+ * 公開されてしばらく経ったものや、ほかの人が直したものは、店のみんなのものになっている。
+ * 書いた人ひとりの判断で消せると、積み上げた内容がまとめて無くなりうるので、店長・本部に限る。
+ */
+async function canDeleteKnowledge(db: Db, actor: Actor, k: KnowledgeRow): Promise<boolean> {
+  if (!canAccessStore(actor, k.store_id)) return false;
+  if (k.store_id === null) return actor.adminScope === 'tenant';
+  if (canAdminister(actor, k.store_id)) return true;
+  const mine = await maybeOne<{ recent: boolean; touched: boolean; published: boolean }>(
+    db,
+    `SELECT k.created_at > now() - make_interval(hours => $3) AS recent,
+            EXISTS (SELECT 1 FROM knowledge_versions v WHERE v.knowledge_id = k.id AND v.edited_by <> $2) AS touched,
+            EXISTS (SELECT 1 FROM knowledge_versions v WHERE v.knowledge_id = k.id AND v.state IN ('published', 'superseded') AND v.decided_at IS NOT NULL) AS published
+       FROM knowledge k WHERE k.id = $1 AND k.created_by = $2`,
+    [k.id, actor.userId, SELF_DELETE_HOURS],
+  );
+  if (!mine || mine.touched) return false;
+  return !mine.published || mine.recent;
+}
+
+/**
+ * ナレッジを消す。過去の版・写真・ブックマークも一緒に消え、元に戻せない。
+ *
+ * 編集では、前の版が履歴に残る。お客様の個人情報などを書いてしまったときに、
+ * 「直す」だけでは消えないので、丸ごと消す口を用意する。
+ */
+export async function deleteKnowledge(db: Db, storage: Storage, actor: Actor, id: string): Promise<{ ok: true }> {
+  const k = await load(db, id, true);
+  assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは消せません');
+  assert(
+    await canDeleteKnowledge(db, actor, k), 'forbidden',
+    k.store_id === null ? '全店共通のナレッジを消せるのは本部のみです' : '消せるのは、店長・本部か、書いて間もない本人だけです',
+  );
+  // 行は外部キーで消えるが、保存先の写真の実体は消えないので、先に集めておく
+  const photos = await db.query<{ storage_key: string }>(`SELECT storage_key FROM knowledge_photos WHERE knowledge_id = $1`, [id]);
+  await db.query(`DELETE FROM knowledge WHERE id = $1`, [id]);
+  // タグの使われ方が変わるので、辞書の覚えを捨てる。承認待ちの知らせも数え直す
+  invalidateDictionary(actor.tenantId);
+  await syncApprovalNotice(db, actor.tenantId, k.store_id);
+  // 実体が消せなくても、消したことは成立させる。行は無くなって実体だけ残るので、キーと理由を残す
+  for (const p of photos) await storage.remove(p.storage_key).catch((err) => console.warn('写真の実体を消せませんでした', { key: p.storage_key, err }));
+  return { ok: true };
 }
 
 /**

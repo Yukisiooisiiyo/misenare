@@ -9,9 +9,16 @@ import {
   getKnowledge,
   listPending,
   listVersions,
+  deleteKnowledge,
   rejectVersion,
   revertToVersion,
 } from '../src/domain/knowledge.ts';
+import { addBookmark } from '../src/domain/bookmarks.ts';
+import { finishPhotoUpload, listPhotos, receivePhoto, startPhotoUpload } from '../src/domain/photos.ts';
+import { LocalStorage } from '../src/storage/storage.ts';
+import { mkdtemp, readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { recordSearchFeedback, search, zeroHitQueries } from '../src/domain/search.ts';
 import { exportDictionary, invalidateDictionary } from '../src/domain/tags.ts';
 import { freshDatabase, hq, manager, otherTenant, STORE_A, STORE_B, storeBStaff, T, tokenizer, trusted, visitor } from './helpers.ts';
@@ -270,5 +277,95 @@ describe('「古い」の日数は1か所で決める', () => {
     const { STALE_DAYS } = await import('../src/domain/knowledge.ts');
     const who = await db.withTenant(T, (q) => me(q, trusted));
     assert.equal(who.staleDays, STALE_DAYS);
+  });
+});
+
+describe('ナレッジを消す', () => {
+  const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 4]);
+  let storage: LocalStorage;
+  let dir: string;
+  before(async () => { dir = await mkdtemp(join(tmpdir(), 'misenare-delete-')); storage = new LocalStorage(dir); });
+  const post = (actor: typeof trusted, title: string, storeId: string | null = STORE_A) =>
+    run((q) => createKnowledge(q, tokenizer, actor, { storeId, title, body: 'お客様の電話番号 090-0000-0000（書いてはいけなかった）', tagNames: ['#消す'] }));
+  const gone = async (id: string) => {
+    for (const who of [visitor, trusted, manager, hq]) await rejects(run((q) => getKnowledge(q, who, id)), 'not_found');
+    assert.equal((await run((q) => q.query(`SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1`, [id]))).length, 0, '過去の版も残らない');
+  };
+
+  it('店長は、自店舗のナレッジを消せる。過去の版・写真・ブックマークも一緒に消える', async () => {
+    const k = await post(trusted, '個人情報を書いてしまった');
+    await run((q) => editKnowledge(q, tokenizer, trusted, k.id, { title: '個人情報を書いてしまった', body: '直した本文', tagNames: ['#消す'], baseVersion: 1 }));
+    const photo = await run(async (q) => {
+      const plan = await startPhotoUpload(q, storage, trusted, k.id, { contentType: 'image/jpeg', bytes: JPEG.byteLength });
+      await receivePhoto(q, storage, trusted, plan.photoId, JPEG, 'image/jpeg');
+      await finishPhotoUpload(q, storage, trusted, plan.photoId);
+      return plan.photoId;
+    });
+    await run((q) => addBookmark(q, visitor, k.id));
+    await readFile(join(dir, T, k.id, `${photo}.jpg`));
+    // 直しただけでは、前の版が履歴に残る（だから消す口が要る）
+    const versions = await run((q) => listVersions(q, visitor, k.id));
+    assert.ok(versions.some((v) => v.body.includes('090-0000-0000')));
+
+    assert.equal((await run((q) => getKnowledge(q, manager, k.id))).canDelete, true);
+    assert.deepEqual(await run((q) => deleteKnowledge(q, storage, manager, k.id)), { ok: true });
+    await gone(k.id);
+    await rejects(run((q) => listPhotos(q, storage, manager, k.id)), 'not_found');
+    await assert.rejects(readFile(join(dir, T, k.id, `${photo}.jpg`)), /ENOENT/, '写真の実体も消える');
+    assert.equal((await run((q) => q.query(`SELECT 1 FROM knowledge_bookmarks WHERE knowledge_id = $1`, [k.id]))).length, 0);
+    assert.deepEqual(ids(await run((q) => search(q, tokenizer, trusted, STORE_A, '#消す'))), [], '検索にも出ない');
+  });
+
+  it('書いた本人は、公開から間もなく、ほかの人の手が入っていないものなら自分で消せる', async () => {
+    const k = await post(trusted, 'すぐ気づいた書き間違い');
+    assert.equal((await run((q) => getKnowledge(q, trusted, k.id))).canDelete, true);
+    assert.equal((await run((q) => getKnowledge(q, visitor, k.id))).canDelete, false, 'ほかの人には消せない');
+    await rejects(run((q) => deleteKnowledge(q, storage, visitor, k.id)), 'forbidden');
+    await run((q) => deleteKnowledge(q, storage, trusted, k.id));
+    await gone(k.id);
+  });
+
+  it('時間が経ったもの・ほかの人が直したものは、書いた本人でも消せない（店長・本部だけ）', async () => {
+    const old = await post(trusted, '前からあるナレッジ');
+    await run((q) => q.query(`UPDATE knowledge SET created_at = now() - interval '2 days' WHERE id = $1`, [old.id]));
+    assert.equal((await run((q) => getKnowledge(q, trusted, old.id))).canDelete, false);
+    await rejects(run((q) => deleteKnowledge(q, storage, trusted, old.id)), 'forbidden');
+
+    const shared = await post(trusted, 'みんなで直したナレッジ');
+    await run((q) => editKnowledge(q, tokenizer, manager, shared.id, { title: 'みんなで直したナレッジ', body: '店長が直した', tagNames: ['#消す'], baseVersion: 1 }));
+    await rejects(run((q) => deleteKnowledge(q, storage, trusted, shared.id)), 'forbidden');
+
+    // 店長と本部は消せる
+    await run((q) => deleteKnowledge(q, storage, manager, old.id));
+    await run((q) => deleteKnowledge(q, storage, hq, shared.id));
+    await gone(old.id);
+    await gone(shared.id);
+  });
+
+  it('新人は、まだ公開されていない自分の投稿を取り下げられる（却下されたものも）', async () => {
+    const waiting = await post(visitor, '承認待ちの投稿');
+    assert.equal((await run((q) => getKnowledge(q, visitor, waiting.id))).canDelete, true);
+    await run((q) => deleteKnowledge(q, storage, visitor, waiting.id));
+    await gone(waiting.id);
+
+    const rejected = await post(visitor, '却下された投稿');
+    await run((q) => rejectVersion(q, trusted, rejected.id, 1));
+    await run((q) => q.query(`UPDATE knowledge SET created_at = now() - interval '30 days' WHERE id = $1`, [rejected.id]));
+    await run((q) => deleteKnowledge(q, storage, visitor, rejected.id));
+    await gone(rejected.id);
+  });
+
+  it('全店共通は本部だけ。他店舗の店長・他社からは消せない', async () => {
+    const all = await post(hq, '全店共通のナレッジ', null);
+    await rejects(run((q) => deleteKnowledge(q, storage, manager, all.id)), 'forbidden');
+    assert.equal((await run((q) => getKnowledge(q, manager, all.id))).canDelete, false);
+
+    const b = await run((q) => createKnowledge(q, tokenizer, storeBStaff, { storeId: STORE_B, title: '駅前店のナレッジ', body: '本文', tagNames: ['#消す'] }));
+    await rejects(run((q) => deleteKnowledge(q, storage, manager, b.id)), 'forbidden');
+    await rejects(db.withTenant(otherTenant.tenantId, (q) => deleteKnowledge(q, storage, otherTenant, b.id)), 'not_found');
+    assert.equal((await run((q) => getKnowledge(q, storeBStaff, b.id))).title, '駅前店のナレッジ', '消えていない');
+
+    await run((q) => deleteKnowledge(q, storage, hq, all.id));
+    await gone(all.id);
   });
 });
