@@ -1221,6 +1221,19 @@ function renderWrite(existing: Knowledge | null): void {
     message,
     h('button', { type: 'submit', class: 'primary' }, isTrusted() ? '公開する' : '承認を依頼する'),
     isTrusted() ? null : h('p', { class: 'note' }, 'trusted のメンバーが承認すると公開されます。'),
+    // 消すのは、この画面からだけ（読む画面に置くと、見ているだけのときに押してしまう）。
+    // 直しただけでは前の版が履歴に残るので、書いてはいけないものを書いたときは、丸ごと消す
+    ...(existing?.canDelete ? [
+      h('h2', {}, existing.status === 'published' ? 'このナレッジを消す' : 'この投稿を取り下げる'),
+      h('p', { class: 'hint' }, '過去の版と写真もいっしょに消えます。元に戻せません。直すだけなら、上の内容を書き換えてください。'),
+      confirmAction(existing.status === 'published' ? '消す' : '取り下げる', 'secondary', '元に戻せません。消しますか？', async () => {
+        await api('DELETE', `/knowledge/${existing.id}`);
+        writeDraft(draftKey, null);
+        toast('消しました');
+        await loadDictionary();
+        location.hash = '#/home';
+      }),
+    ] : []),
   );
   // 送信中は押し直せないようにする。連打で同じナレッジが2件公開されるのを防ぐ
   submitOnce(form, submit);

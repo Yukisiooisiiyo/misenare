@@ -49,6 +49,16 @@ describe('HTTP API', () => {
     assert.equal(fb.status, 200);
   });
 
+  it('ナレッジを消す：書いていない人は 403、店長は消せて、消したあとは 404', async () => {
+    const created = await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { title: '消す試験', body: '本文', tagNames: ['#消す試験'] });
+    assert.equal(created.status, 201);
+    assert.equal((await call(null, 'DELETE', `/knowledge/${created.body.id}`)).status, 401);
+    assert.equal((await call(visitor, 'DELETE', `/knowledge/${created.body.id}`)).status, 403);
+    assert.equal((await call(manager, 'DELETE', `/knowledge/${created.body.id}`)).status, 200);
+    assert.equal((await call(trusted, 'GET', `/knowledge/${created.body.id}`)).status, 404);
+    assert.equal((await call(manager, 'DELETE', `/knowledge/${created.body.id}`)).status, 404);
+  });
+
   it('権限のない操作は 403、入力の誤りは 400、競合は 409 で返す', async () => {
     assert.equal((await call(trusted, 'GET', `/stores/${STORE_B}/search?q=x`)).status, 403);
     assert.equal((await call(trusted, 'POST', `/stores/${STORE_A}/knowledge`, { title: '', body: '', tagNames: ['#x'] })).status, 400);

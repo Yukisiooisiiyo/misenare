@@ -52,11 +52,33 @@ const browser = await chromium.launch();
 const result = {};
 const errors = [];
 
+// 送ったまま返っていない要求の数。開閉できるまとまり（details）は、開いてから中身を取りに行くので、
+// 「開いて 250ms 待つ」だけでは、取り終わる前に拾ってしまうことがあった（承認・管理で、押せるものが消えて見える）
+const inflight = new WeakMap();
+function watch(page) {
+  const state = { n: 0 };
+  const done = () => { state.n = Math.max(0, state.n - 1); };
+  page.on('request', () => { state.n += 1; });
+  page.on('requestfinished', done);
+  page.on('requestfailed', done);
+  inflight.set(page, state);
+}
+/** 要求が出ていない状態が ms 続くまで待つ（長くても limit まで） */
+async function quiet(page, ms = 300, limit = 8000) {
+  const state = inflight.get(page);
+  const end = Date.now() + limit;
+  let calm = 0;
+  while (Date.now() < end) {
+    if (!state || state.n === 0) { calm += 50; if (calm >= ms) return; } else calm = 0;
+    await page.waitForTimeout(50);
+  }
+}
+
 async function collect(page, name) {
   await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForTimeout(350);
   await page.evaluate(() => { for (const d of document.querySelectorAll('details')) d.open = true; });
-  await page.waitForTimeout(250);
+  await quiet(page);
   result[name] = await page.evaluate(() => {
     const norm = (s) => (s ?? '').replace(/\s+/g, ' ').trim().replace(/[0-9a-f]{8}-[0-9a-f-]{27}/g, '<id>').replace(/\d+/g, '#').slice(0, 48);
     const rgb = (c) => { const m = /rgba?\(([^)]+)\)/.exec(c); if (!m) return null; const p = m[1].split(/[, /]+/).map(Number); return { r: p[0], g: p[1], b: p[2], a: p[3] ?? 1 }; };
@@ -94,6 +116,7 @@ async function phone() {
   const ctx = await browser.newContext({ ...devices['iPhone 13'], locale: 'ja-JP', colorScheme: process.env.FLOWS_SCHEME === 'dark' ? 'dark' : 'light' });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(String(e)));
+  watch(page);
   return page;
 }
 const to = async (page, hash, wait) => {
