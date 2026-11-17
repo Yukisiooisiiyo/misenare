@@ -26,14 +26,17 @@ import {
   deleteProduct,
   linkKnowledgeToProduct,
   listPendingProducts,
+  listProducts,
   productHistory,
   rejectProductChange,
   registerProduct,
   scanBarcode,
+  unlinkKnowledgeFromProduct,
   updateProduct,
   type ProductInput,
   type ProductPatch,
 } from '../domain/products.ts';
+import { createArea, deleteArea, listAreas, renameArea } from '../domain/areas.ts';
 import {
   addHandover,
   deleteHandover,
@@ -437,6 +440,13 @@ function routes(): Router<Ctx> {
     await heavy(c);
     return json(await scanBarcode(c.db, c.tokenizer, c.actor, p.storeId!, p.jan!));
   });
+  // 登録済みの商品を名前から辿る（バーコードが読めない・手元に無いとき）
+  r.get('/stores/:storeId/products', async (c, req, p) => {
+    await heavy(c);
+    const params = new URL(req.url).searchParams;
+    const offset = Number(params.get('offset') ?? '0');
+    return json(await listProducts(c.db, c.actor, p.storeId!, { q: params.get('q') ?? '', ...(Number.isInteger(offset) ? { offset } : {}) }));
+  });
   r.post('/stores/:storeId/products', async (c, req, p) =>
     json(await registerProduct(c.db, c.actor, p.storeId!, productBody(await readJson(req))), 201));
   r.patch('/stores/:storeId/products/:productId', async (c, req, p) =>
@@ -459,6 +469,18 @@ function routes(): Router<Ctx> {
     await linkKnowledgeToProduct(c.db, c.actor, p.id!, p.productId!);
     return json({ ok: true });
   });
+  r.delete('/knowledge/:id/products/:productId', async (c, _req, p) => {
+    await unlinkKnowledgeFromProduct(c.db, c.actor, p.id!, p.productId!);
+    return json({ ok: true });
+  });
+
+  // --- 売場（店舗の中の場所の名前） ---------------------------------------------
+  r.get('/stores/:storeId/areas', async (c, _req, p) => json(await listAreas(c.db, c.actor, p.storeId!)));
+  r.post('/stores/:storeId/areas', async (c, req, p) =>
+    json(await createArea(c.db, c.actor, p.storeId!, ((await readJson<Record<string, unknown> | null>(req)) ?? {}).name), 201));
+  r.patch('/areas/:areaId', async (c, req, p) =>
+    json(await renameArea(c.db, c.actor, p.areaId!, ((await readJson<Record<string, unknown> | null>(req)) ?? {}).name)));
+  r.delete('/areas/:areaId', async (c, _req, p) => json(await deleteArea(c.db, c.actor, p.areaId!)));
 
   // --- 書く ---------------------------------------------------------------
   r.post('/stores/:storeId/knowledge', async (c, req, p) => {

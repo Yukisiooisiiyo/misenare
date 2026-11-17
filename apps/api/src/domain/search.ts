@@ -27,6 +27,8 @@ export interface SearchHit {
   /** 内容を変えずに「今も正しい」と確認した日時（承認・編集・確認のたび更新） */
   verifiedAt: string | null;
   verifiedBy: string | null;
+  /** 全店共通のナレッジか（直せるのが本部だけなので、画面が操作を出すかどうかに使う） */
+  allStores: boolean;
 }
 
 export interface SearchResult {
@@ -115,8 +117,9 @@ export async function rankByGroups(
 /** 検索結果の表示用の情報（タイトル・抜粋・タグ・確認日）を付ける */
 export async function describeHits(db: Db, ranked: Array<{ id: string; score: number; matchedTerms: string[] }>): Promise<SearchHit[]> {
   if (ranked.length === 0) return [];
-  const rows = await db.query<{ id: string; title: string; body: string; updated_at: string; verified_at: string | null; verified_by: string | null; tags: string[] }>(
+  const rows = await db.query<{ id: string; title: string; body: string; updated_at: string; verified_at: string | null; verified_by: string | null; tags: string[]; all_stores: boolean }>(
     `SELECT k.id, v.title, v.body, v.edited_at::text AS updated_at, k.verified_at::text AS verified_at, u.name AS verified_by,
+            (k.store_id IS NULL) AS all_stores,
             coalesce(array_agg(h.name ORDER BY h.use_count DESC) FILTER (WHERE h.id IS NOT NULL), '{}') AS tags
        FROM knowledge k
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
@@ -141,6 +144,7 @@ export async function describeHits(db: Db, ranked: Array<{ id: string; score: nu
       updatedAt: row.updated_at,
       verifiedAt: row.verified_at,
       verifiedBy: row.verified_by,
+      allStores: row.all_stores,
     }];
   });
 }

@@ -349,6 +349,15 @@ button.tag { cursor: pointer; }
 .notice-new { background: var(--pending); color: var(--paper); }
 .notice-acked { color: var(--sign); font-weight: 700; }
 .notice .primary { margin-top: 10px; }
+/* 商品と売場：直す画面の下の操作、売場の名前、売場を選ぶ欄 */
+.product-edit { display: flex; flex-direction: column; gap: 16px; }
+.product-save { justify-content: flex-start; margin-left: 0; }
+.product-save .primary { margin-top: 0; }
+.product-links h3 { font-size: 15px; margin: 14px 0 4px; }
+.product-links .search-bar { margin-top: 4px; }
+.area-row input { flex: 1 1 160px; min-width: 0; }
+.area-pick { display: flex; flex-direction: column; gap: 8px; }
+.area-pick.area-off { display: none; }
 /* ナレッジ：全店共通の印、これまでの版、自分が書いたもの */
 .kind-row { margin: 0; }
 .version .hint, .my-posts .row .hint, .my-post-state { flex: 1 1 100%; }
