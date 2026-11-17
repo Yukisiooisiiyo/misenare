@@ -1,12 +1,14 @@
 # 1台で全部動かす（本番と、本番のつもりで確かめる環境）。
 #
-# 中身：PostgreSQL + アプリ + Caddy（https を自動で用意）+ 夜間バッチ。
+# 中身：PostgreSQL + アプリ + Caddy（https を自動で用意）+ 夜間バッチ + 退避（バックアップ）。
 # ミセナレは1台で動く設計なので、無料枠の小さな箱にもそのまま載る。
 #
 #   cp .env.example .env && vi .env     ← 先にここを埋める
 #   docker compose up -d --build
 #   docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
 #   docker compose run --rm api npx tsx apps/api/src/cli/bootstrap.ts "会社名" "店舗名" "あなたの名前"
+#
+# 退避（バックアップ）は backup サービスが毎晩取る。戻し方は docs/deploy.md の 15 章。
 #
 # 手元で開発するときは、リポジトリの root にある docker-compose.yml を使う。
 # こちらは https と夜間バッチが付き、アプリの口を外に出さない。
@@ -46,8 +48,12 @@ services:
       # Caddy の後ろに置くので、接続元の IP は X-Forwarded-For から読む
       TRUST_PROXY: '1'
       PHOTO_DIR: /var/misenare/photos
+      # 退避の結果（backup サービスが書く）。運営者の画面の「安全」に出す
+      BACKUP_STATUS_FILE: /var/misenare/backup-status/status.json
     volumes:
       - photos:/var/misenare/photos
+      # 読むだけ。退避そのもの（backups）は、アプリからは見えない場所に置く
+      - backup_status:/var/misenare/backup-status:ro
     # ここも外に出さない。入口は Caddy だけ
     expose: ['8787']
     restart: unless-stopped
@@ -77,8 +83,11 @@ services:
     environment:
       DATABASE_URL: postgresql://misenare:${DB_APP_PASSWORD}@db:5432/misenare
       PHOTO_DIR: /var/misenare/photos
+      # 退避が取れていない日が続いたら、運営者にメールで知らせる（docs/deploy.md の 15 章）
+      BACKUP_STATUS_FILE: /var/misenare/backup-status/status.json
     volumes:
       - photos:/var/misenare/photos
+      - backup_status:/var/misenare/backup-status:ro
     restart: unless-stopped
     # 日本時間の 03:30（= 18:30 UTC）に走る
     command:
@@ -92,8 +101,42 @@ services:
           npx tsx apps/api/src/batch/nightly.ts || echo "夜間バッチが失敗しました（次の晩にやり直します）"
         done
 
+  # 退避（バックアップ）。1日1回（日本時間の 03:00）、DB をまるごと書き出し、写真を写す。
+  # 起動したときに新しい退避が無ければ、その場で1回取る。台本は ./backup/backup.sh、戻し方は docs/deploy.md の 15 章。
+  #
+  # **置き場所はこの台の中**（backups ボリューム）。操作の誤りや、壊れた入れ替えには効くが、
+  # 台やディスクごと無くす事故には効かない。外への持ち出しは別に要る（同じ 15 章）。
+  #
+  # DB と同じイメージを使う（pg_dump の版をサーバーと揃えるため。イメージも増えない）。
+  # 行レベルセキュリティを素通りしないと中身を書き出せないので、ここだけは管理用のロールでつなぐ。
+  backup:
+    image: postgres:16
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      PGHOST: db
+      PGUSER: postgres
+      PGPASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD を決めてください}
+      PGDATABASE: misenare
+      # 残す日数（DB の退避）と、元から消えた写真を写しの側に残す日数
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_PHOTO_GRACE_DAYS: ${BACKUP_PHOTO_GRACE_DAYS:-30}
+    volumes:
+      # フォルダごと差し込む（1ファイルだけを差し込むと、書き換えが動いているコンテナに届かない）
+      - ./backup:/opt/backup:ro
+      - backups:/backups
+      - backup_status:/status
+      # 写真は読むだけ
+      - photos:/photos:ro
+    restart: unless-stopped
+    entrypoint: ['bash', '/opt/backup/backup.sh', 'loop']
+
 volumes:
   pgdata:
   photos:
   caddy_data:
   caddy_config:
+  # 退避そのもの（DB の書き出しと、写真の写し）。backup サービスだけが触る
+  backups:
+  # 退避の結果を書いた小さなファイルだけ。アプリと夜間バッチが読む
+  backup_status:

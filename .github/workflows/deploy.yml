@@ -34,11 +34,23 @@ jobs:
             # スキーマのマイグレーションを、新しいイメージで適用してからアプリを入れ替える。
             # 失敗したら script_stop でここで止まり、アプリは旧版のまま（壊れた新版を出さない）。
             sudo docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
-            # アプリ・バッチ・Caddy を新イメージで起動
+            # アプリ・バッチ・Caddy・退避を新イメージで起動
             sudo docker compose up -d
             # Caddyfile は1ファイルだけを差し込んでいるので、書き換わっても動いている Caddy には届かない。
             # 変わったときだけ作り直す（証明書は caddy_data に残る）
             if ! sudo git diff --quiet "$before" HEAD -- deploy/Caddyfile; then
               sudo docker compose up -d --force-recreate caddy
             fi
+            # 退避の台本（deploy/backup）はフォルダごと差し込んでいるので、書き換えは次の晩の分から効く。
+            # 次の時刻まで寝ている輪も新しくしたいので、変わっていたら作り直す（初めて入れるときは、上の up -d が起こしている）
+            if sudo git cat-file -e "$before:deploy/backup/backup.sh" 2>/dev/null && ! sudo git diff --quiet "$before" HEAD -- deploy/backup; then
+              sudo docker compose up -d --force-recreate backup
+            fi
             sudo docker image prune -f
+            # 新しいアプリが起きて、DB につながっていることを確かめる（起きなければ、ここで失敗にして気づけるようにする）
+            for i in $(seq 1 30); do sudo docker compose exec -T api node -e "fetch('http://127.0.0.1:8787/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" && break; sleep 2; done
+            sudo docker compose exec -T api node -e "fetch('http://127.0.0.1:8787/ready').then(async (r) => { console.log('アプリ: /ready', r.status, await r.text()); process.exit(r.ok ? 0 : 1); }).catch((e) => { console.log('アプリ: 応答なし', String(e)); process.exit(1); })"
+            sudo docker compose ps
+            # 退避が取れているかを、この記録に残す（退避が1つも無いときは、起動してすぐに1回取る）
+            for i in $(seq 1 45); do sudo docker compose exec -T backup test -s /status/status.json && break; sleep 2; done
+            sudo docker compose exec -T backup bash /opt/backup/backup.sh status

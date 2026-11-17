@@ -4,12 +4,13 @@
 //               POST /operator/auth/password  設定リンクでパスワードを決める
 //               POST /operator/auth/login     メアドとパスワード（設定していれば確認コード）で入る
 //   ログイン後  会社と店舗の一覧・作成・編集・停止・再開・完全削除、契約の控え、利用者を止める・戻す
-//               2段階の確認の設定、ログインの記録、操作の記録、問い合わせの一覧
+//               2段階の確認の設定、ログインの記録、操作の記録、問い合わせの一覧、退避（バックアップ）の様子
 //
 // 鍵（セッションのトークン）は Authorization で受ける。クッキーに入れるのは「前に入ったことのあるブラウザー」の印だけで、
 // これは鍵ではない（パスワードと確認コードは毎回要る）。印は HttpOnly なので、画面のスクリプトからは読めない。
 
 import type { Database } from '../db/db.ts';
+import { readBackupStatus } from '../domain/backupStatus.ts';
 import {
   addStore, createTenant, deleteTenant, DEVICE_DAYS, disableTotp, enableTotp, getTenant, issueAdminInvite, listInquiries,
   listTenants, listTenantUsers, loginOperator, logoutOperator, recentLog, recentLogins, regenerateRecoveryCodes,
@@ -124,6 +125,8 @@ export async function handleOperator(deps: OperatorDeps, req: Request, url: URL,
   if (path === '/log' && method === 'GET') return json(await recentLog(database, url.searchParams.get('before')));
   if (path === '/logins' && method === 'GET') return json(await recentLogins(database, url.searchParams.get('before')));
   if (path === '/inquiries' && method === 'GET') return json(await listInquiries(database, url.searchParams.get('before')));
+  // 退避（バックアップ）が取れているか。取るのは別のコンテナで、ここは結果を読むだけ
+  if (path === '/backup' && method === 'GET') return json(await readBackupStatus(env));
 
   // 2段階の確認。パスワードやコードを確かめ直す口なので、画面を触れた人が当てに来られないよう、運営者ごとに回数を絞る
   if (path === '/security' && method === 'GET') return json(await securityStatus(database, op));
