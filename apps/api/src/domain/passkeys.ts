@@ -305,7 +305,7 @@ export async function loginWithPasskey(
     );
     const sessionToken = issueToken(handle.tenantId);
     await db.query(
-      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name, origin) VALUES ($1, $2, $3, $4, 'passkey')`,
       [handle.tenantId, handle.userId, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
     );
     return { sessionToken, userId: handle.userId } as const;

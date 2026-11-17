@@ -67,9 +67,10 @@ describe('招待と端末セッション', () => {
     if (counter.statements === undefined) return; // pg ドライバーには数える口が無い
     const before = counter.statements;
     assert.equal((await call(hqToken, 'GET', '/me')).status, 200);
-    // 内訳：BEGIN, set_config×2, verifySession, users, memberships, /me の本体3本, COMMIT = 10 本。
+    // 内訳：BEGIN, set_config×2, verifySession, users, memberships, /me の本体5本（うち2本は「増えた端末」と
+    // 「登録されたメールアドレス」の知らせ）, COMMIT = 12 本。
     // 以前は同じ GET で BEGIN / set_config / COMMIT の組が3回走り、TZ の分を除いても 15 本だった
-    assert.equal(counter.statements - before, 10);
+    assert.equal(counter.statements - before, 12);
     // 取引が1つだけであることを直接確かめる
     const log: string[] = [];
     const orig = db.withTenant.bind(db);
@@ -163,6 +164,83 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(managerToken, 'PATCH', `/users/${newbieId}`, { adminScope: 'store' })).status, 403);
     const meRes = await call(managerToken, 'GET', '/me');
     assert.equal((await call(managerToken, 'PATCH', `/users/${meRes.body.id}`, { trustLevel: 'visitor' })).status, 403);
+  });
+
+  describe('自分の端末', () => {
+    type Device = { id: string; deviceName: string | null; origin: string | null; issuedBy: string | null; current: boolean; revoked: boolean };
+    const devices = async (token: string) => (await call(token, 'GET', '/me/devices')).body as Device[];
+    const fresh = async (token: string) => (await call(token, 'GET', '/me')).body.newDevices as Device[];
+
+    it('自分のアカウントで入っている端末だけが並び、いまの端末に印が付く。出どころも分かる', async () => {
+      const list = await devices(newbieToken);
+      assert.equal(list.length, 1);
+      assert.equal(list[0]!.deviceName, 'iPhone');
+      assert.equal(list[0]!.current, true);
+      assert.equal(list[0]!.origin, 'invite');
+      assert.equal(list[0]!.issuedBy, '佐藤店長', '招待を出した人が分かる');
+      assert.deepEqual(await fresh(newbieToken), [], '自分しか入っていなければ、知らせは無い');
+      assert.equal((await call(null, 'GET', '/me/devices')).status, 401);
+    });
+
+    it('店長が端末を足すと、本人の端末に「増えた」と出る。足された側で「見た」を押しても、本人の知らせは消えない', async () => {
+      const key = await call(managerToken, 'POST', '/invitations', { storeId: STORE_A, userId: newbieId });
+      const added = await call(null, 'POST', '/auth/accept', { token: key.body.token, deviceName: '店長の手元の端末' });
+      assert.equal(added.body.userId, newbieId, '本人として入れる鍵');
+      const addedToken = added.body.sessionToken as string;
+
+      const seen = await fresh(newbieToken);
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0]!.deviceName, '店長の手元の端末');
+      assert.equal(seen[0]!.origin, 'added');
+      assert.equal(seen[0]!.issuedBy, '佐藤店長', 'だれが足したかが出る');
+      assert.equal((await devices(newbieToken)).length, 2);
+
+      // 足された側の端末で「見た」を押す → その端末の知らせが消えるだけ
+      assert.equal((await call(addedToken, 'POST', '/me/devices/seen')).status, 200);
+      assert.equal((await fresh(newbieToken)).length, 1, '本人の端末の知らせは残る');
+
+      // 足した人がこっそり止めても、跡は残る
+      const target = (await devices(newbieToken)).find((d) => !d.current)!;
+      assert.equal((await call(managerToken, 'DELETE', `/sessions/${target.id}`)).status, 200);
+      assert.equal((await call(addedToken, 'GET', '/me')).status, 401);
+      const after = await fresh(newbieToken);
+      assert.equal(after.length, 1);
+      assert.equal(after[0]!.revoked, true, '止められた端末も、増えたことは伝える');
+      assert.equal((await devices(newbieToken)).length, 1, '一覧は、いま入っている端末だけ');
+
+      // 本人の端末で「見た」を押すと消える
+      await call(newbieToken, 'POST', '/me/devices/seen');
+      assert.deepEqual(await fresh(newbieToken), []);
+    });
+
+    it('自分の端末は自分で止められる（管理者でなくてよい）。他人の端末は止められない', async () => {
+      const before = process.env.APP_URL;
+      process.env.APP_URL = 'https://app.example.com';
+      try {
+        const link = await call(newbieToken, 'POST', '/me/device-link', {});
+        assert.equal(link.status, 201);
+        const token = decodeURIComponent(/#invite=(.+)$/.exec(link.body.url)![1]!);
+        const second = await call(null, 'POST', '/auth/accept', { token, deviceName: '家のパソコン' });
+        const secondToken = second.body.sessionToken as string;
+        const list = await devices(newbieToken);
+        const pc = list.find((d) => d.deviceName === '家のパソコン')!;
+        assert.equal(pc.origin, 'self', '自分で出したリンクで増えた端末');
+        assert.equal(pc.issuedBy, null);
+        assert.equal((await fresh(newbieToken)).length, 1, '自分で足した端末も、元の端末には出る');
+
+        // 他人（店長）の端末は止められない
+        const managers = await devices(managerToken);
+        assert.equal((await call(newbieToken, 'DELETE', `/sessions/${managers[0]!.id}`)).status, 403);
+        // 自分の端末は止められる
+        assert.equal((await call(newbieToken, 'DELETE', `/sessions/${pc.id}`)).status, 200);
+        assert.equal((await call(secondToken, 'GET', '/me')).status, 401);
+        assert.equal((await call(newbieToken, 'GET', '/me')).status, 200);
+        await call(newbieToken, 'POST', '/me/devices/seen');
+      } finally {
+        if (before === undefined) delete process.env.APP_URL;
+        else process.env.APP_URL = before;
+      }
+    });
   });
 
   it('店長は、同じ店の別の店長を止められない。端末も切れない（できるのは本部だけ）', async () => {
