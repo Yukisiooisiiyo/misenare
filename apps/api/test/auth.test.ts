@@ -165,6 +165,26 @@ describe('招待と端末セッション', () => {
     assert.equal((await call(managerToken, 'PATCH', `/users/${meRes.body.id}`, { trustLevel: 'visitor' })).status, 403);
   });
 
+  it('店長は、同じ店の別の店長を止められない。端末も切れない（できるのは本部だけ）', async () => {
+    const invited = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: 'もう一人の店長', trustLevel: 'trusted', adminScope: 'store' });
+    const other = await call(null, 'POST', '/auth/accept', { token: invited.body.token, deviceName: '店長2のスマホ' });
+    const otherId = other.body.userId as string;
+    assert.equal((await call(managerToken, 'PATCH', `/users/${otherId}`, { status: 'disabled' })).status, 403);
+    assert.equal((await call(managerToken, 'PATCH', `/users/${otherId}`, { trustLevel: 'visitor' })).status, 403);
+    const sessions = await db.withTenant(T, (q) => q.query<{ id: string }>(`SELECT id FROM sessions WHERE user_id = $1`, [otherId]));
+    assert.equal((await call(managerToken, 'DELETE', `/sessions/${sessions[0]!.id}`)).status, 403);
+    assert.equal((await call(other.body.sessionToken, 'GET', '/me')).status, 200, '止められていない');
+    // 本部はできる
+    assert.equal((await call(hqToken, 'PATCH', `/users/${otherId}`, { status: 'disabled' })).status, 200);
+    assert.equal((await call(other.body.sessionToken, 'GET', '/me')).status, 401);
+  });
+
+  it('存在しない利用者への変更は 404（500 にしない）', async () => {
+    const missing = '40000000-0000-0000-0000-0000000000ee';
+    assert.equal((await call(hqToken, 'PATCH', `/users/${missing}`, { trustLevel: 'trusted' })).status, 404);
+    assert.equal((await call(managerToken, 'PATCH', `/users/${missing}`, { status: 'disabled' })).status, 404);
+  });
+
   it('無効化すると、その人の端末からは即座に使えなくなる', async () => {
     assert.equal((await call(managerToken, 'PATCH', `/users/${newbieId}`, { status: 'disabled' })).status, 200);
     assert.equal((await call(newbieToken, 'GET', '/me')).status, 401);

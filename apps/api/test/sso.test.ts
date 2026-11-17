@@ -7,12 +7,15 @@ import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import {
-  addProvider, checkConnection, emailDomain, finishSso, listProviders, resetSecretBox, startSso,
+  addProvider, checkConnection, emailDomain, finishSso, listProviders, redeemSsoHandoff, resetSecretBox, startSso,
   sweepSsoStates, verifyDomain, VERIFY_PREFIX,
 } from '../src/domain/sso.ts';
 import { generateKey, isSealed } from '../src/crypto/secretBox.ts';
-import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
-import { freshDatabase, hq, manager, OTHER_T, otherTenant, STORE_A, T, trusted } from './helpers.ts';
+import { createApp, resetSsoSite } from '../src/http/app.ts';
+import { SessionAuthenticator } from '../src/http/auth.ts';
+import { MemoryRateLimiter } from '../src/http/rateLimit.ts';
+import { BROWSER, claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
+import { freshDatabase, hq, manager, OTHER_T, otherTenant, STORE_A, T, tokenizer, trusted } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 let db: TestDatabase;
@@ -44,12 +47,17 @@ async function setup(over: Partial<Parameters<typeof addProvider>[2]> = {}) {
 
 /** 入口から戻りまでを一通り。claims を差し替えて、異常も試せる */
 async function roundTrip(email = 'tanaka@kdenki.example.co.jp', over: Record<string, unknown> = {}) {
-  const start = await startSso(db, directory, SITE, { email });
+  const start = await startSso(db, directory, SITE, { email, clientChallenge: BROWSER.challenge });
   const url = new URL(start.authorizeUrl);
   const state = url.searchParams.get('state')!;
   const nonce = url.searchParams.get('nonce')!;
   idp.issue(claimsFor(idp, { email, nonce, ...over }));
-  return { url, state, finish: () => finishSso(db, directory, SITE, { code: 'code-1', state }) };
+  // 戻り（引換の符丁をもらう）と、ブラウザーの受け取り（符丁を鍵に替える）を続けて行う
+  const finish = async () => {
+    const back = await finishSso(db, directory, SITE, { code: 'code-1', state });
+    return redeemSsoHandoff(db, { code: back.handoffCode, verifier: BROWSER.verifier });
+  };
+  return { url, state, finish };
 }
 
 describe('メールアドレスのドメイン', () => {
@@ -159,7 +167,7 @@ describe('入口', () => {
 
   it('登録の無いドメインは、招待の案内に戻す', async () => {
     await setup();
-    await assert.rejects(startSso(db, directory, SITE, { email: 'a@yodobashi.example.com' }),
+    await assert.rejects(startSso(db, directory, SITE, { email: 'a@yodobashi.example.com', clientChallenge: BROWSER.challenge }),
       /まだ用意されていません/);
     await db.withTenant(T, (q) => q.query(`DELETE FROM sso_domains`));
     await db.withTenant(T, (q) => q.query(`DELETE FROM sso_providers`));
@@ -167,8 +175,8 @@ describe('入口', () => {
 
   it('戻り先は経路だけを通す（外のサイトに飛ばさない）', async () => {
     await setup();
-    const inside = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', returnTo: '#/k/abc' });
-    const outside = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', returnTo: 'https://evil.example.com' });
+    const inside = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', returnTo: '#/k/abc', clientChallenge: BROWSER.challenge });
+    const outside = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', returnTo: 'https://evil.example.com', clientChallenge: BROWSER.challenge });
     const [kept, dropped] = await Promise.all([
       raw(`SELECT return_to FROM sso_states WHERE state = $1`, [new URL(inside.authorizeUrl).searchParams.get('state')]),
       raw(`SELECT return_to FROM sso_states WHERE state = $1`, [new URL(outside.authorizeUrl).searchParams.get('state')]),
@@ -263,6 +271,164 @@ describe('誰として入れるか', () => {
   });
 });
 
+describe('始めたブラウザーだけが、端末セッションを受け取れる', () => {
+  async function clean() {
+    await db.withTenant(T, async (q) => {
+      await q.query(`DELETE FROM sso_identities`);
+      await q.query(`DELETE FROM sso_domains`);
+      await q.query(`DELETE FROM sso_providers`);
+      await q.query(`DELETE FROM sessions`);
+      await q.query(`UPDATE users SET email = NULL`);
+    });
+  }
+  const sessionsOf = async (userId: string) => (await db.withTenant(T, (q) =>
+    q.query(`SELECT id FROM sessions WHERE user_id = $1`, [userId]))).length;
+  /** 相手から戻ってきたところまで進める（まだ鍵は受け取っていない） */
+  async function back() {
+    await setup();
+    await db.withTenant(T, (q) => q.query(
+      `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
+    const url = new URL(start.authorizeUrl);
+    idp.issue(claimsFor(idp, { nonce: url.searchParams.get('nonce')! }));
+    return finishSso(db, directory, SITE, { code: 'code-1', state: url.searchParams.get('state')! });
+  }
+
+  it('戻りでは引換の符丁だけを渡し、端末セッションはまだ作らない', async () => {
+    const result = await back();
+    assert.match(result.handoffCode, /^[A-Za-z0-9_-]{43}$/);
+    assert.equal('sessionToken' in result, false, '戻りの結果に鍵を載せない（URL に載って、開いた端末が使えてしまう）');
+    assert.equal(await sessionsOf(trusted.userId), 0);
+    await clean();
+  });
+
+  it('合言葉を持っているブラウザーは、符丁を鍵に替えられる（1回だけ）', async () => {
+    const result = await back();
+    const done = await redeemSsoHandoff(db, { code: result.handoffCode, verifier: BROWSER.verifier });
+    assert.equal(done.userId, trusted.userId);
+    assert.equal(await sessionsOf(trusted.userId), 1);
+    await assert.rejects(redeemSsoHandoff(db, { code: result.handoffCode, verifier: BROWSER.verifier }), /時間が経ちすぎました/);
+    assert.equal(await sessionsOf(trusted.userId), 1);
+    await clean();
+  });
+
+  it('合言葉を持たない端末（戻りの URL を渡されただけ）は入れない。符丁もそこで使えなくなる', async () => {
+    const result = await back();
+    await assert.rejects(
+      redeemSsoHandoff(db, { code: result.handoffCode, verifier: 'another-browser-verifier-0123456789abcdefghi' }),
+      /始めたのと同じブラウザー/,
+    );
+    await assert.rejects(redeemSsoHandoff(db, { code: result.handoffCode, verifier: '' }), /時間が経ちすぎました/);
+    // 当て直しはできない：正しい合言葉でも、もう替えられない
+    await assert.rejects(redeemSsoHandoff(db, { code: result.handoffCode, verifier: BROWSER.verifier }), /時間が経ちすぎました/);
+    assert.equal(await sessionsOf(trusted.userId), 0);
+    await clean();
+  });
+
+  it('預かりは短い時間で切れる', async () => {
+    const result = await back();
+    await raw(`UPDATE sso_handoffs SET expires_at = now() - interval '1 second'`);
+    await assert.rejects(redeemSsoHandoff(db, { code: result.handoffCode, verifier: BROWSER.verifier }), /時間が経ちすぎました/);
+    assert.equal(await sessionsOf(trusted.userId), 0);
+    await clean();
+  });
+
+  it('受け取りに来るまでに無効化された人は入れない', async () => {
+    const result = await back();
+    await db.withTenant(T, (q) => q.query(`UPDATE users SET status = 'disabled' WHERE id = $1`, [trusted.userId]));
+    await assert.rejects(redeemSsoHandoff(db, { code: result.handoffCode, verifier: BROWSER.verifier }), /無効化されています/);
+    await db.withTenant(T, (q) => q.query(`UPDATE users SET status = 'active' WHERE id = $1`, [trusted.userId]));
+    await clean();
+  });
+
+  it('入口は、合言葉の指紋が無い・形が違うものを受けない', async () => {
+    await setup();
+    for (const bad of ['', 'short', 'x'.repeat(44), '!'.repeat(43)]) {
+      await assert.rejects(
+        startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: bad }),
+        /読み込み直して/,
+      );
+    }
+    await clean();
+  });
+
+  it('指紋の無い覚え（この仕組みの前に始めたもの）は、戻ってきても通さない', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(
+      `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
+    const url = new URL(start.authorizeUrl);
+    await raw(`UPDATE sso_states SET client_challenge = NULL`);
+    idp.issue(claimsFor(idp, { nonce: url.searchParams.get('nonce')! }));
+    await assert.rejects(finishSso(db, directory, SITE, { code: 'code-1', state: url.searchParams.get('state')! }), /やり直してください/);
+    assert.equal(await sessionsOf(trusted.userId), 0);
+    await clean();
+  });
+});
+
+describe('会社アカウントで入る口（HTTP）', () => {
+  it('戻りの URL に鍵を載せない。鍵は、始めたブラウザーが符丁と合言葉で受け取る', async () => {
+    await setup();
+    await db.withTenant(T, (q) => q.query(
+      `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
+    const app = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter(), oidc: directory });
+    const post = (path: string, body: unknown) => app(new Request(`http://localhost${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }));
+    const before = process.env.SSO_REDIRECT_URI;
+    process.env.SSO_REDIRECT_URI = SITE.redirectUri;
+    resetSsoSite();
+    try {
+      // 入口：合言葉の指紋が無ければ始めさせない
+      assert.equal((await post('/auth/sso/start', { email: 'tanaka@kdenki.example.co.jp' })).status, 400);
+      const go = async () => {
+        const start = await post('/auth/sso/start', { email: 'tanaka@kdenki.example.co.jp', challenge: BROWSER.challenge, returnTo: '#/k/abc' });
+        assert.equal(start.status, 200);
+        const url = new URL((await start.json() as { authorizeUrl: string }).authorizeUrl);
+        idp.issue(claimsFor(idp, { nonce: url.searchParams.get('nonce')! }));
+        const back = await app(new Request(`http://localhost/auth/sso/callback?code=code-1&state=${url.searchParams.get('state')}`));
+        assert.equal(back.status, 302);
+        return back.headers.get('location')!;
+      };
+
+      const location = await go();
+      const m = /^\/app\/#sso-code=([A-Za-z0-9_-]{43})&to=(.+)$/.exec(location);
+      assert.ok(m, `戻り先の形: ${location}`);
+      assert.ok(!location.includes(T), '戻りの URL に、端末セッションの鍵（会社ID.乱数）を載せない');
+      assert.equal(decodeURIComponent(m![2]!), '#/k/abc');
+      assert.equal((await db.withTenant(T, (q) => q.query(`SELECT 1 FROM sessions WHERE user_id = $1`, [trusted.userId]))).length, 0);
+
+      // 合言葉を持たない端末が符丁だけ持って来ても、鍵は渡さない
+      const stolen = await post('/auth/sso/finish', { code: m![1], verifier: 'another-browser-verifier-0123456789abcdefghi' });
+      assert.equal(stolen.status, 403);
+      assert.equal((await post('/auth/sso/finish', { code: m![1], verifier: BROWSER.verifier })).status, 409, '一度しくじった符丁は、もう使えない');
+
+      // 始めたブラウザーは受け取れて、その鍵で入れる
+      const again = /#sso-code=([^&]+)/.exec(await go())![1]!;
+      const done = await post('/auth/sso/finish', { code: again, verifier: BROWSER.verifier });
+      assert.equal(done.status, 200);
+      const body = await done.json() as { sessionToken: string; returnTo: string | null };
+      assert.equal(body.returnTo, '#/k/abc');
+      const me = await app(new Request('http://localhost/me', { headers: { authorization: `Bearer ${body.sessionToken}` } }));
+      assert.equal(me.status, 200);
+      assert.equal((await me.json() as { id: string }).id, trusted.userId);
+
+      assert.equal((await post('/auth/sso/finish', { code: again })).status, 400);
+    } finally {
+      if (before === undefined) delete process.env.SSO_REDIRECT_URI;
+      else process.env.SSO_REDIRECT_URI = before;
+      resetSsoSite();
+      await db.withTenant(T, async (q) => {
+        await q.query(`DELETE FROM sso_identities`);
+        await q.query(`DELETE FROM sso_domains`);
+        await q.query(`DELETE FROM sso_providers`);
+        await q.query(`DELETE FROM sessions`);
+        await q.query(`UPDATE users SET email = NULL`);
+      });
+    }
+  });
+});
+
 describe('相手が名乗ったことを、そのまま信じない', () => {
   async function clean() {
     await db.withTenant(T, async (q) => {
@@ -293,7 +459,7 @@ describe('相手が名乗ったことを、そのまま信じない', () => {
 
   it('署名の無いトークン（alg: none）は受け付けない', async () => {
     await setup();
-    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
     const state = new URL(start.authorizeUrl).searchParams.get('state')!;
     const nonce = new URL(start.authorizeUrl).searchParams.get('nonce')!;
     // 署名の欄を空にした、形だけのトークンを相手が返してきたことにする
@@ -336,7 +502,7 @@ describe('相手が名乗ったことを、そのまま信じない', () => {
 
   it('相手が交換を断ったら、そのまま通さない', async () => {
     await setup();
-    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
     const state = new URL(start.authorizeUrl).searchParams.get('state')!;
     idp.refuse('引換券が使われています');
     await assert.rejects(finishSso(db, directory, SITE, { code: 'c', state }), /引換券が使われています/);
@@ -347,7 +513,7 @@ describe('相手が名乗ったことを、そのまま信じない', () => {
     await setup();
     await db.withTenant(T, (q) => q.query(
       `UPDATE users SET email = $2 WHERE id = $1`, [trusted.userId, 'tanaka@kdenki.example.co.jp']));
-    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+    const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
     const state = new URL(start.authorizeUrl).searchParams.get('state')!;
     const nonce = new URL(start.authorizeUrl).searchParams.get('nonce')!;
     await directory.signingKeys(idp.issuer); // いちど覚えさせる
@@ -530,12 +696,12 @@ describe('ドメインの持ち主であることを確かめる', () => {
     await setup();
     await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = NULL WHERE tenant_id = $1`, [T]));
     await assert.rejects(
-      startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' }),
+      startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge }),
       /まだ用意されていません/,
     );
     // 確かめ済みにすれば使える
     await db.withTenant(T, (q) => q.query(`UPDATE sso_domains SET verified_at = now() WHERE tenant_id = $1`, [T]));
-    const okay = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+    const okay = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
     assert.ok(okay.authorizeUrl);
     await clean();
   });
@@ -556,7 +722,7 @@ describe('ドメインの持ち主であることを確かめる', () => {
       }));
     assert.equal(result.verified, true, result.detail ?? "");
     // 使えるようになる
-    assert.ok(await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' }));
+    assert.ok(await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge }));
     await clean();
   });
 

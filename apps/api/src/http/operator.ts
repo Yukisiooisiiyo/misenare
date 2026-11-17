@@ -23,6 +23,8 @@ export interface OperatorDeps {
   limiter: Limiter;
   appUrl: string;
   env?: NodeJS.ProcessEnv;
+  /** 応答を返したあとに続ける仕事を預ける口（メールの送信を待たずに返すため）。無ければその場で待つ */
+  later?: (name: string, work: Promise<unknown>) => void;
 }
 
 type Body = Record<string, unknown>;
@@ -42,8 +44,11 @@ export async function handleOperator(deps: OperatorDeps, req: Request, url: URL,
   if (path === '/auth/setup' && method === 'POST') {
     if (!(await limiter.take(clientKey(req, 'operator-setup'), RULES.operatorSetup))) return tooMany();
     const b = await body();
-    await requestOperatorSetup(database, deps.mailer, deps.appUrl, String(b.email ?? ''), env);
-    // 運営者のアドレスかどうかを外から確かめさせない：いつも同じ応答
+    // 運営者のアドレスかどうかを外から確かめさせない：いつも同じ応答を、送り終わるのを待たずに返す
+    // （待つと、運営者のアドレスのときだけ応答が遅くなり、かかった時間から分かってしまう）
+    const work = requestOperatorSetup(database, deps.mailer, deps.appUrl, String(b.email ?? ''), env);
+    if (deps.later) deps.later('operator-setup', work);
+    else await work;
     return json({ sent: true });
   }
   if (path === '/auth/password' && method === 'POST') {

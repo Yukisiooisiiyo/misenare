@@ -32,6 +32,34 @@ export const session = {
   },
 };
 
+// 会社のアカウント（SSO）で入るときの合言葉。入口で作ってこの端末に控え、戻ってきたときに鍵と引き換える。
+// 合言葉を持っているのは始めたブラウザーだけなので、よそから渡された戻りの URL では入れない。
+const SSO_KEY = 'misenare.sso';
+
+function base64url(bytes: Uint8Array): string {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export const ssoSecret = {
+  /** 合言葉を新しく作って控え、サーバーに預ける指紋（SHA-256）を返す */
+  async create(): Promise<string> {
+    const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
+    const s = storage();
+    if (!s) throw new Error('この端末では保存ができないため、会社のアカウントで入れません');
+    s.setItem(SSO_KEY, verifier);
+    return base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  },
+  /** 控えた合言葉を取り出して消す（1回しか使わない）。無ければ null */
+  take(): string | null {
+    const s = storage();
+    const v = s?.getItem(SSO_KEY) ?? null;
+    s?.removeItem(SSO_KEY);
+    return v;
+  },
+};
+
 export class ApiError extends Error {
   constructor(readonly status: number, message: string) {
     super(message);
