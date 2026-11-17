@@ -47,6 +47,8 @@ export interface KnowledgeView {
   approvedAt: string | null;
   verifiedAt: string | null;
   verifiedBy: string | null;
+  /** 有効期限。過ぎると、夜間に検索から外れる（status が expired になる）。無ければ期限なし */
+  expiresAt: string | null;
   /**
    * 承認待ちの修正案。**誰の案かを全員に見せる。**
    * 見えないと、同じところを2人が別々に直して、片方が黙って消える。
@@ -97,6 +99,19 @@ async function load(db: Db, id: string, lock = false): Promise<KnowledgeRow> {
   );
   assert(row !== undefined, 'not_found', 'ナレッジが見つかりません');
   return row;
+}
+
+/**
+ * 有効期限は、先の日時か、無しか。
+ *
+ * 過ぎた期限のまま公開すると、その晩に検索から外れて、だれにも見つからなくなる。
+ * 承認できない人の案も、ここで断る（過ぎた期限の案は、どのみち承認できない）。
+ * 比べるのは DB の時計（端末の時計がずれていても同じ答えになる）。
+ */
+async function assertNotExpired(db: Db, expiresAt: string | null): Promise<void> {
+  if (expiresAt === null) return;
+  const r = await one<{ past: boolean }>(db, `SELECT $1::timestamptz <= now() AS past`, [expiresAt]);
+  assert(!r.past, 'invalid', '有効期限が過ぎています。先の日付にするか、期限なしにしてください');
 }
 
 async function nextVersion(db: Db, id: string): Promise<number> {
@@ -188,6 +203,7 @@ export async function createKnowledge(db: Db, tokenizer: Tokenizer, actor: Actor
     await assertStore(db, input.storeId);
   }
   await assertAreas(db, input.storeId, input.areaIds);
+  await assertNotExpired(db, input.expiresAt ?? null);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const k = await one<{ id: string }>(
     db,
@@ -280,6 +296,9 @@ export async function editKnowledge(
     );
   }
   await assertAreas(db, k.store_id, input.areaIds);
+  // 期限を指定しなければ今の期限を引き継ぐ。どちらの場合も公開（承認）されるまで効かない
+  const expiresAt = input.expiresAt !== undefined ? input.expiresAt : k.expires_at;
+  await assertNotExpired(db, expiresAt);
   const tagIds = await resolveTags(db, actor, input.tagNames);
   const version = await nextVersion(db, id);
   // 同じ人の案は最新の1つだけ残す。直すたびに積まれると承認者が同じ人の案を何本も見ることになり、
@@ -288,10 +307,8 @@ export async function editKnowledge(
     `UPDATE knowledge_versions SET state = 'superseded' WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending'`,
     [id, actor.userId],
   );
-  // 期限を指定しなければ今の期限を引き継ぐ。どちらの場合も公開（承認）されるまで効かない
   await insertVersion(db, actor, id, version, {
-    title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [],
-    expiresAt: input.expiresAt !== undefined ? input.expiresAt : k.expires_at,
+    title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [], expiresAt,
   }, k.current_version);
   // 前の案と一緒に待っていた本人の写真は、出し直した案に付け替える（前の案は上で閉じた）
   await db.query(
@@ -361,20 +378,25 @@ export async function rejectVersion(db: Db, actor: Actor, id: string, version: n
 export async function revertToVersion(db: Db, tokenizer: Tokenizer, actor: Actor, id: string, version: number) {
   const k = await load(db, id, true);
   assert(canModerate(actor, k.store_id), 'forbidden', '過去版に戻す権限がありません');
-  const old = await maybeOne<{ title: string; body: string; tag_ids: string[]; area_ids: string[]; expires_at: string | null; state: string }>(
+  const old = await maybeOne<{ title: string; body: string; tag_ids: string[]; area_ids: string[]; expires_at: string | null; state: string; was_published: boolean; expired: boolean }>(
     db,
-    `SELECT title, body, tag_ids, area_ids, expires_at::text AS expires_at, state
+    `SELECT title, body, tag_ids, area_ids, expires_at::text AS expires_at, state,
+            (decided_at IS NOT NULL) AS was_published,
+            (expires_at IS NOT NULL AND expires_at <= now()) AS expired
        FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`,
     [id, version],
   );
   assert(old !== undefined, 'not_found', '版が見つかりません');
-  // 戻せるのは一度公開された版だけ。承認待ち・却下の案を戻しで公開すると承認を飛ばせてしまう
-  assert(old.state === 'superseded' || old.state === 'published', 'conflict', '一度も公開されていない版には戻せません');
+  // 戻せるのは一度公開された版だけ。承認待ち・却下の案を戻しで公開すると承認を飛ばせてしまう。
+  // 過去版（superseded）には、公開されないまま閉じられた案も混ざる。公開されたものには、承認した日時が残っている
+  assert((old.state === 'superseded' || old.state === 'published') && old.was_published, 'conflict', '一度も公開されていない版には戻せません');
   const next = await nextVersion(db, id);
   await insertVersion(db, actor, id, next, {
     title: old.title, body: old.body,
     // 統合済みのタグは統合先に置き換える。そのまま戻すと詳細に統合元の古い名前が出る
-    tagIds: await canonicalTagIds(db, old.tag_ids), areaIds: old.area_ids, expiresAt: old.expires_at,
+    tagIds: await canonicalTagIds(db, old.tag_ids), areaIds: old.area_ids,
+    // その版に付いていた期限がもう過ぎていたら、いまの期限を引き継ぐ（戻したとたんに検索から外れないように）
+    expiresAt: old.expired ? k.expires_at : old.expires_at,
   }, k.current_version);
   // 戻すと、いま承認待ちの案は閉じられる。approveVersion と同じく、閉じた案を返して黙って消さない
   const closing = await db.query<{ version: number; editor: string | null }>(
@@ -393,9 +415,9 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
   // 公開中の版。未公開なら最新の案（投稿者本人と承認者だけが見られる）
-  const v = await maybeOne<{ version: number; state: string; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null }>(
+  const v = await maybeOne<{ version: number; state: string; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null; expires_at: string | null }>(
     db,
-    `SELECT version, state, title, body, tag_ids, edited_by, edited_at::text AS edited_at,
+    `SELECT version, state, title, body, tag_ids, edited_by, edited_at::text AS edited_at, expires_at::text AS expires_at,
             (SELECT name FROM users WHERE id = edited_by) AS editor,
             (SELECT name FROM users WHERE id = decided_by) AS approver,
             decided_at::text AS decided_at
@@ -406,7 +428,10 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   );
   assert(v !== undefined, 'not_found', 'ナレッジが見つかりません');
   if (k.status !== 'published') {
-    assert(v.edited_by === actor.userId || canModerate(actor, k.store_id), 'forbidden', 'このナレッジはまだ公開されていません');
+    assert(
+      v.edited_by === actor.userId || canModerate(actor, k.store_id), 'forbidden',
+      k.status === 'expired' ? 'このナレッジは有効期限が過ぎたので、いまは出していません' : 'このナレッジはまだ公開されていません',
+    );
   }
   const tags = await db.query<{ name: string }>(
     `SELECT name FROM hashtags WHERE id = ANY($1::uuid[]) ORDER BY array_position($1::uuid[], id)`,
@@ -446,8 +471,11 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     approvedAt: v.decided_at,
     verifiedAt: meta.verified_at,
     verifiedBy: meta.verified_by,
+    // 公開されたものは、いま効いている期限。まだ公開されていないものは、その案に付いている期限
+    expiresAt: k.status === 'draft' ? v.expires_at : k.expires_at,
     pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
-    ...(k.status === 'published' ? {} : { draftState: v.state === 'rejected' ? 'rejected' as const : 'pending' as const }),
+    // 期限切れ（expired）は、一度は公開されたもの。「承認待ち」とは言わない
+    ...(k.status === 'draft' ? { draftState: v.state === 'rejected' ? 'rejected' as const : 'pending' as const } : {}),
     canDelete: await canDeleteKnowledge(db, actor, k),
     ...(await bookmarkState(db, actor, id, meta.created_by_id)),
   };
@@ -519,10 +547,12 @@ export async function listVersions(db: Db, actor: Actor, id: string) {
     const mine = await maybeOne(db, `SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1 AND edited_by = $2`, [id, actor.userId]);
     assert(mine !== undefined || canModerate(actor, k.store_id), 'forbidden', 'このナレッジはまだ公開されていません');
   }
-  return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string; decided_by: string | null; decided_at: string | null }>(
+  return db.query<{ version: number; state: string; title: string; body: string; edited_at: string; edited_by: string; decided_by: string | null; decided_at: string | null; can_revert: boolean }>(
     // 承認・却下した人も出す。承認した人がその内容に責任を持つため、誰が通したかを残す
     `SELECT v.version, v.state, v.title, v.body, v.edited_at, u.name AS edited_by,
-            du.name AS decided_by, v.decided_at
+            du.name AS decided_by, v.decided_at,
+            -- 戻せるのは、前に公開されていた版だけ（revertToVersion と同じ）。いま公開中の版には戻すまでもない
+            (v.state = 'superseded' AND v.decided_at IS NOT NULL AND $2) AS can_revert
        FROM knowledge_versions v
        JOIN users u ON u.id = v.edited_by
        LEFT JOIN users du ON du.id = v.decided_by
@@ -559,16 +589,87 @@ export const STALE_DAYS = 180;
 /** 一定期間、更新も確認もされていない公開ナレッジ（鮮度管理。承認できる人が見直す） */
 export async function listStale(db: Db, actor: Actor, storeId: string, days = STALE_DAYS) {
   assert(canModerate(actor, storeId), 'forbidden', '見直しの一覧を見る権限がありません');
-  return db.query<{ id: string; title: string; verified_at: string | null; verified_by: string | null }>(
-    `SELECT k.id, v.title, k.verified_at::text AS verified_at, u.name AS verified_by
+  return db.query<{ id: string; title: string; verified_at: string | null; verified_by: string | null; all_stores: boolean }>(
+    `SELECT k.id, v.title, k.verified_at::text AS verified_at, u.name AS verified_by, (k.store_id IS NULL) AS all_stores
        FROM knowledge k
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
        LEFT JOIN users u ON u.id = k.verified_by
-      WHERE k.status = 'published' AND k.store_id = $1
+      -- 全店共通のものは、直せる本部にだけ出す（ほかの人に出しても、確かめたと記録できない）
+      WHERE k.status = 'published' AND (k.store_id = $1 OR (k.store_id IS NULL AND $3))
         AND greatest(k.verified_at, v.edited_at) < now() - make_interval(days => $2)
       ORDER BY greatest(k.verified_at, v.edited_at)`,
-    [storeId, days],
+    [storeId, days, actor.adminScope === 'tenant'],
   );
+}
+
+/**
+ * 有効期限が過ぎて、検索から外れたナレッジ（承認できる人が、期限を直して出し直すか、そのままにするかを決める）。
+ * 期限を付けて出したものは、過ぎると検索にも一覧にも出なくなる。ここに並べないと、直す入口が無い。
+ */
+export async function listExpired(db: Db, actor: Actor, storeId: string) {
+  assert(canModerate(actor, storeId), 'forbidden', '期限切れの一覧を見る権限がありません');
+  return db.query<{ id: string; title: string; expires_at: string; all_stores: boolean }>(
+    `SELECT k.id, v.title, k.expires_at::text AS expires_at, (k.store_id IS NULL) AS all_stores
+       FROM knowledge k
+       JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version
+      WHERE k.status = 'expired' AND (k.store_id = $1 OR (k.store_id IS NULL AND $2))
+      ORDER BY k.expires_at DESC
+      LIMIT 100`,
+    [storeId, actor.adminScope === 'tenant'],
+  );
+}
+
+export interface MyPost {
+  id: string;
+  title: string;
+  /**
+   * waiting … 新しく書いたものが承認待ち / rejected … 承認されなかった /
+   * editWaiting … 公開中のものへの修正案が承認待ち / editRejected … 修正案が承認されなかった /
+   * editClosed … 修正案が、ほかの修正が先に公開されたために閉じられた /
+   * published … 公開中 / expired … 有効期限が過ぎた
+   */
+  state: 'waiting' | 'rejected' | 'editWaiting' | 'editRejected' | 'editClosed' | 'published' | 'expired';
+  /** 自分が最後に手を入れた日時 */
+  at: string;
+  allStores: boolean;
+}
+
+/**
+ * 自分が書いたもの・直したものの一覧（この店舗と全店共通。新しい順に50件）。
+ *
+ * 承認待ちのもの・承認されなかったものは、検索に出ない。書いた本人がそこへ戻る道が、ほかに無い。
+ */
+export async function listMyPosts(db: Db, actor: Actor, storeId: string): Promise<MyPost[]> {
+  assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗のナレッジは見られません');
+  const rows = await db.query<{ id: string; status: string; title: string; mine_state: string; mine_published: boolean; at: string; all_stores: boolean }>(
+    `SELECT k.id, k.status, coalesce(cur.title, mine.title) AS title, mine.state AS mine_state,
+            (mine.decided_at IS NOT NULL) AS mine_published,
+            mine.edited_at::text AS at, (k.store_id IS NULL) AS all_stores
+       FROM knowledge k
+       -- 自分が最後に書いた版
+       JOIN LATERAL (
+         SELECT v.title, v.state, v.edited_at, v.decided_at FROM knowledge_versions v
+          WHERE v.knowledge_id = k.id AND v.edited_by = $2
+          ORDER BY v.version DESC LIMIT 1) mine ON true
+       LEFT JOIN knowledge_versions cur ON cur.knowledge_id = k.id AND cur.version = k.current_version
+      WHERE (k.store_id = $1 OR k.store_id IS NULL)
+      ORDER BY mine.edited_at DESC
+      LIMIT 50`,
+    [storeId, actor.userId],
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    title: r.title,
+    state: r.status === 'expired' ? 'expired'
+      : r.status === 'draft' ? (r.mine_state === 'rejected' ? 'rejected' : 'waiting')
+      : r.mine_state === 'pending' ? 'editWaiting'
+      : r.mine_state === 'rejected' ? 'editRejected'
+      // 過去版（superseded）のうち、承認の日時が無いものは、公開されないまま閉じられた案
+      : r.mine_state === 'superseded' && !r.mine_published ? 'editClosed'
+      : 'published',
+    at: r.at,
+    allStores: r.all_stores,
+  }));
 }
 
 /** 内容は変えずに「今も正しい」と確認した記録だけを残す（最終確認日・確認者を更新） */

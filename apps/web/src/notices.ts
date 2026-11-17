@@ -4,7 +4,7 @@
 // 引き継ぎ … その日のメモ。承認はなく、誰でも書けて誰でも片付けられる
 
 import { api } from './api.ts';
-import { clear, dayLabel, h, parseDate, relativeDate, submitOnce, toast } from './dom.ts';
+import { clear, dateValue, dayLabel, endOfDay, h, parseDate, relativeDate, startOfDay, submitOnce, toast } from './dom.ts';
 import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
@@ -66,17 +66,6 @@ export interface Badges {
 function paragraphs(text: string): HTMLElement[] {
   return text.split(/\n{2,}/).map((p) => h('p', {}, ...p.split('\n').flatMap((line, i) => (i === 0 ? [line] : [h('br', {}), line]))));
 }
-
-/** 日付の欄（<input type="date">）に入れる形。端末の暦で読む */
-function dateValue(iso: string | null): string {
-  const d = parseDate(iso);
-  if (!d) return '';
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
-// 日付だけを選んでもらい、「いつから」はその日の始まり、「いつまで」はその日の終わりにする
-const startOfDay = (date: string): string => new Date(`${date}T00:00:00`).toISOString();
-const endOfDay = (date: string): string => new Date(`${date}T23:59:59`).toISOString();
 
 /** 確認した人・まだの人（開いたときに読む） */
 function readersPanel(n: Notice): HTMLElement {
