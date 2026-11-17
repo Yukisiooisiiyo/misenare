@@ -349,6 +349,20 @@ button.tag { cursor: pointer; }
 .notice-new { background: var(--pending); color: var(--paper); }
 .notice-acked { color: var(--sign); font-weight: 700; }
 .notice .primary { margin-top: 10px; }
+/* 連絡を直す・確認した人を見る。消す・掲示をやめるは、直す画面の中にだけ置く */
+.notice-tools { display: flex; justify-content: flex-end; }
+.notice-readers { margin-top: 8px; }
+.notice-readers > summary { cursor: pointer; color: var(--sign); font-size: 14px; font-weight: 700; min-height: 32px; display: flex; align-items: center; }
+.notice-readers-body p { font-size: 14px; overflow-wrap: anywhere; }
+.notice-edit .row-actions { margin: 8px 0 0; justify-content: flex-start; }
+.notice-edit .row-actions .primary { margin-top: 0; }
+.notice-danger { position: relative; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; padding-top: 14px; }
+.notice-danger::before {
+  content: ''; position: absolute; left: 0; right: 0; top: 0; height: 4px; background: var(--rule);
+  -webkit-mask: var(--wave-b) 0 0 / 100% 100% no-repeat; mask: var(--wave-b) 0 0 / 100% 100% no-repeat;
+}
+.panel-body.notices { padding-top: 12px; }
+.panel-body.notices h3 { margin: 4px 0 0; }
 .handover-form { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 16px; }
 .handover-form textarea { flex: 1; margin: 0; }
 .handover-form .primary { width: auto; min-width: 72px; }
