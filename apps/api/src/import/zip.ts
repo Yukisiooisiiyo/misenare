@@ -10,8 +10,12 @@ const END_OF_CENTRAL_DIRECTORY_64 = 0x06064b50;
 const CENTRAL_FILE_HEADER = 0x02014b50;
 const LOCAL_FILE_HEADER = 0x04034b50;
 
-/** 展開後の大きさの上限（圧縮爆弾よけ） */
-const MAX_ENTRY_BYTES = 64 * 1024 * 1024;
+/**
+ * 展開後の大きさの上限（圧縮爆弾よけ）。
+ * 読むのは Word の本文と Excel の1枚目・共有文字列で、文字だけなら数万行あっても数 MB。
+ * 展開したものは文字列にして何度かなぞるので、ここで通した大きさの数倍の記憶を使う。
+ */
+export const MAX_ENTRY_BYTES = 16 * 1024 * 1024;
 
 export interface ZipEntry {
   name: string;

@@ -93,23 +93,34 @@ function headingOf(line: string): string | undefined {
   return undefined;
 }
 
-/** 見出しで区切る。見出しが1つも無ければ、空行2つで区切って先頭行をタイトルにする */
+/**
+ * 見出しで区切る。見出しが1つも無ければ、空行2つで区切って先頭行をタイトルにする。
+ * 使うのは先頭の MAX_DRAFTS 件だけなので、その数ができたら先は読まない
+ * （短い行ばかりの大きな資料で、使わない下書きを何百万件も作って記憶を使い切らないため）。
+ */
 function splitByHeadings(text: string, source: string): Draft[] {
   const lines = text.split('\n');
   const drafts: Draft[] = [];
+  /** 題も本文もある下書きの数（最後に空の題のものは捨てるので、数えるのは残るものだけ） */
+  let usable = 0;
   let title: string | null = null;
   let buffer: string[] = [];
   const flush = () => {
     const body = tidy(buffer.join('\n'));
-    if (title !== null && body) drafts.push({ title: cut(title, MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source });
+    if (title !== null && body) {
+      drafts.push({ title: cut(title, MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source });
+      if (title !== '') usable++;
+    }
     buffer = [];
   };
   for (const line of lines) {
     const heading = headingOf(line);
     if (heading !== undefined) {
       flush();
+      if (usable >= MAX_DRAFTS) return drafts;
       title = heading;
-    } else {
+    } else if (title !== null) {
+      // 最初の見出しより前の行は、どの下書きにも入らないので溜めない
       buffer.push(line);
     }
   }
@@ -117,41 +128,65 @@ function splitByHeadings(text: string, source: string): Draft[] {
   if (drafts.length > 0) return drafts;
 
   // 見出しが無い資料：空行で区切って、最初の行をタイトルにする
-  return tidy(text)
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .map((block) => {
-      const [first = '', ...rest] = block.split('\n');
-      const body = rest.join('\n').trim() || block;
-      return { title: cut(first.trim(), MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source };
-    });
+  const blocks: Draft[] = [];
+  for (const raw of tidy(text).split(/\n{2,}/)) {
+    const block = raw.trim();
+    if (!block) continue;
+    const [first = '', ...rest] = block.split('\n');
+    const body = rest.join('\n').trim() || block;
+    blocks.push({ title: cut(first.trim(), MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source });
+    if (blocks.length >= MAX_DRAFTS) break;
+  }
+  return blocks;
 }
 
 // --- 表（CSV / TSV / Excel） ------------------------------------------------------
 
-/** 引用符つきの CSV を読む（"" は " 一文字、引用符の中の改行とカンマはそのまま） */
-export function parseDelimited(text: string, delimiter: string): string[][] {
-  const rows: string[][] = [];
+/**
+ * 引用符つきの CSV を、1行ずつ読む（"" は " 一文字、引用符の中の改行とカンマはそのまま）。
+ * 欄の中身は、元の文字列から範囲で切り出す。1字ずつ足していくと、字の数だけ継ぎ目ができて記憶を使う。
+ */
+function* delimitedRows(text: string, delimiter: string): Generator<string[]> {
+  const QUOTE = 0x22;
+  const NEWLINE = 0x0a;
+  const delim = delimiter.charCodeAt(0);
   let row: string[] = [];
-  let field = '';
+  /** いま読んでいる欄の断片（引用符で途切れるたびに1つ増える） */
+  let parts: string[] = [];
+  /** まだ断片にしていない字の始まり */
+  let from = 0;
   let quoted = false;
+  const take = (to: number): void => { if (to > from) parts.push(text.slice(from, to)); };
+  const endField = (): void => {
+    row.push(parts.length === 0 ? '' : parts.length === 1 ? parts[0]! : parts.join(''));
+    parts = [];
+  };
   for (let i = 0; i < text.length; i++) {
-    const c = text[i]!;
+    const c = text.charCodeAt(i);
     if (quoted) {
-      if (c === '"') {
-        if (text[i + 1] === '"') { field += '"'; i++; }
-        else quoted = false;
-      } else field += c;
+      if (c !== QUOTE) continue;
+      take(i);
+      if (text.charCodeAt(i + 1) === QUOTE) { parts.push('"'); i++; }
+      else quoted = false;
+      from = i + 1;
       continue;
     }
-    if (c === '"') quoted = true;
-    else if (c === delimiter) { row.push(field); field = ''; }
-    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
-    else field += c;
+    if (c === QUOTE) { take(i); quoted = true; from = i + 1; }
+    else if (c === delim) { take(i); endField(); from = i + 1; }
+    else if (c === NEWLINE) { take(i); endField(); yield row; row = []; from = i + 1; }
   }
-  if (field || row.length > 0) { row.push(field); rows.push(row); }
-  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+  take(text.length);
+  if (parts.length > 0 || row.length > 0) { endField(); yield row; }
+}
+
+/** 中身のある行だけを通す（空白だけの行は数えない） */
+function* filledRows(rows: Iterable<string[]>): Generator<string[]> {
+  for (const row of rows) if (row.some((c) => c.trim() !== '')) yield row;
+}
+
+/** 引用符つきの CSV を読んで、中身のある行を返す */
+export function parseDelimited(text: string, delimiter: string): string[][] {
+  return [...filledRows(delimitedRows(text, delimiter))];
 }
 
 const TITLE_HEADERS = ['タイトル', '件名', '表題', '項目', '見出し', 'title', 'subject'];
@@ -166,10 +201,13 @@ function looksLikeHeader(row: string[]): boolean {
  * 表から下書きを作る。
  *   「タイトル」「本文」の列があれば、その列を使う
  *   無ければ、1列目をタイトル・残りを本文にする（1行目が見出しらしければ「列名：値」の形で残す）
+ * 行は順に受け取り、MAX_DRAFTS 件できたら先は読まない（何百万行あっても、全部を記憶に載せない）。
  */
-function draftsFromRows(rows: string[][], source: string): Draft[] {
-  if (rows.length === 0) return [];
-  const header = rows[0]!;
+function draftsFromRows(rows: Iterable<string[]>, source: string): Draft[] {
+  const iterator = rows[Symbol.iterator]();
+  const first = iterator.next();
+  if (first.done) return [];
+  const header = first.value;
   const norm = header.map((h) => h.trim().toLowerCase());
   const titleColumn = norm.findIndex((h) => TITLE_HEADERS.includes(h));
   const bodyColumns = norm.map((h, i) => (BODY_HEADERS.includes(h) ? i : -1)).filter((i) => i >= 0);
@@ -181,19 +219,25 @@ function draftsFromRows(rows: string[][], source: string): Draft[] {
   const label = !named && hasHeader;
 
   const drafts: Draft[] = [];
-  for (const [i, row] of rows.slice(hasHeader ? 1 : 0).entries()) {
+  /** 何行目か（中身のある行だけを数えて、1から） */
+  let line = 0;
+  const add = (row: string[]): void => {
+    line++;
     const t = (row[title] ?? '').trim();
     const text = body
       .map((c) => ({ name: (header[c] ?? '').trim(), value: (row[c] ?? '').trim() }))
       .filter((x) => x.value)
       .map((x) => (label && x.name ? `${x.name}：${x.value}` : x.value))
       .join('\n');
-    if (!t || !text) continue;
-    drafts.push({
-      title: cut(t, MAX_TITLE_CHARS),
-      body: cut(tidy(text), MAX_BODY_CHARS),
-      source: `${source} ${i + (hasHeader ? 2 : 1)}行目`,
-    });
+    if (!t || !text) return;
+    drafts.push({ title: cut(t, MAX_TITLE_CHARS), body: cut(tidy(text), MAX_BODY_CHARS), source: `${source} ${line}行目` });
+  };
+  if (hasHeader) line = 1;
+  else add(header);
+  while (drafts.length < MAX_DRAFTS) {
+    const next = iterator.next();
+    if (next.done) break;
+    add(next.value);
   }
   return drafts;
 }
@@ -284,13 +328,8 @@ function columnOf(ref: string): number {
   return n - 1;
 }
 
-export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
-  const strings = sharedStrings(buf);
-  // 1枚目のシートだけを見る
-  const sheet = readZipEntry(buf, 'xl/worksheets/sheet1.xml');
-  if (!sheet) throw new ImportError('Excel ファイルとして読めませんでした');
-  const xml = sheet.toString('utf8');
-  const rows: string[][] = [];
+/** シートの行を、上から順に取り出す */
+function* sheetRows(xml: string, strings: string[]): Generator<string[]> {
   for (const rowXml of elementsOf(xml, 'row')) {
     const row: string[] = [];
     for (const cellXml of elementsOf(rowXml, 'c')) {
@@ -310,9 +349,16 @@ export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
       while (row.length < index) row.push('');
       row[index] = value;
     }
-    rows.push(row);
+    yield row;
   }
-  return draftsFromRows(rows.filter((r) => r.some((c) => c.trim() !== '')), source);
+}
+
+export function draftsFromXlsx(buf: Buffer, source: string): Draft[] {
+  const strings = sharedStrings(buf);
+  // 1枚目のシートだけを見る
+  const sheet = readZipEntry(buf, 'xl/worksheets/sheet1.xml');
+  if (!sheet) throw new ImportError('Excel ファイルとして読めませんでした');
+  return draftsFromRows(filledRows(sheetRows(sheet.toString('utf8'), strings)), source);
 }
 
 // --- PDF ------------------------------------------------------------------------
@@ -362,16 +408,20 @@ export function draftsFromPdf(buf: Buffer, source: string): ParseResult {
     }
     buffer = [];
   };
+  // 使うのは先頭の MAX_DRAFTS 件だけなので、その数ができたら先は読まない
+  let enough = false;
   for (const line of all) {
     if (isHeading(line)) {
       flush();
+      if (drafts.length >= MAX_DRAFTS) { enough = true; break; }
       title = line.text;
       titlePage = line.page;
-    } else {
+    } else if (title !== null) {
+      // 最初の見出しより前の行は、どの下書きにも入らないので溜めない
       buffer.push(line.text);
     }
   }
-  flush();
+  if (!enough) flush();
 
   if (drafts.length > 0) return { drafts, warnings };
 
@@ -381,6 +431,7 @@ export function draftsFromPdf(buf: Buffer, source: string): ParseResult {
     if (!first) continue;
     const body = tidy(rest.join('\n')) || first;
     drafts.push({ title: cut(first, MAX_TITLE_CHARS), body: cut(body, MAX_BODY_CHARS), source: `${source} ${page.number}ページ目` });
+    if (drafts.length >= MAX_DRAFTS) break;
   }
   if (drafts.length > 0) warnings.push('見出しを見分けられなかったので、ページごとに1件にしました');
   return { drafts, warnings };
@@ -396,8 +447,8 @@ export function parseImport(fileName: string, buf: Buffer): ParseResult {
       case 'pdf': return draftsFromPdf(buf, fileName);
       case 'docx': return { drafts: draftsFromDocx(buf, fileName), warnings: [] };
       case 'xlsx': return { drafts: draftsFromXlsx(buf, fileName), warnings: [] };
-      case 'csv': return { drafts: draftsFromRows(parseDelimited(normalizeText(buf), ','), fileName), warnings: [] };
-      case 'tsv': return { drafts: draftsFromRows(parseDelimited(normalizeText(buf), '\t'), fileName), warnings: [] };
+      case 'csv': return { drafts: draftsFromRows(filledRows(delimitedRows(normalizeText(buf), ',')), fileName), warnings: [] };
+      case 'tsv': return { drafts: draftsFromRows(filledRows(delimitedRows(normalizeText(buf), '\t')), fileName), warnings: [] };
       default: return { drafts: splitByHeadings(normalizeText(buf), fileName), warnings: [] };
     }
   })();

@@ -2,7 +2,23 @@
 // ハンドラの形は (Request) => Promise<Response> なので、Hono などにもそのまま載せ替えられる。
 
 export type Params = Record<string, string>;
-export type Handler<C> = (ctx: C, req: Request, params: Params) => Promise<Response>;
+export type Handler<C> = (ctx: C, req: Request, params: Params) => Promise<Response | Deferred<C>>;
+
+/**
+ * ハンドラが「DB の取引の外でやる仕事」を返すための入れ物。
+ * 時間のかかる仕事（資料の読み取りなど）を、取引を開けたまま待たないために使う。
+ * 呼ぶ側は、いまの取引を閉じてから work を走らせ、その結果を**新しい取引**の中で finish に渡す。
+ */
+export interface Deferred<C> {
+  readonly deferred: true;
+  work(): Promise<unknown>;
+  finish(ctx: C, value: unknown): Promise<Response>;
+}
+
+/** 取引の外でやる仕事（work）と、その結果を受けて続きをする処理（finish）を組にして返す */
+export function outside<C, T>(work: () => Promise<T>, finish: (ctx: C, value: T) => Promise<Response>): Deferred<C> {
+  return { deferred: true, work, finish: (ctx, value) => finish(ctx, value as T) };
+}
 
 interface Route<C> {
   method: string;
