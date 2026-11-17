@@ -206,6 +206,8 @@ export interface Hit {
   verifiedAt: string | null;
   verifiedBy: string | null;
   linked?: boolean;
+  /** 全店共通のナレッジか */
+  allStores?: boolean;
 }
 
 export interface SearchResult {
@@ -233,6 +235,8 @@ export interface Knowledge {
   verifiedBy: string | null;
   /** 有効期限。過ぎると検索に出なくなる。無ければ期限なし */
   expiresAt?: string | null;
+  /** どの売場の話か（付けてあれば） */
+  areas?: Array<{ id: string; name: string }>;
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
   /** まだ一度も公開されていないときの、いちばん新しい案の状態（公開済みなら無い） */
   draftState?: 'pending' | 'rejected';

@@ -10,6 +10,7 @@ import { decodeImage } from './ean.ts';
 import { renderMemos } from './memo.ts';
 import { photoPicker, photoSection, uploadPhoto } from './photos.ts';
 import { renderNotices, type Badges } from './notices.ts';
+import { areaPanel, areaPicker, loadAreas, productExtras, productFinder } from './products.ts';
 import { encodeQr, qrToSvg } from '@misenare/qr';
 
 const root = document.getElementById('app')!;
@@ -991,6 +992,7 @@ async function renderKnowledge(id: string, stale: () => boolean): Promise<void> 
     k.storeId === null ? h('p', { class: 'kind-row' }, h('span', { class: 'notice-badge notice-all' }, '全店共通')) : null,
     h('h1', {}, k.title),
     h('div', { class: 'tag-row' }, ...k.tags.map((t) => tagChip(t, { onClick: () => { location.hash = `#/search?q=${encodeURIComponent('#' + t)}`; } }))),
+    k.areas && k.areas.length > 0 ? h('p', { class: 'hint' }, `売場：${k.areas.map((a) => a.name).join('、')}`) : null,
     bookmarkBox,
     h('div', { class: 'body' }, ...k.body.split(/\n{2,}/).map((p) => h('p', {}, p))),
     photos.el,
@@ -1127,6 +1129,9 @@ function renderWrite(existing: Knowledge | null): void {
   // 全店共通で書けるのは本部だけ（新しく書くときに選ぶ。書いたあとで、出す先は変えられない）
   const scope = h('select', { id: 'scope' }, h('option', { value: 'store' }, 'この店舗だけ'), h('option', { value: 'all' }, 'すべての店舗（全店共通）'));
   const canPickScope = !existing && me?.adminScope === 'tenant';
+  // どの売場の話か。店舗のナレッジにだけ付けられる（全店共通には付けない）。売場が無い店舗では、欄ごと出ない
+  const areas = existing?.storeId === null ? null : areaPicker(storeId(), existing?.areas?.map((a) => a.id) ?? []);
+  if (areas) scope.addEventListener('change', () => { areas.el.classList.toggle('area-off', scope.value === 'all'); });
   // 有効期限。日付だけを選んでもらい、その日の終わりまで出す
   const initialExpires = dateValue(existing?.expiresAt);
   const expires = h('input', { id: 'expires', type: 'date', value: initialExpires });
@@ -1177,9 +1182,13 @@ function renderWrite(existing: Knowledge | null): void {
     if (tagField.value.trim()) addTag(tagField.value);
     if (tags.length === 0) { message.textContent = 'ハッシュタグを1つ以上付けてください。'; message.hidden = false; setTimeout(() => tagField.focus(), 0); return; } // 送信中は欄が無効なので、戻ってから合わせる
     // 開いたときの版を添える。開いたあとに別の人が直していたら、サーバーが止めて教えてくれる
+    const allStores = canPickScope && scope.value === 'all';
+    const areaIds = allStores ? undefined : areas?.selected();
     const payload = {
       title: title.value, body: body.value, tagNames: tags,
       ...(existing ? { baseVersion: existing.version } : {}),
+      // 売場は、欄を出しているときだけ送る（送らなければ、いまの売場のまま）
+      ...(areaIds !== undefined ? { areaIds } : {}),
       // 期限は、変えたときだけ送る（送らなければ、いまの期限のまま）。空にしたら、期限なし
       ...(expires.value !== initialExpires ? { expiresAt: expires.value ? endOfDay(expires.value) : null } : {}),
     };
@@ -1187,7 +1196,7 @@ function renderWrite(existing: Knowledge | null): void {
       type Saved = { id: string; published: boolean; readingsNeeded?: Array<{ id: string; name: string; proposed: string; candidates?: string[] }> };
       const r = existing
         ? await api<Saved>('PUT', `/knowledge/${existing.id}`, payload)
-        : await api<Saved>('POST', canPickScope && scope.value === 'all' ? '/knowledge' : `/stores/${storeId()}/knowledge`, payload);
+        : await api<Saved>('POST', allStores ? '/knowledge' : `/stores/${storeId()}/knowledge`, payload);
       writeDraft(draftKey, null);
       // 一緒に選んでおいた写真を送る。メモはもう保存できているので、写真で失敗しても先へ進む
       // （開いた画面から足し直せる）
@@ -1241,6 +1250,7 @@ function renderWrite(existing: Knowledge | null): void {
     current && canAttach ? h('p', { class: 'hint' }, '写真の追加と削除は、保存を待たずにすぐ反映されます。') : null,
     h('label', { for: 'tag' }, 'ハッシュタグ'),
     tagList, tagField, suggest, proposals,
+    areas ? areas.el : null,
     h('label', { for: 'expires' }, '有効期限（空なら期限なし）'), expires,
     h('p', { class: 'hint' }, 'キャンペーンなど、終わりが決まっているものに。その日を過ぎると、検索に出なくなります。'),
     message,
@@ -1479,6 +1489,7 @@ function renderScan(initialJan: string, stale: () => boolean): void {
     h('label', { for: 'jan' }, 'JANコード（バーコードの下の数字）'),
     h('div', { class: 'search-bar' }, field, lookupButton),
     out,
+    productFinder(storeId()),
   ));
   disposeView = stopCamera;
   if (initialJan) void lookup();
@@ -1498,16 +1509,26 @@ function renderScanResult(out: HTMLElement, r: ScanResult): void {
       p.note ? h('p', {}, p.note) : null,
       p.pending ? h('p', { class: 'pending' }, '登録の承認待ちです') : null,
       h('div', { class: 'tag-row' }, ...p.tags.map((t) => tagChip(t, { quiet: true }))),
-      h('button', { type: 'button', class: 'link', onclick: () => { clear(out); out.append(productForm(p.janCode, p, out)); } }, '売場やタグを直す')),
+      h('button', { type: 'button', class: 'link', onclick: () => { clear(out); out.append(productForm(p.janCode, p, out, r.related)); } }, '売場やタグを直す')),
     r.related.length > 0 ? h('h2', {}, '関連するナレッジ') : h('p', {}, 'この商品に関係するナレッジはまだありません。'),
   );
   if (r.related.length > 0) out.append(hitList(r.related));
 }
 
-function productForm(janCode: string, existing: ProductCard | null, out: HTMLElement): HTMLElement {
+function productForm(janCode: string, existing: ProductCard | null, out: HTMLElement, related: Hit[] = []): HTMLElement {
   const name = h('input', { id: 'pname', type: 'text', maxlength: 100, value: existing?.name ?? '', placeholder: '例：東芝 冷凍冷蔵庫 GR-W600' });
   const maker = h('input', { id: 'pmaker', type: 'text', value: existing?.maker ?? '', placeholder: '例：東芝' });
   const note = h('input', { id: 'pnote', type: 'text', value: existing?.note ?? '', placeholder: '例：入口側の通路の奥' });
+  // 売場は、店舗に売場の名前があるときだけ選べる（名前は、店長・本部が「承認・管理 → 売場」で作る）
+  const area = h('select', { id: 'parea' }, h('option', { value: '' }, '（決めない）'));
+  const areaField = h('div', { class: 'write', hidden: true }, h('label', { for: 'parea' }, '売場'), area);
+  let areaShown = false;
+  void loadAreas(storeId()).then((list) => {
+    if (list.length === 0) return;
+    area.append(...list.map((a) => h('option', { value: a.id, ...(existing?.area?.id === a.id ? { selected: true } : {}) }, a.name)));
+    areaShown = true;
+    areaField.hidden = false;
+  });
   const tags: string[] = existing ? [...existing.tags] : [];
   const tagField = h('input', { id: 'ptag', type: 'text', placeholder: '冷蔵庫、大型家電 など', autocomplete: 'off' });
   const tagList = h('div', { class: 'tag-row' });
@@ -1522,9 +1543,11 @@ function productForm(janCode: string, existing: ProductCard | null, out: HTMLEle
     message.hidden = true;
     if (tagField.value.trim()) add(tagField.value);
     try {
+      // 売場は、欄を出しているときだけ送る（送らなければ、いまの売場のまま）
+      const fields = { name: name.value, maker: maker.value || null, note: note.value || null, tagNames: tags, ...(areaShown ? { areaId: area.value || null } : {}) };
       const r = existing
-        ? await api<{ published: boolean }>('PATCH', `/stores/${storeId()}/products/${existing.id}`, { name: name.value, maker: maker.value || null, note: note.value || null, tagNames: tags })
-        : await api<{ published: boolean }>('POST', `/stores/${storeId()}/products`, { janCode, name: name.value, maker: maker.value || null, note: note.value || null, tagNames: tags });
+        ? await api<{ published: boolean }>('PATCH', `/stores/${storeId()}/products/${existing.id}`, fields)
+        : await api<{ published: boolean }>('POST', `/stores/${storeId()}/products`, { janCode, ...fields });
       toast(r.published ? '保存しました' : '承認待ちにしました');
       renderScanResult(out, await api<ScanResult>('GET', `/stores/${storeId()}/barcode/${janCode}`));
     } catch (err) {
@@ -1535,12 +1558,39 @@ function productForm(janCode: string, existing: ProductCard | null, out: HTMLEle
   const form = h('form', { class: 'write' },
     h('label', { for: 'pname' }, '商品名'), name,
     h('label', { for: 'pmaker' }, 'メーカー'), maker,
+    areaField,
     h('label', { for: 'pnote' }, '売場のメモ'), note,
     h('label', { for: 'ptag' }, 'ハッシュタグ'), tagList, tagField, suggest,
     message,
-    h('button', { type: 'submit', class: 'primary' }, existing ? '保存する' : '登録する'));
+    h('div', { class: 'row-actions product-save' },
+      h('button', { type: 'submit', class: 'primary' }, existing ? '保存する' : '登録する'),
+      // 直すのをやめて、商品の画面へ戻る
+      existing ? h('button', { type: 'button', class: 'secondary', onclick: () => void backToCard() }, 'やめる') : null));
   submitOnce(form, submit); // 連打で同じ商品を2回送らない
-  return form;
+  const backToCard = async (): Promise<void> => {
+    try {
+      renderScanResult(out, await api<ScanResult>('GET', `/stores/${storeId()}/barcode/${janCode}`));
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e));
+    }
+  };
+  if (!existing) return form;
+  // 直す画面の下に、結ぶナレッジ・変更の履歴・消すを置く（読む画面には置かない）
+  const stay = async (): Promise<void> => {
+    try {
+      const fresh = await api<ScanResult>('GET', `/stores/${storeId()}/barcode/${janCode}`);
+      clear(out);
+      if (fresh.status === 'found') out.append(productForm(janCode, fresh.product, out, fresh.related));
+      else renderScanResult(out, fresh);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e));
+    }
+  };
+  return h('div', { class: 'product-edit' }, form, ...productExtras({
+    storeId: storeId(), product: existing, related, canLink: isTrusted(), adminScope: me!.adminScope,
+    onChanged: () => void stay(),
+    onDeleted: () => renderScanResult(out, { status: 'unknown', janCode }),
+  }));
 }
 
 // --- 承認・管理（trusted / administrator） --------------------------------------------
@@ -1621,7 +1671,7 @@ async function renderManage(stale: () => boolean): Promise<void> {
   staleList.apply(c);
   expiredList.apply(d);
   section.append(pendingList.box, zeroList.box, staleList.box, expiredList.box);
-  section.append(productPanel(storeId()), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
+  section.append(productPanel(storeId()), ...(isAdmin() ? [areaPanel(storeId())] : []), readingPanel(), tagPanel(isAdmin()), importPanel(storeId()));
   // 書き出しは会社全体のデータなので、本部（会社全体の管理者）にだけ出す
   if (me!.adminScope === 'tenant') section.append(exportPanel());
   if (isAdmin()) {

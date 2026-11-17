@@ -49,6 +49,8 @@ export interface KnowledgeView {
   verifiedBy: string | null;
   /** 有効期限。過ぎると、夜間に検索から外れる（status が expired になる）。無ければ期限なし */
   expiresAt: string | null;
+  /** どの売場の話か（付けてあれば）。消された売場は出さない */
+  areas: Array<{ id: string; name: string }>;
   /**
    * 承認待ちの修正案。**誰の案かを全員に見せる。**
    * 見えないと、同じところを2人が別々に直して、片方が黙って消える。
@@ -296,6 +298,10 @@ export async function editKnowledge(
     );
   }
   await assertAreas(db, k.store_id, input.areaIds);
+  // 売場を送ってこなければ、いまの版の売場を引き継ぐ（売場の欄が無い古い画面から直しても、印が消えないように）
+  const areaIds = input.areaIds ?? (await maybeOne<{ area_ids: string[] }>(
+    db, `SELECT area_ids FROM knowledge_versions WHERE knowledge_id = $1 AND version = $2`, [id, k.current_version],
+  ))?.area_ids ?? [];
   // 期限を指定しなければ今の期限を引き継ぐ。どちらの場合も公開（承認）されるまで効かない
   const expiresAt = input.expiresAt !== undefined ? input.expiresAt : k.expires_at;
   await assertNotExpired(db, expiresAt);
@@ -308,7 +314,7 @@ export async function editKnowledge(
     [id, actor.userId],
   );
   await insertVersion(db, actor, id, version, {
-    title: input.title.trim(), body: input.body, tagIds, areaIds: input.areaIds ?? [], expiresAt,
+    title: input.title.trim(), body: input.body, tagIds, areaIds, expiresAt,
   }, k.current_version);
   // 前の案と一緒に待っていた本人の写真は、出し直した案に付け替える（前の案は上で閉じた）
   await db.query(
@@ -415,9 +421,9 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
   const k = await load(db, id);
   assert(canAccessStore(actor, k.store_id), 'forbidden', 'このナレッジは閲覧できません');
   // 公開中の版。未公開なら最新の案（投稿者本人と承認者だけが見られる）
-  const v = await maybeOne<{ version: number; state: string; title: string; body: string; tag_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null; expires_at: string | null }>(
+  const v = await maybeOne<{ version: number; state: string; title: string; body: string; tag_ids: string[]; area_ids: string[]; edited_by: string; edited_at: string; editor: string | null; approver: string | null; decided_at: string | null; expires_at: string | null }>(
     db,
-    `SELECT version, state, title, body, tag_ids, edited_by, edited_at::text AS edited_at, expires_at::text AS expires_at,
+    `SELECT version, state, title, body, tag_ids, area_ids, edited_by, edited_at::text AS edited_at, expires_at::text AS expires_at,
             (SELECT name FROM users WHERE id = edited_by) AS editor,
             (SELECT name FROM users WHERE id = decided_by) AS approver,
             decided_at::text AS decided_at
@@ -446,6 +452,10 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
       WHERE k.id = $1`,
     [id],
   );
+  // 売場の印（付けていないものが大半なので、あるときだけ引く）
+  const areas = v.area_ids.length === 0 ? [] : await db.query<{ id: string; name: string }>(
+    `SELECT id, name FROM areas WHERE id = ANY($1::uuid[]) ORDER BY name`, [v.area_ids],
+  );
   // 承認待ちの版は**全員に見せる**。
   // 隠すと、同じところを2人が別々に直して、承認のときに片方が黙って消える。
   // 見えていれば、2人目は相手の案を読んでから書ける（あるいは待てる）。
@@ -473,6 +483,7 @@ export async function getKnowledge(db: Db, actor: Actor, id: string): Promise<Kn
     verifiedBy: meta.verified_by,
     // 公開されたものは、いま効いている期限。まだ公開されていないものは、その案に付いている期限
     expiresAt: k.status === 'draft' ? v.expires_at : k.expires_at,
+    areas,
     pendingEdits: pending.map((p) => ({ version: p.version, editedBy: p.editor, editedAt: p.edited_at, mine: p.mine })),
     // 期限切れ（expired）は、一度は公開されたもの。「承認待ち」とは言わない
     ...(k.status === 'draft' ? { draftState: v.state === 'rejected' ? 'rejected' as const : 'pending' as const } : {}),

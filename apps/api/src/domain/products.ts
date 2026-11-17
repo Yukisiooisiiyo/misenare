@@ -385,15 +385,76 @@ export async function linkKnowledgeToProduct(db: Db, actor: Actor, knowledgeId: 
   );
 }
 
-export async function productHistory(db: Db, actor: Actor, storeId: string, productId: string) {
+/** ナレッジと商品の紐づけを外す（紐づけられる人と同じ）。 */
+export async function unlinkKnowledgeFromProduct(db: Db, actor: Actor, knowledgeId: string, productId: string) {
+  const k = await maybeOne<{ store_id: string | null }>(db, `SELECT store_id FROM knowledge WHERE id = $1`, [knowledgeId]);
+  assert(k !== undefined, 'not_found', 'ナレッジが見つかりません');
+  assert(isTrusted(actor) && canAccessStore(actor, k.store_id), 'forbidden', '紐づけを外す権限がありません');
+  if (k.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジの紐づけを外せるのは本部のみです');
+  await db.query(`DELETE FROM knowledge_products WHERE knowledge_id = $1 AND product_id = $2`, [knowledgeId, productId]);
+}
+
+export interface ProductHistoryRow {
+  field: string;
+  before: unknown;
+  after: unknown;
+  edited_at: string;
+  edited_by: string;
+  /** field が area のとき、売場の名前（消した売場なら null） */
+  before_name?: string | null;
+  after_name?: string | null;
+}
+
+export async function productHistory(db: Db, actor: Actor, storeId: string, productId: string): Promise<ProductHistoryRow[]> {
   assert(canAccessStore(actor, storeId), 'forbidden', '履歴を見る権限がありません');
-  return db.query(
+  const rows = await db.query<ProductHistoryRow>(
     `SELECT h.field, h.before, h.after, h.edited_at::text AS edited_at, u.name AS edited_by
        FROM product_history h JOIN users u ON u.id = h.edited_by
       WHERE h.product_id = $1 AND (h.store_id IS NULL OR h.store_id = $2)
       ORDER BY h.id DESC`,
     [productId, storeId],
   );
+  // 売場は ID で残っているので、画面に出せるよう名前を添える
+  const ids = [...new Set(rows.filter((r) => r.field === 'area').flatMap((r) => [r.before, r.after]).filter((x): x is string => typeof x === 'string'))];
+  if (ids.length === 0) return rows;
+  const names = new Map((await db.query<{ id: string; name: string }>(`SELECT id, name FROM areas WHERE id = ANY($1::uuid[])`, [ids])).map((a) => [a.id, a.name]));
+  const nameOf = (v: unknown): string | null => (typeof v === 'string' ? names.get(v) ?? null : null);
+  return rows.map((r) => (r.field === 'area' ? { ...r, before_name: nameOf(r.before), after_name: nameOf(r.after) } : r));
+}
+
+export interface ProductListItem { id: string; janCode: string; name: string; maker: string | null; area: string | null }
+
+const PRODUCT_PAGE = 50;
+
+/**
+ * 登録済みの商品の一覧（名前順。50件ずつ）。q を付けると、商品名・メーカー名に含むものと、JAN が前から一致するものに絞る。
+ *
+ * バーコードが読めない・手元に無いときに、商品を名前から辿るための口。
+ * 承認待ちの商品は出さない（バーコードを読んだときと同じく、登録した本人と承認者だけが見るもの）。
+ */
+export async function listProducts(db: Db, actor: Actor, storeId: string, options: { q?: string; offset?: number } = {}): Promise<{ items: ProductListItem[]; next: number | null }> {
+  assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗の商品は見られません');
+  await assertStore(db, storeId);
+  const q = (options.q ?? '').normalize('NFKC').trim().slice(0, 100);
+  // LIKE の記号は、文字として探す
+  const like = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const offset = Number.isInteger(options.offset) && options.offset! > 0 ? Math.min(options.offset!, 100_000) : 0;
+  const rows = await db.query<{ id: string; jan_code: string; name: string; maker: string | null; area: string | null }>(
+    `SELECT p.id, p.jan_code, p.name, p.maker, a.name AS area
+       FROM products p
+       LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = $1
+       LEFT JOIN areas a ON a.id = sp.area_id
+      WHERE p.state = 'active'
+        AND ($2 = '' OR p.name ILIKE $3 OR p.maker ILIKE $3 OR p.jan_code LIKE $4)
+      ORDER BY p.name, p.id
+      LIMIT $5 OFFSET $6`,
+    // JAN で探すのは、数字だけを打ったときだけ（数字以外のときに「%」だけを渡すと、全部に当たってしまう）
+    [storeId, q, like, /^\d+$/.test(q) ? `${q}%` : null, PRODUCT_PAGE + 1, offset],
+  );
+  return {
+    items: rows.slice(0, PRODUCT_PAGE).map((r) => ({ id: r.id, janCode: r.jan_code, name: r.name, maker: r.maker, area: r.area })),
+    next: rows.length > PRODUCT_PAGE ? offset + PRODUCT_PAGE : null,
+  };
 }
 
 /** 商品の削除（administrator のみ） */
