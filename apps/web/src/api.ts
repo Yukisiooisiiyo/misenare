@@ -168,6 +168,20 @@ export async function fetchDictionary(storeId: string): Promise<Dictionary> {
 
 // --- API の型（サーバーの戻り値に合わせる） -----------------------------------
 
+/** 自分のアカウントで入っている端末 */
+export interface Device {
+  id: string;
+  deviceName: string | null;
+  createdAt: string;
+  lastUsedAt: string;
+  /** どうやって増えたか。前からある端末は分からないので null */
+  origin: 'invite' | 'added' | 'self' | 'email' | 'passkey' | 'sso' | null;
+  /** 招待・端末の追加を出した人 */
+  issuedBy: string | null;
+  current: boolean;
+  revoked: boolean;
+}
+
 export interface Me {
   id: string;
   name: string;
@@ -177,6 +191,10 @@ export interface Me {
   stores: Array<{ id: string; name: string }>;
   /** 「古い」とみなすまでの日数（サーバーが決める） */
   staleDays?: number;
+  /** この端末がまだ見ていない、あとから増えた端末 */
+  newDevices?: Device[];
+  /** この端末がまだ見ていない、ほかの端末から登録されたメールアドレス */
+  newEmail?: string | null;
 }
 
 export interface Hit {

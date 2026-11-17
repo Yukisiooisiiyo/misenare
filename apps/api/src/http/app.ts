@@ -89,10 +89,16 @@ import {
   parseToken,
   revokeSession,
   sendEmailLogin,
-  setMyEmail,
   updateUser,
   type InvitationInput,
   type UserPatch,
+  clearMyEmail,
+  confirmEmailChange,
+  listMyDevices,
+  markDevicesSeen,
+  requestEmailChange,
+  unseenDevices,
+  unseenEmailChange,
 } from '../domain/users.ts';
 import { OidcDirectory } from '../auth/oidc.ts';
 import {
@@ -129,6 +135,8 @@ interface Ctx {
   limit: (req: Request, name: string, rule: RateRule) => Promise<boolean>;
   /** 回数を止める（利用者ごと）。ログイン後の重い読み取りで使う。鍵が IP でないので店舗の回線で巻き添えにならない */
   limitUser: (name: string, rule: RateRule) => Promise<boolean>;
+  /** 利用者あてのメールを出す口（確認メールなど）。設定が無ければ noMailer */
+  mailer: () => Mailer;
 }
 
 const STATUS: Record<DomainError['code'], number> = { forbidden: 403, not_found: 404, invalid: 400, conflict: 409 };
@@ -291,6 +299,11 @@ function userPatchBody(v: unknown): UserPatch {
   if (b.status !== undefined) {
     if (b.status !== 'active' && b.status !== 'disabled') throw new HttpError(400, 'status は active か disabled です');
     patch.status = b.status;
+  }
+  // 管理者ができるのは、登録されたメールアドレスを**外す**ことだけ（本人以外が好きなアドレスを入れられると、その宛先で入れてしまう）
+  if (b.email !== undefined) {
+    if (b.email !== null) throw new HttpError(400, 'email は null（登録を外す）だけ指定できます');
+    patch.email = null;
   }
   return patch;
 }
@@ -566,6 +579,11 @@ function routes(): Router<Ctx> {
     // 利用の申請は店舗に紐づかない（配属先は承認のときに決める）が、
     // 気づく場所はホームが一番早いので、ここに混ぜて返す
     accessRequests: await requestBadge(c.db, c.actor),
+    // この端末がまだ見ていない、あとから増えた端末の数（身に覚えのない端末に、すぐ気づけるように）
+    devices: {
+      added: (await unseenDevices(c.db, c.actor, c.identity.sessionId ?? null)).length,
+      emailChanged: (await unseenEmailChange(c.db, c.actor, c.identity.sessionId ?? null)) !== null,
+    },
   }));
 
   // --- 既存マニュアルの取り込み ---------------------------------------------
@@ -716,7 +734,11 @@ function routes(): Router<Ctx> {
   r.delete('/passkeys/:passkeyId', async (c, _req, p) => json(await deletePasskey(c.db, c.actor, p.passkeyId!)));
 
   // --- 利用者・端末 ---------------------------------------------------------
-  r.get('/me', async (c) => json(await me(c.db, c.actor)));
+  r.get('/me', async (c) => json(await me(c.db, c.actor, c.identity.sessionId ?? null)));
+  // 自分のアカウントで入っている端末の一覧。止めるのは DELETE /sessions/:id（自分の端末なら管理者でなくても止められる）
+  r.get('/me/devices', async (c) => json(await listMyDevices(c.db, c.actor, c.identity.sessionId ?? null)));
+  // 「端末が増えました」の知らせを、この端末では見たことにする
+  r.post('/me/devices/seen', async (c) => json(await markDevicesSeen(c.db, c.actor, c.identity.sessionId ?? null)));
   // 別の端末でログインするためのワンタイムURLを、自分用に発行する（管理者でなくても可）。
   r.post('/me/device-link', async (c) => {
     if (!(await c.limitUser('device-link', { limit: 10, windowMs: 10 * 60 * 1000 }))) {
@@ -729,10 +751,22 @@ function routes(): Router<Ctx> {
     return json({ url, expiresAt }, 201);
   });
   // 自分のメールアドレスを登録する（復帰のログインリンクの宛先になる）。
+  // **その場では登録しない。** 打たれたアドレスに確認のリンクを送り、開かれたら登録する（POST /auth/email-verify）。
+  // 空で送ると、登録を外す。
   r.post('/me/email', async (c, req) => {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
-    const email = typeof b.email === 'string' ? b.email : '';
-    return json(await setMyEmail(c.db, c.actor, email));
+    const email = typeof b.email === 'string' ? b.email.trim() : '';
+    if (email === '') return json(await clearMyEmail(c.db, c.actor));
+    checkLength('email', email, MAX_EMAIL);
+    // 好きな宛先にメールを飛ばせる口なので、1人あたりの回数を抑える
+    if (!(await c.limitUser('email-verify', { limit: 5, windowMs: 10 * 60 * 1000 }))) {
+      throw new HttpError(429, '確認メールの送信が多すぎます。少し待ってからお試しください');
+    }
+    const mailer = c.mailer();
+    if (mailer === noMailer) throw new HttpError(400, 'メール送信が設定されていないため、メールアドレスを登録できません');
+    const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
+    if (!appUrl) throw new HttpError(500, 'APP_URL（または WEBAUTHN_ORIGINS）が設定されていないため、確認のリンクを作れません');
+    return json(await requestEmailChange(c.db, c.actor, mailer, appUrl, email, c.identity.sessionId ?? null), 202);
   });
   r.post('/auth/logout', async (c) => {
     if (c.identity.sessionId) await revokeSession(c.db, c.actor, c.identity.sessionId);
@@ -747,7 +781,7 @@ function routes(): Router<Ctx> {
     const raw = (await readJson<Record<string, unknown>>(req)) ?? {};
     const body = invitationBody(raw);
     const email = typeof raw.email === 'string' ? raw.email : '';
-    const mailer = mailerFromEnv();
+    const mailer = c.mailer();
     if (mailer === noMailer) throw new HttpError(400, 'メール送信が設定されていません（サーバーの SMTP HOST と MAIL FROM が必要です）');
     // 招待リンクの土台。APP_URL を優先し、無ければ WEBAUTHN_ORIGINS の先頭で代用する。
     const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
@@ -867,6 +901,26 @@ export function createApp(deps: AppDeps) {
       try {
         const result = await deps.database.withTenant(parsed.tenantId, (db) => acceptInvitation(db, parsed.tenantId, token, deviceName));
         return json(result, 201);
+      } catch (err) {
+        if (err instanceof DomainError) await limiter.take(acceptKey, RULES.acceptInvitation);
+        throw err;
+      }
+    }
+
+    // メールアドレスの確認リンクが開かれたところ。開くのは別の端末のこともあるので、ログイン前でも受ける。
+    // 鍵は256ビットの乱数で、申し込んだ本人のアカウントにしか効かない（入れ替わりは起きない）
+    if (url.pathname === '/auth/email-verify' && req.method === 'POST') {
+      const acceptKey = clientKey(req, 'accept');
+      if (await limiter.blocked(acceptKey, RULES.acceptInvitation)) return tooMany();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      const token = typeof b.token === 'string' ? b.token : '';
+      const parsed = parseToken(token);
+      if (!parsed) {
+        await limiter.take(acceptKey, RULES.acceptInvitation);
+        throw new HttpError(400, 'このリンクは使えません。もう一度、設定の画面から登録してください');
+      }
+      try {
+        return json(await deps.database.withTenant(parsed.tenantId, (db) => confirmEmailChange(db, token)));
       } catch (err) {
         if (err instanceof DomainError) await limiter.take(acceptKey, RULES.acceptInvitation);
         throw err;
@@ -1024,6 +1078,7 @@ export function createApp(deps: AppDeps) {
           actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
           limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
           limitUser: (name, rule) => limiter.take(`${name}:user:${actor.userId}`, rule),
+          mailer: () => deps.loginMailer ?? mailerFromEnv(),
         },
         req,
         matched.params,

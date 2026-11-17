@@ -305,7 +305,7 @@ export async function redeemSsoHandoff(
     assert(u?.status === 'active', 'forbidden', 'この利用者は無効化されています');
     const sessionToken = issueToken(row.tenant_id);
     await db.query(
-      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
+      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name, origin) VALUES ($1, $2, $3, $4, 'sso')`,
       [row.tenant_id, row.user_id, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
     );
     return { sessionToken, userId: row.user_id, returnTo: row.return_to };

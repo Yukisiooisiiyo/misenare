@@ -111,29 +111,95 @@ export const DEVICE_LINK_TTL_MINUTES = 30;
  * 本部の人は createInvitation だと自分の端末すら足せない（assertCanManageUser で弾かれる）ので、
  * ここで self 専用の経路を用意する。鍵は短命・1回限り。
  */
-export async function createDeviceLink(db: Db, actor: Actor): Promise<{ token: string; expiresAt: string }> {
+export async function createDeviceLink(
+  db: Db, actor: Actor, purpose: 'email_login' | null = null,
+): Promise<{ token: string; expiresAt: string }> {
   const token = issueToken(actor.tenantId);
   const row = await one<{ expires_at: string }>(
     db,
-    `INSERT INTO invitations (tenant_id, token_hash, store_id, user_id, name, trust_level, admin_scope, created_by, expires_at)
-     VALUES ($1, $2, NULL, $3, NULL, $4, $5, $3, now() + make_interval(mins => $6))
+    `INSERT INTO invitations (tenant_id, token_hash, store_id, user_id, name, trust_level, admin_scope, created_by, purpose, expires_at)
+     VALUES ($1, $2, NULL, $3, NULL, $4, $5, $3, $7, now() + make_interval(mins => $6))
      RETURNING expires_at::text AS expires_at`,
-    [actor.tenantId, hashToken(token), actor.userId, actor.trustLevel, actor.adminScope, DEVICE_LINK_TTL_MINUTES],
+    [actor.tenantId, hashToken(token), actor.userId, actor.trustLevel, actor.adminScope, DEVICE_LINK_TTL_MINUTES, purpose],
   );
   return { token, expiresAt: row.expires_at };
 }
 
-/** 自分のメールアドレスを登録・変更する。テナント内で一意（DB の users_email_per_tenant で担保）。 */
-export async function setMyEmail(db: Db, actor: Actor, email: string): Promise<{ email: string }> {
+/** メールアドレスの確認リンクの寿命 */
+export const EMAIL_VERIFY_TTL_MINUTES = 30;
+
+/**
+ * 自分のメールアドレスの登録を**申し込む**。打たれたアドレスに確認のリンクを送り、
+ * 開かれたら登録する（confirmEmailChange）。ここでは登録しない。
+ *
+ * 確かめずに登録すると、他人のアドレスや打ち間違えたアドレスがそのまま入る：
+ *   ・この端末を少し触れた人が自分のアドレスを入れておけば、端末を止められてもメールのリンクで入り直せる
+ *   ・他人のアドレスを先に入れておけば、その人がメールでログインしようとしたとき、こちらのアカウントに入ってしまう
+ * 届くことを確かめれば、登録できるのは自分で受け取れるアドレスだけになる。
+ */
+export async function requestEmailChange(
+  db: Db, actor: Actor, mailer: Mailer, appUrl: string, email: string, sessionId: string | null = null,
+): Promise<{ pending: string }> {
   const addr = email.trim();
-  assert(looksLikeEmail(addr), 'invalid', 'メールアドレスの形が正しくありません');
-  try {
-    await db.query(`UPDATE users SET email = $2 WHERE id = $1`, [actor.userId, addr]);
-  } catch {
-    // 一意制約違反：同じメアドが社内の別の人に使われている
-    throw new DomainError('conflict', 'このメールアドレスは、社内の別のアカウントで使われています');
-  }
-  return { email: addr };
+  assert(looksLikeEmail(addr) && addr.length <= 254, 'invalid', 'メールアドレスの形が正しくありません');
+  const used = await maybeOne(db, `SELECT 1 FROM users WHERE lower(email) = lower($1) AND id <> $2`, [addr, actor.userId]);
+  assert(used === undefined, 'conflict', 'このメールアドレスは、社内の別のアカウントで使われています');
+  const who = await one<{ name: string }>(db, `SELECT name FROM users WHERE id = $1`, [actor.userId]);
+  // 前に出した確認は捨てる（最後に打ったアドレスだけを生かす）
+  await db.query(`DELETE FROM email_verifications WHERE user_id = $1 OR expires_at < now()`, [actor.userId]);
+  const token = issueToken(actor.tenantId);
+  await db.query(
+    `INSERT INTO email_verifications (tenant_id, user_id, email, token_hash, session_id, expires_at)
+     VALUES ($1, $2, $3, $4, $6, now() + make_interval(mins => $5))`,
+    [actor.tenantId, actor.userId, addr, hashToken(token), EMAIL_VERIFY_TTL_MINUTES, sessionId],
+  );
+  const link = `${appUrl.replace(/\/+$/, '')}/app/#verify-email=${encodeURIComponent(token)}`;
+  const sent = await mailer.send({
+    to: [addr],
+    subject: '【ツギガミ】メールアドレスの確認',
+    text: [
+      `ツギガミの「${who.name}」さんのアカウントに、このメールアドレスを登録するための確認です。`,
+      '',
+      `下のリンクを開くと登録されます（1回限り・${EMAIL_VERIFY_TTL_MINUTES}分以内）。`,
+      link,
+      '',
+      '登録すると、端末が使えなくなったときに、このアドレスあてのログインリンクで入り直せるようになります。',
+      'このメールに心当たりがない場合は、リンクを開かずに破棄してください。開かなければ登録されません。',
+    ].join('\n'),
+  });
+  assert(sent, 'conflict', '確認のメールを送れませんでした。少し待ってから、もう一度お試しください');
+  return { pending: addr };
+}
+
+/**
+ * 確認のリンクが開かれたところ（ログイン前でも呼べる）。申し込んだ本人のアカウントに、アドレスを登録する。
+ * db は、鍵から取り出した tenant_id で固定した接続であること。鍵は1回限り。
+ */
+export async function confirmEmailChange(db: Db, token: string): Promise<{ email: string }> {
+  const row = await maybeOne<{ user_id: string; email: string; session_id: string | null }>(
+    db,
+    `DELETE FROM email_verifications WHERE token_hash = $1 AND expires_at > now() RETURNING user_id, email, session_id`,
+    [hashToken(token)],
+  );
+  if (!row) throw new DomainError('not_found', 'このリンクは使えません（期限切れか、使用済みです）。もう一度、設定の画面から登録してください');
+  // 申し込んでから開くまでのあいだに、同じアドレスをほかの人が使い始めていたら登録しない
+  const used = await maybeOne(db, `SELECT 1 FROM users WHERE lower(email) = lower($1) AND id <> $2`, [row.email, row.user_id]);
+  assert(used === undefined, 'conflict', 'このメールアドレスは、社内の別のアカウントで使われています');
+  // いつ・どの端末の申し込みで登録されたかを残す（ほかの端末に知らせるため。unseenEmailChange）
+  const updated = await db.query(
+    `UPDATE users SET email = $2, email_set_at = now(), email_set_by_session = $3
+      WHERE id = $1 AND status = 'active' RETURNING id`,
+    [row.user_id, row.email, row.session_id],
+  );
+  assert(updated.length === 1, 'conflict', 'この利用者は無効化されています');
+  return { email: row.email };
+}
+
+/** 自分のメールアドレスの登録を外す（外すのに確認は要らない） */
+export async function clearMyEmail(db: Db, actor: Actor): Promise<{ email: null }> {
+  await db.query(`UPDATE users SET email = NULL WHERE id = $1`, [actor.userId]);
+  await db.query(`DELETE FROM email_verifications WHERE user_id = $1`, [actor.userId]);
+  return { email: null };
 }
 
 /**
@@ -164,7 +230,7 @@ export async function sendEmailLogin(database: Database, mailer: Mailer, appUrl:
   }
   if (!hit) return; // 登録が無ければ、何も送らない（応答は呼び出し側が常に成功を返す）
   const { tenantId, actor } = hit;
-  const { token } = await database.withTenant(tenantId, (db) => createDeviceLink(db, actor));
+  const { token } = await database.withTenant(tenantId, (db) => createDeviceLink(db, actor, 'email_login'));
   const link = `${appUrl.replace(/\/+$/, '')}/app/#invite=${encodeURIComponent(token)}`;
   await mailer.send({
     to: [addr],
@@ -220,10 +286,11 @@ export async function acceptInvitation(db: Db, tenantId: string, token: string, 
   const inv = await maybeOne<{
     id: string; token_hash: string; store_id: string | null; user_id: string | null; name: string | null;
     email: string | null; trust_level: TrustLevel; admin_scope: AdminScope; expired: boolean; used: boolean;
-    creator_inactive: boolean;
+    creator_inactive: boolean; created_by: string | null; purpose: string | null;
   }>(
     db,
     `SELECT i.id, i.token_hash, i.store_id, i.user_id, i.name, i.email, i.trust_level, i.admin_scope,
+            i.created_by, i.purpose,
             i.expires_at < now() AS expired, i.used_at IS NOT NULL AS used,
             COALESCE(c.status <> 'active', false) AS creator_inactive
        FROM invitations i LEFT JOIN users c ON c.id = i.created_by
@@ -275,12 +342,105 @@ export async function acceptInvitation(db: Db, tenantId: string, token: string, 
   }
   await db.query(`UPDATE invitations SET used_at = now(), used_by = $2 WHERE id = $1`, [inv.id, userId]);
 
+  // この端末がどうやって増えたかを残す（本人が「自分の端末」の一覧で確かめられるように）。
+  //   新しい人の登録 … invite ／ 管理者が既存の人に足した … added ／ 本人が出したリンク … self ／ メールのログインリンク … email
+  const origin: SessionOrigin = inv.user_id === null ? 'invite'
+    : inv.created_by !== inv.user_id ? 'added'
+      : inv.purpose === 'email_login' ? 'email' : 'self';
   const sessionToken = issueToken(tenantId);
   await db.query(
-    `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
-    [tenantId, userId, hashToken(sessionToken), deviceName?.slice(0, 60) ?? null],
+    `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name, origin, issued_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [tenantId, userId, hashToken(sessionToken), deviceName?.slice(0, 60) ?? null, origin, origin === 'invite' || origin === 'added' ? inv.created_by : null],
   );
   return { sessionToken, userId };
+}
+
+/** 端末（セッション）がどうやって増えたか。前からある行は分からないので null */
+export type SessionOrigin = 'invite' | 'added' | 'self' | 'email' | 'passkey' | 'sso';
+
+export interface DeviceView {
+  id: string;
+  deviceName: string | null;
+  createdAt: string;
+  lastUsedAt: string;
+  origin: SessionOrigin | null;
+  /** 招待・端末の追加を出した人の名前 */
+  issuedBy: string | null;
+  /** いま使っているこの端末か */
+  current: boolean;
+  /** すでに止められているか（「増えた端末」の知らせでだけ true になりうる） */
+  revoked: boolean;
+}
+
+const DEVICE_COLUMNS = `s.id, s.device_name, s.created_at::text AS created_at, s.last_used_at::text AS last_used_at,
+            s.origin, iu.name AS issued_by, s.revoked_at IS NOT NULL AS revoked`;
+interface DeviceRow {
+  id: string; device_name: string | null; created_at: string; last_used_at: string;
+  origin: SessionOrigin | null; issued_by: string | null; revoked: boolean;
+}
+const deviceView = (r: DeviceRow, currentId: string | null): DeviceView => ({
+  id: r.id, deviceName: r.device_name, createdAt: r.created_at, lastUsedAt: r.last_used_at,
+  origin: r.origin, issuedBy: r.issued_by, current: r.id === currentId, revoked: r.revoked,
+});
+
+/** 自分のアカウントで、いま入っている端末の一覧（止めたものは出さない）。新しい順 */
+export async function listMyDevices(db: Db, actor: Actor, currentSessionId: string | null): Promise<DeviceView[]> {
+  const rows = await db.query<DeviceRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM sessions s LEFT JOIN users iu ON iu.id = s.issued_by
+      WHERE s.user_id = $1 AND s.revoked_at IS NULL
+        AND s.last_used_at >= now() - make_interval(days => $2)
+      ORDER BY s.created_at DESC`,
+    [actor.userId, SESSION_IDLE_DAYS],
+  );
+  return rows.map((r) => deviceView(r, currentSessionId));
+}
+
+/**
+ * この端末がまだ見ていない、**あとから増えた端末**。
+ *
+ * 店長や本部は、端末をなくした人のために「その人として入れる鍵」を作れる。便利な反面、作った人の手元にも
+ * 鍵が残るので、本人の知らないうちに本人として入ることもできる。増えたことを本人の端末に必ず出して、
+ * 身に覚えがなければ止められるようにする。すでに止められた端末も出す（こっそり足して、こっそり消した跡も残す）。
+ */
+export async function unseenDevices(db: Db, actor: Actor, currentSessionId: string | null): Promise<DeviceView[]> {
+  if (currentSessionId === null) return [];
+  const rows = await db.query<DeviceRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM sessions s LEFT JOIN users iu ON iu.id = s.issued_by
+      WHERE s.user_id = $1 AND s.id <> $2
+        AND s.created_at > (SELECT c.devices_seen_at FROM sessions c WHERE c.id = $2)
+      ORDER BY s.created_at DESC LIMIT 20`,
+    [actor.userId, currentSessionId],
+  );
+  return rows.map((r) => deviceView(r, currentSessionId));
+}
+
+/**
+ * この端末がまだ見ていない、**メールアドレスの登録**。申し込んだ端末には出さない。
+ *
+ * 登録したアドレスにはログイン用のリンクが届くので、登録は「入り方を1つ増やす」のと同じ重さがある。
+ * 端末を少し触れた人が自分のアドレスを入れていった、という形に本人が気づけるよう、ほかの端末に知らせる。
+ */
+export async function unseenEmailChange(db: Db, actor: Actor, currentSessionId: string | null): Promise<string | null> {
+  if (currentSessionId === null) return null;
+  const row = await maybeOne<{ email: string }>(
+    db,
+    `SELECT u.email FROM users u
+      WHERE u.id = $1 AND u.email IS NOT NULL AND u.email_set_at IS NOT NULL
+        AND u.email_set_by_session IS DISTINCT FROM $2
+        AND u.email_set_at > (SELECT c.devices_seen_at FROM sessions c WHERE c.id = $2)`,
+    [actor.userId, currentSessionId],
+  );
+  return row?.email ?? null;
+}
+
+/** 「増えた端末」を見た、と**この端末で**記録する（ほかの端末の知らせは消さない） */
+export async function markDevicesSeen(db: Db, actor: Actor, currentSessionId: string | null): Promise<{ ok: true }> {
+  if (currentSessionId !== null) {
+    await db.query(`UPDATE sessions SET devices_seen_at = now() WHERE id = $1 AND user_id = $2`, [currentSessionId, actor.userId]);
+  }
+  return { ok: true };
 }
 
 /** セッショントークンを照合する。有効なら利用者IDを返し、最終利用日時を更新する。 */
@@ -353,6 +513,8 @@ export interface UserPatch {
   trustLevel?: TrustLevel;
   adminScope?: AdminScope;
   status?: 'active' | 'disabled';
+  /** 登録されたメールアドレスを外す（null だけ。管理者が別のアドレスを入れることはできない） */
+  email?: null;
 }
 
 /**
@@ -369,16 +531,20 @@ export async function updateUser(db: Db, actor: Actor, userId: string, patch: Us
   if (patch.adminScope !== undefined) {
     await db.query(`UPDATE users SET admin_scope = $2 WHERE id = $1`, [userId, patch.adminScope]);
   }
+  if (patch.email === null) {
+    await db.query(`UPDATE users SET email = NULL WHERE id = $1`, [userId]);
+    await db.query(`DELETE FROM email_verifications WHERE user_id = $1`, [userId]);
+  }
   if (patch.status !== undefined) {
     await db.query(`UPDATE users SET status = $2 WHERE id = $1`, [userId, patch.status]);
     if (patch.status === 'disabled') {
       await db.query(`UPDATE sessions SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL`, [userId]);
     }
   }
-  return one(db, `SELECT id, name, trust_level, admin_scope, status FROM users WHERE id = $1`, [userId]);
+  return one(db, `SELECT id, name, trust_level, admin_scope, status, email FROM users WHERE id = $1`, [userId]);
 }
 
-export async function me(db: Db, actor: Actor) {
+export async function me(db: Db, actor: Actor, currentSessionId: string | null = null) {
   const u = await one<{ id: string; name: string; email: string | null }>(db, `SELECT id, name, email FROM users WHERE id = $1`, [actor.userId]);
   const stores = await db.query<{ id: string; name: string }>(
     actor.adminScope === 'tenant'
@@ -388,5 +554,11 @@ export async function me(db: Db, actor: Actor) {
   );
   // 画面側の「古い」の判定をサーバーと揃えるために配る
   const { STALE_DAYS } = await import('./knowledge.ts');
-  return { ...u, trustLevel: actor.trustLevel, adminScope: actor.adminScope, stores, staleDays: STALE_DAYS };
+  return {
+    ...u, trustLevel: actor.trustLevel, adminScope: actor.adminScope, stores, staleDays: STALE_DAYS,
+    // この端末がまだ見ていない、あとから増えた端末（ホームで知らせる）
+    newDevices: await unseenDevices(db, actor, currentSessionId),
+    // この端末がまだ見ていない、メールアドレスの登録（ほかの端末から申し込まれたもの）
+    newEmail: await unseenEmailChange(db, actor, currentSessionId),
+  };
 }

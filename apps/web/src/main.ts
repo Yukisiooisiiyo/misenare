@@ -1,7 +1,7 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
 // 画面は URL のハッシュで切り替える：#/home（#/search?q= も同じ画面） #/k/<id> #/write #/edit/<id> #/scan #/memo #/settings #/manage #/device
 
-import { api, ApiError, fetchDictionary, onUnauthorized, session, ssoSecret, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
+import { api, ApiError, fetchDictionary, onUnauthorized, session, ssoSecret, type BookmarkItem, type Device, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
@@ -22,6 +22,9 @@ async function boot(): Promise<void> {
   // 招待のQRコードは /app/#invite=<token> を開く
   const invite = /^#invite=(.+)$/.exec(location.hash);
   if (invite) return receiveInvite(decodeURIComponent(invite[1]!));
+  // メールアドレスの確認リンクが開かれたところ。#verify-email=<鍵>
+  const verify = /^#verify-email=(.+)$/.exec(location.hash);
+  if (verify) return confirmEmail(decodeURIComponent(verify[1]!));
   // 会社アカウントから戻ってきたところ。#sso-code=<引換の符丁>[&to=#/...]
   const sso = /^#sso-code=([^&]+)(?:&to=(.+))?$/.exec(location.hash);
   if (sso) return finishSso(decodeURIComponent(sso[1]!), sso[2] ? decodeURIComponent(sso[2]) : '#/home');
@@ -52,6 +55,7 @@ async function boot(): Promise<void> {
   await Promise.all([loadDictionary(), refreshBadges()]);
   window.addEventListener('hashchange', route);
   route();
+  if (bootNote) { toast(bootNote); bootNote = null; }
 }
 
 /** 401 を受けたときの戻り方。起動時の /me と同じく、トークンを捨てて招待画面へ */
@@ -134,6 +138,32 @@ async function finishSso(code: string, to: string): Promise<void> {
   }
 }
 
+/** 入り直した直後に1回だけ出す知らせ（メールアドレスを登録しました、など） */
+let bootNote: string | null = null;
+
+/**
+ * メールアドレスの確認リンクが開かれたところ。登録を申し込んだ本人のアカウントに、そのアドレスが入る。
+ * リンクを開いた端末がだれとして入っていても、**いまのログインは変えない**（確認するだけ）。
+ */
+async function confirmEmail(token: string): Promise<void> {
+  history.replaceState(null, '', session.token ? `${location.pathname}#/device` : location.pathname);
+  shell(null, h('section', { class: 'page center' }, h('p', {}, 'メールアドレスを確かめています…')));
+  let message: string;
+  let ok = false;
+  try {
+    const r = await api<{ email: string }>('POST', '/auth/email-verify', { token });
+    message = `メールアドレス（${r.email}）を登録しました。`;
+    ok = true;
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  if (session.token) {
+    bootNote = message;
+    return boot();
+  }
+  renderWelcome(ok ? undefined : message, ok ? `${message}この画面は閉じてかまいません。` : undefined);
+}
+
 /** 招待の受け取り中。コードの貼り付け・QR・リンクのどこから来ても、同時に1回だけ走らせる */
 let accepting = false;
 
@@ -154,7 +184,7 @@ async function acceptInvite(token: string): Promise<void> {
   }
 }
 
-function renderWelcome(error?: string): void {
+function renderWelcome(error?: string, info?: string): void {
   const input = h('textarea', { id: 'invite', rows: 3, placeholder: '招待のリンクかコードを貼り付け', autocomplete: 'off' });
   const submit = () => {
     const v = input.value.trim();
@@ -230,6 +260,7 @@ function renderWelcome(error?: string): void {
   shell(null, h('section', { class: 'page welcome' },
     h('h1', { class: 'brand' }, 'ツギガミ'),
     h('p', { class: 'lead' }, '店のやり方を、接客の合間にすぐ探せます。'),
+    info ? h('p', { class: 'note', role: 'status' }, info) : null,
     problem,
     passkeySupported() ? h('div', { class: 'welcome-signin' },
       signIn,
@@ -261,12 +292,87 @@ function renderFatal(e: unknown): void {
 // パスキーの管理は、店長だけでなく**全員**が使う。端末を替えたときに自分で
 // 入り直せるようにするのが目的なので、承認・管理（trusted 以上）には置かない。
 
+/** 端末がどうやって増えたか（一覧に添える言葉） */
+function deviceOrigin(d: Device): string {
+  switch (d.origin) {
+    case 'invite': return d.issuedBy ? `${d.issuedBy}さんの招待で登録` : '招待で登録';
+    case 'added': return d.issuedBy ? `${d.issuedBy}さんが追加` : '管理者が追加';
+    case 'self': return '自分で追加（別の端末でログイン）';
+    case 'email': return 'メールのログインリンクで追加';
+    case 'passkey': return 'パスキーで入った端末';
+    case 'sso': return '会社のアカウントで入った端末';
+    default: return '';
+  }
+}
+
 async function renderDevice(stale: () => boolean): Promise<void> {
   const section = h('section', { class: 'page' },
     h('h1', {}, 'この端末の設定'),
     h('p', { class: 'hint' }, `いまお使いの端末：${guessDeviceName()}`),
   );
   shell('settings', section);
+
+  // 自分のアカウントで入っている端末。増えた端末があれば、いちばん上で知らせる
+  const devicesBox = h('div');
+  section.append(devicesBox);
+  const drawDevices = async (): Promise<void> => {
+    let fresh: Device[];
+    let all: Device[];
+    let newEmail: string | null = null;
+    try {
+      [fresh, all] = await Promise.all([
+        api<Me>('GET', '/me').then((m) => {
+          // ほかの端末で確認のリンクを開いた直後でも、登録中のメールアドレスが古いままにならないよう取り直す
+          if (me) me.email = m.email;
+          newEmail = m.newEmail ?? null;
+          return m.newDevices ?? [];
+        }),
+        api<Device[]>('GET', '/me/devices'),
+      ]);
+    } catch (e) {
+      if (stale()) return;
+      clear(devicesBox);
+      devicesBox.append(h('h2', {}, 'ログイン中の端末'), h('p', { class: 'hint' }, e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    if (stale()) return;
+    clear(devicesBox);
+    const stop = (d: Device) => confirmAction('止める', 'secondary small',
+      `${d.deviceName ?? 'この端末'}を止めます。その端末からは使えなくなります。`,
+      async () => { await api('DELETE', `/sessions/${d.id}`); toast('止めました'); await drawDevices(); });
+    const dismiss = (): HTMLElement => action('心当たりがあるので、この知らせを消す', 'secondary', async () => {
+      await api('POST', '/me/devices/seen');
+      await refreshBadges();
+      await drawDevices();
+    });
+    if (fresh.length > 0) {
+      devicesBox.append(
+        h('h2', {}, '新しく増えた端末'),
+        h('p', { class: 'pending' }, 'このアカウントで使える端末が増えました。心当たりがなければ、止めてから店長か本部に知らせてください。'),
+        h('ul', { class: 'rows' }, ...fresh.map((d) => h('li', { class: 'row' },
+          h('span', {}, d.deviceName ?? '名前のない端末'),
+          h('span', { class: 'hint' }, [`${relativeDate(d.createdAt)}に追加`, deviceOrigin(d), d.revoked ? 'すでに止められています' : ''].filter(Boolean).join('・')),
+          d.revoked ? null : h('span', { class: 'row-actions' }, stop(d))))),
+      );
+    }
+    if (newEmail !== null) {
+      devicesBox.append(
+        h('h2', {}, '登録されたメールアドレス'),
+        h('p', { class: 'pending' }, `ログイン用のメールアドレスとして ${newEmail} が登録されました。このアドレスあてのリンクで、このアカウントに入れます。心当たりがなければ、下の「メールアドレス」で登録を外してください。`),
+      );
+    }
+    if (fresh.length > 0 || newEmail !== null) devicesBox.append(dismiss());
+    devicesBox.append(
+      h('h2', {}, 'ログイン中の端末'),
+      h('p', { class: 'hint' }, 'あなたのアカウントで、いま使える端末です。使っていない端末や心当たりのない端末は止められます。'),
+      h('ul', { class: 'rows' }, ...all.map((d) => h('li', { class: 'row' },
+        h('span', {}, d.deviceName ?? '名前のない端末', d.current ? h('span', { class: 'notice-badge' }, 'この端末') : null),
+        h('span', { class: 'hint' }, [deviceOrigin(d), `${relativeDate(d.createdAt)}に登録`, `最後に使った日 ${relativeDate(d.lastUsedAt)}`].filter(Boolean).join('・')),
+        d.current ? null : h('span', { class: 'row-actions' }, stop(d))))),
+    );
+  };
+  await drawDevices();
+  if (stale()) return;
 
   // 別の端末でログイン：どの端末でも出す（パスキーの引き継ぎがうまくいかない端末の逃げ道にもなる）。
   {
@@ -298,29 +404,42 @@ async function renderDevice(stale: () => boolean): Promise<void> {
 
   // メールアドレスの登録：入れなくなったとき「メールでログインリンク」を受け取れるようにする。
   {
-    const current = h('p', { class: 'hint' }, me!.email ? `登録中：${me!.email}` : 'まだ登録されていません。');
+    const current = h('p', { class: 'hint' });
     const emailInput = h('input', { id: 'my-email', type: 'email', autocomplete: 'username',
       placeholder: 'you@example.co.jp', inputmode: 'email', value: me!.email ?? '' });
     const emailOut = h('p', { 'aria-live': 'polite', hidden: true });
-    const saveEmail = action('メールアドレスを保存する', 'secondary', async () => {
+    const say = (text: string, cls: string): void => { emailOut.textContent = text; emailOut.className = cls; emailOut.hidden = false; };
+    const removeBox = h('span');
+    const drawCurrent = (): void => {
+      current.textContent = me!.email ? `登録中：${me!.email}` : 'まだ登録されていません。';
+      clear(removeBox);
+      if (me!.email) {
+        removeBox.append(confirmAction('登録を外す', 'secondary small', 'メールでの入り直しができなくなります。外しますか？', async () => {
+          await api('POST', '/me/email', { email: '' });
+          me!.email = null;
+          emailInput.value = '';
+          drawCurrent();
+          say('登録を外しました。', 'hint');
+        }));
+      }
+    };
+    drawCurrent();
+    // 打っただけでは登録しない。そのアドレスに確認のリンクを送り、開かれたら登録する
+    // （届かないアドレスや、他人のアドレスが入らないように）
+    const saveEmail = action('確認のメールを送る', 'secondary', async () => {
       emailOut.hidden = true;
       try {
-        const r = await api<{ email: string }>('POST', '/me/email', { email: emailInput.value });
-        me!.email = r.email;
-        current.textContent = `登録中：${r.email}`;
-        emailOut.textContent = '保存しました。';
-        emailOut.className = 'hint';
-        emailOut.hidden = false;
+        const r = await api<{ pending: string }>('POST', '/me/email', { email: emailInput.value });
+        say(`${r.pending} に確認のメールを送りました。メールのリンクを開くと登録されます（30分以内）。開くまでは、登録は変わりません。`, 'note');
       } catch (e) {
-        emailOut.textContent = e instanceof Error ? e.message : String(e);
-        emailOut.className = 'error';
-        emailOut.hidden = false;
+        say(e instanceof Error ? e.message : String(e), 'error');
       }
     });
     section.append(
       h('h2', {}, 'メールアドレス'),
       h('p', {}, '登録しておくと、パスキーもこの端末も使えなくなったときに、ログイン画面からメールでログインリンクを受け取って入り直せます。'),
       current,
+      removeBox,
       h('label', { for: 'my-email' }, 'メールアドレス'),
       emailInput,
       saveEmail,
@@ -334,6 +453,21 @@ async function renderDevice(stale: () => boolean): Promise<void> {
     h('p', {}, 'このページをホーム画面に追加しておくと、タブを閉じてもアイコンから開けます。'),
     h('p', { class: 'hint' }, 'iPhone（Safari）：共有ボタン → 「ホーム画面に追加」。Android（Chrome）：右上のメニュー → 「ホーム画面に追加」。'),
   );
+
+  // ログアウト：店の共用端末を次の人に渡すとき、機種変更の前など。この端末の登録だけを消す
+  const logoutSection = (): HTMLElement[] => [
+    h('h2', {}, 'ログアウト'),
+    h('p', {}, 'この端末からログアウトします。ほかの端末はそのまま使えます。'),
+    h('p', { class: 'hint' }, 'もう一度使うには、パスキー・登録したメールアドレスへのログインリンク・店長からの招待のどれかが要ります。'),
+    confirmAction('この端末からログアウトする', 'secondary', 'ログアウトしますか？', async () => {
+      await api('POST', '/auth/logout');
+      session.token = null;
+      me = null;
+      badges = null;
+      location.hash = '';
+      renderWelcome(undefined, 'ログアウトしました。');
+    }),
+  ];
 
   const list = h('div');
   const problem = h('p', { class: 'error', role: 'alert', hidden: true });
@@ -361,6 +495,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
 
   if (!passkeySupported()) {
     section.append(h('p', { class: 'note' }, 'この端末ではパスキーを使えません。入り直すときは、店長に招待をもう一度発行してもらってください。'));
+    section.append(...logoutSection());
     return;
   }
 
@@ -385,6 +520,7 @@ async function renderDevice(stale: () => boolean): Promise<void> {
     problem,
     list,
   );
+  section.append(...logoutSection());
   await refresh();
 }
 
@@ -678,6 +814,18 @@ async function renderHome(initial: string): Promise<void> {
   if (pending > 0) {
     alert.append(h('a', { href: '#/manage', class: 'alert-request' },
       `利用の申請が${pending}件あります（承認すると使えるようになります）`));
+  }
+  // 端末が増えたときは、本人に必ず知らせる。店長や本部は端末をなくした人のために鍵を作り直せるので、
+  // 身に覚えのない端末が増えていないかを、本人が自分で確かめられるようにする
+  const added = badges?.devices?.added ?? 0;
+  if (added > 0) {
+    alert.append(h('a', { href: '#/device', class: 'alert-request' },
+      `このアカウントに端末が${added}台増えました。心当たりを確かめてください`));
+  }
+  // メールアドレスの登録も同じ。登録したアドレスにはログイン用のリンクが届くので、入り方が1つ増えたのと同じ
+  if (badges?.devices?.emailChanged) {
+    alert.append(h('a', { href: '#/device', class: 'alert-request' },
+      'このアカウントにメールアドレスが登録されました。心当たりを確かめてください'));
   }
   alertFilled = alert.childNodes.length > 0;
   showHome(input.value.trim() === '');
