@@ -199,7 +199,8 @@ function inviteBox(invite, name) {
 
 async function renderList() {
   view.replaceChildren(h('p', { class: 'hint' }, '読み込んでいます…'));
-  const [{ tenants }, log] = await Promise.all([api('GET', '/tenants'), api('GET', '/log')]);
+  // 退避の様子は、読めなくても一覧は出す（古いサーバーには、この口が無い）
+  const [{ tenants }, log, backup] = await Promise.all([api('GET', '/tenants'), api('GET', '/log'), api('GET', '/backup').catch(() => null)]);
 
   const list = h('ul', { class: 'tenants' }, tenants.map((t) => h('li', {}, h('a', { href: `#/t/${t.id}` },
     h('span', { class: 't-name' }, t.name),
@@ -237,6 +238,7 @@ async function renderList() {
   view.replaceChildren(
     h('h1', {}, '会社'),
     me && !me.totp ? h('p', { class: 'notice' }, '2段階の確認がまだ設定されていません。いまはパスワードだけで入れます。', h('a', { href: '#/security' }, '「安全」で設定する')) : null,
+    backup && BACKUP_TROUBLE.includes(backup.state) ? h('p', { class: 'notice' }, '退避（バックアップ）が取れていません。', h('a', { href: '#/security' }, '「安全」で確かめる')) : null,
     tenants.length === 0 ? h('p', { class: 'hint' }, 'まだ会社がありません。下から作れます。') : list,
     h('h2', {}, '新しい会社を作る'), form,
     h('h2', {}, '操作の記録'),
@@ -453,9 +455,56 @@ function recoveryBox(codes) {
 
 const OUTCOME = { ok: '入れた', password: 'パスワード違い', code: '確認コード違い', locked: '受け付け停止中' };
 
+// --- 退避（バックアップ）-----------------------------------------------------
+
+// 取れていない状態（一覧の頭にも知らせを出す）
+const BACKUP_TROUBLE = ['waiting', 'failed', 'stale'];
+
+function size(bytes) {
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+}
+
+/** 退避の様子を、言葉で出す。取るのは別の仕組み（サーバーの backup サービス）で、ここは結果を見せるだけ */
+function backupBox(b) {
+  if (!b || b.state === 'off') {
+    return h('div', { class: 'panel' },
+      h('p', {}, 'このサーバーでは、退避の結果を読む設定になっていません。'),
+      h('p', { class: 'hint' }, '退避を取っているかどうかは、この画面からは分かりません。サーバーの設定（運用の手引きの 15 章）を確かめてください。'));
+  }
+  const last = b.lastSuccessAt ? `最後に取れたのは ${moment(b.lastSuccessAt)}。` : '取れた退避は、まだありません。';
+  const lines = [];
+  if (b.state === 'ok') {
+    lines.push(h('p', {}, h('span', { class: 'badge' }, '取れています'), ` ${last}`));
+    lines.push(h('p', {},
+      b.db ? `データベース ${size(b.db.bytes)}（表 ${b.db.tables}）` : '',
+      b.photos ? `・写真 ${b.photos.files} 枚（${size(b.photos.bytes)}）` : ''));
+  } else if (b.state === 'failed') {
+    lines.push(h('p', {}, h('span', { class: 'badge stopped' }, '取れていません'), ` 最後の退避（${b.lastRunAt ? moment(b.lastRunAt) : '時刻は分かりません'}）が失敗しました。`));
+    lines.push(h('p', { class: 'notice' }, b.error || '理由は分かりません。'));
+    lines.push(h('p', {}, last));
+  } else if (b.state === 'stale') {
+    lines.push(h('p', {}, h('span', { class: 'badge stopped' }, '止まっています'), ` 退避の結果が、${moment(b.lastRunAt)} から新しくなっていません。`));
+    lines.push(h('p', { class: 'notice' }, '毎晩取る仕組み（サーバーの backup サービス）が止まっているかもしれません。'));
+    lines.push(h('p', {}, last));
+  } else {
+    lines.push(h('p', {}, h('span', { class: 'badge stopped' }, 'まだ取れていません'), ' 退避の仕組みが、まだ1回も結果を書いていません。'));
+    lines.push(h('p', { class: 'notice' }, 'サーバーの backup サービスが動いているかを確かめてください。'));
+  }
+  const keep = [];
+  if (b.keepDays !== null) keep.push(`毎晩3時ごろ（日本時間）に取り、データベースの退避は ${b.keepDays} 日ぶん残します${b.kept !== null ? `（いま ${b.kept} 個）` : ''}。`);
+  if (b.photoGraceDays !== null && b.photos) keep.push(`消した写真は、${b.photoGraceDays} 日のあいだ写しの側に残ります。`);
+  if (b.freeMb !== null) keep.push(`置き場所の空きは ${b.freeMb >= 1024 ? `${(b.freeMb / 1024).toFixed(1)}GB` : `${b.freeMb}MB`}。`);
+  return h('div', { class: 'panel' },
+    lines,
+    keep.length > 0 ? h('p', { class: 'hint' }, keep.join('')) : null,
+    h('p', { class: 'hint' }, '退避は、このサーバーと同じ台の中に置いています。操作の誤りや、壊れた入れ替えからは戻せますが、台やディスクごと無くなったときは一緒に無くなります。外への持ち出しと戻し方は、運用の手引き（docs/deploy.md の 15 章）にあります。'),
+    BACKUP_TROUBLE.includes(b.state) ? h('p', { class: 'hint' }, '取れていない状態が続くと、運営者のアドレスにメールでも知らせます（直るまで、1週間に1通）。') : null);
+}
+
 async function renderSecurity() {
   view.replaceChildren(h('p', { class: 'hint' }, '読み込んでいます…'));
-  const [status, logins] = await Promise.all([api('GET', '/security'), api('GET', '/logins')]);
+  const [status, logins, backup] = await Promise.all([api('GET', '/security'), api('GET', '/logins'), api('GET', '/backup').catch(() => null)]);
   const totpBox = h('div', {});
   const password = () => h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const codeInput = () => h('input', { type: 'text', autocomplete: 'one-time-code', inputMode: 'numeric', maxLength: 24, required: true });
@@ -549,6 +598,7 @@ async function renderSecurity() {
   view.replaceChildren(
     h('h1', {}, '安全'),
     h('h2', {}, '2段階の確認'), totpBox,
+    h('h2', {}, '退避（バックアップ）'), backupBox(backup),
     h('h2', {}, 'ログインの記録'),
     h('p', { class: 'hint' }, 'この管理画面へのログインを、入れたものも入れなかったものも残しています（90日ぶん）。前に入ったことのないブラウザーから入ると、メールでも知らせます。心当たりのないものがあれば、ログインの画面の「パスワードの設定・再設定」からパスワードを決め直してください。'),
     logins.entries.length === 0 ? h('p', { class: 'hint' }, 'まだありません。') : loginList,

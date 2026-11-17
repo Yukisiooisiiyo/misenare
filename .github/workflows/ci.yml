@@ -256,8 +256,62 @@ jobs:
           echo
           echo "--- /api/me（ログインしていないので 401 のはず）---"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8787/api/me)" = "401"
+      # 退避（deploy/backup/backup.sh）が、本番と同じ compose の中で取れて、そこから戻せることを確かめる。
+      # 試していない退避は無いのと同じなので、台本を変えるたびに、取る → 壊す → 戻す → アプリが起動する、を通す
+      - name: Back up and restore inside the compose stack
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'DB_ADMIN_PASSWORD=ci-admin-pass' 'DB_APP_PASSWORD=ci-app-pass' 'MISENARE_HOST=localhost' \
+            'APP_URL=https://misenare.example.com' 'METRICS_TOKEN=ci-token' > .env
+          docker compose up -d db
+          docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts > /dev/null
+          docker compose run --rm api npx tsx apps/api/src/cli/seed-demo.ts > /dev/null
+          # 写真を1枚置く（退避は、できて1分たった写真だけを写すので、時刻を戻しておく）
+          docker compose run --rm --user root --entrypoint sh api -c \
+            'mkdir -p /var/misenare/photos/ci && echo photo > /var/misenare/photos/ci/a.webp && touch -d "5 minutes ago" /var/misenare/photos/ci/a.webp && chown -R node:node /var/misenare/photos'
+          count() { docker compose exec -T db psql -U postgres -d misenare -At -c "SELECT count(*) FROM $1"; }
+          before="$(count tenants) $(count users) $(count knowledge) $(count knowledge_versions)"
+          echo "取る前（会社・利用者・ナレッジ・版）: $before"
+          test "$(count knowledge)" -gt 0
+
+          echo "--- 取る（サービスを起こすと、退避が1つも無いので、その場で1回取る）"
+          docker compose up -d backup
+          for i in $(seq 1 30); do docker compose exec -T backup test -s /status/status.json && break; sleep 2; done
+          docker compose exec -T backup bash /opt/backup/backup.sh status | tee backup-status.txt
+          grep -q '^退避: 成功' backup-status.txt
+          docker compose exec -T backup test -f /backups/photos/ci/a.webp
+          docker compose exec -T backup bash /opt/backup/backup.sh verify --strict
+
+          echo "--- アプリからは結果だけが読めて、退避そのものは見えない"
+          docker compose run --rm api node -e "const s = JSON.parse(require('fs').readFileSync(process.env.BACKUP_STATUS_FILE, 'utf8')); if (s.ok !== true) process.exit(1); console.log('アプリから読めた:', s.finishedAt)"
+          docker compose run --rm api sh -c 'ls /backups 2>/dev/null && exit 1; ! touch /var/misenare/backup-status/x 2>/dev/null'
+
+          echo "--- 壊してから、戻す"
+          docker compose exec -T db psql -U postgres -d misenare -q -c 'TRUNCATE tenants CASCADE'
+          test "$(count knowledge)" = 0
+          file=$(docker compose exec -T backup bash /opt/backup/backup.sh list | tail -1 | cut -f1)
+          docker compose exec -T -e CONFIRM=misenare backup bash /opt/backup/backup.sh restore "$file"
+          after="$(count tenants) $(count users) $(count knowledge) $(count knowledge_versions)"
+          echo "戻した後（会社・利用者・ナレッジ・版）: $after"
+          test "$before" = "$after"
+
+          echo "--- 戻したデータベースで、アプリが起動する（起動のときに、行レベルセキュリティが効いているかを自分で確かめる）"
+          docker compose up -d api
+          ready() { docker compose exec -T api node -e "fetch('http://127.0.0.1:8787/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; }
+          for i in $(seq 1 30); do ready && break; sleep 2; done
+          ready
+          docker compose logs --tail 5 api
+
+          echo "--- 写真を消してから、写しから戻す"
+          docker compose exec -T --user root api rm /var/misenare/photos/ci/a.webp
+          docker compose run --rm --entrypoint bash -v misenare_photos:/restore backup /opt/backup/backup.sh restore-photos /restore
+          test "$(docker compose exec -T api cat /var/misenare/photos/ci/a.webp)" = photo
+          # 戻した写真は、アプリの利用者（node）の持ち物のまま
+          test "$(docker compose exec -T api stat -c %U /var/misenare/photos/ci/a.webp)" = node
       - name: Report failures as annotations
         if: failure()
         run: |
+          (cd deploy && docker compose logs --tail 40 backup db api 2>/dev/null) || true
           echo "::error title=docker failed::$( { tail -20 migrate.log 2>/dev/null; docker logs misenare 2>&1 | tail -20; } | sed 's/%/%25/g' | tr '\n' '~' | sed 's/~/%0A/g')"
           [ -f import-isolation.tap ] && node .github/scripts/annotate-tap.mjs import-isolation.tap || true

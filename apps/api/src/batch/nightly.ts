@@ -10,6 +10,7 @@
 //   9. 持ち越しの期間を過ぎた引き継ぎを閉じる
 //  10. 使用済み・期限切れから30日たった招待を捨てる
 //  11. 運営者のログインの記録（90日より前）と、使われなくなったブラウザーの印を捨てる（会社に属さないので、8 と同じく最初に1回）
+//  12. 退避（バックアップ）が取れていなければ、運営者にメールで知らせる（取るのは別のコンテナ。ここは結果を見るだけ）
 //
 // 実行：DATABASE_URL=... npx tsx apps/api/src/batch/nightly.ts （毎晩1回、cron や EventBridge から）
 
@@ -28,6 +29,7 @@ import { sweepSsoStates } from '../domain/sso.ts';
 import { sweepRateLimits } from '../http/rateLimit.ts';
 import { sweepContactInquiries } from '../domain/contact.ts';
 import { sweepOperatorRecords } from '../domain/operator.ts';
+import { backupAlert, readBackupStatus } from '../domain/backupStatus.ts';
 import type { Storage } from '../storage/storage.ts';
 
 export interface BatchOptions {
@@ -45,6 +47,8 @@ export interface BatchOptions {
   mailer?: Mailer;
   /** 知らせの文面に入れる、画面の宛先 */
   appUrl?: string;
+  /** 設定を読む先（試験で差し替える。既定は process.env） */
+  env?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -220,6 +224,19 @@ async function releaseLock(database: Database): Promise<void> {
   await database.raw(`DELETE FROM batch_locks WHERE name = 'nightly'`).catch((err) => console.error('夜間バッチの鍵を返せませんでした', err));
 }
 
+/**
+ * 退避（バックアップ）が取れていなければ、運営者に知らせる。
+ * 送れなかったときは「送った」覚えを消して、次の晩にもう一度送る。
+ */
+async function alertBackup(database: Database, options: BatchOptions): Promise<void> {
+  const env = options.env ?? process.env;
+  const raw = (sql: string, params?: readonly unknown[]) => database.raw(sql, params);
+  const mail = await backupAlert(raw, await readBackupStatus(env), options.appUrl ?? env.APP_URL ?? 'http://localhost:8787', env);
+  if (!mail) return;
+  const sent = await (options.mailer ?? mailerFromEnv()).send(mail).catch(() => false);
+  if (!sent) await raw(`DELETE FROM operator_alerts WHERE kind = 'backup'`);
+}
+
 export async function runNightly(database: Database, tokenizer: Tokenizer, options: BatchOptions = {}): Promise<TenantReport[]> {
   if (!(await acquireLock(database))) {
     console.error('夜間バッチは別の1本が動いています。今回はやめます');
@@ -239,6 +256,7 @@ async function runNightlyLocked(database: Database, tokenizer: Tokenizer, option
   await sweepOperatorRecords((sql, params) => database.raw(sql, params)).catch((err) => console.error('運営者のログインの記録の片付けに失敗', err));
   await sweepChallenges((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの合言葉の片付けに失敗', err));
   await sweepSsoStates((sql, params) => database.raw(sql, params)).catch((err) => console.error('期限切れの会社アカウントの覚えの片付けに失敗', err));
+  await alertBackup(database, options).catch((err) => console.error('退避の様子を確かめられませんでした', err));
   const tenants = (await database.raw(`SELECT id FROM tenants ORDER BY created_at`)) as Array<{ id: string }>;
   const reports: TenantReport[] = [];
   for (const { id: tenantId } of tenants) {
