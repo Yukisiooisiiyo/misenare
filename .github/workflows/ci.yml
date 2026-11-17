@@ -42,7 +42,8 @@ jobs:
         run: |
           psql -h localhost -U postgres -c "CREATE ROLE misenare LOGIN PASSWORD 'misenare' NOSUPERUSER NOBYPASSRLS"
           psql -h localhost -U postgres -c "CREATE DATABASE misenare_test OWNER misenare"
-      - run: npm install
+      # package-lock.json に書いてある版だけを入れる（本番のイメージと同じ）
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run build:web
       - name: Test
@@ -90,7 +91,8 @@ jobs:
         run: |
           psql -h localhost -U postgres -c "CREATE ROLE misenare LOGIN PASSWORD 'misenare' NOSUPERUSER NOBYPASSRLS"
           psql -h localhost -U postgres -c "CREATE DATABASE misenare_e2e OWNER misenare"
-      - run: npm install
+      # package-lock.json に書いてある版だけを入れる（本番のイメージと同じ）
+      - run: npm ci
       - run: npm run build:web
       - run: npm run db:migrate
       - name: Seed demo data
@@ -144,7 +146,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      # package-lock.json に書いてある版だけを入れる（本番のイメージと同じ）
+      - run: npm ci
       - name: Install independent QR decoders
         run: npm install --no-save jsqr@1.4.0 @zxing/library@0.21.3
       - name: Verify QR codes can be read back
@@ -164,7 +167,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install
+      # package-lock.json に書いてある版だけを入れる（本番のイメージと同じ）
+      - run: npm ci
       - name: Install kuromoji
         run: npm install --no-save kuromoji@0.1.2
       - name: Verify morphological tokenizer
@@ -222,6 +226,17 @@ jobs:
         run: |
           set -o pipefail
           docker run --rm misenare:ci npx tsx --test --test-reporter=tap apps/api/test/importIsolation.test.ts 2>&1 | tee import-isolation.tap
+      # イメージに入った依存が、package-lock.json に書いてある版と同じかを確かめる
+      # （Dockerfile が npm install に戻ったり、lockfile を写し忘れたりすると、ここで分かる）
+      - name: The image holds exactly the locked versions
+        run: |
+          set -euo pipefail
+          for name in tsx pg esbuild; do
+            locked=$(node -e "console.log(require('./package-lock.json').packages['node_modules/$name'].version)")
+            inside=$(docker run --rm misenare:ci node -e "console.log(JSON.parse(require('fs').readFileSync('/app/node_modules/$name/package.json', 'utf8')).version)")
+            echo "$name: lockfile $locked / イメージ $inside"
+            test "$locked" = "$inside"
+          done
       # イメージは NODE_ENV=production で動くので、本番と同じ形の設定を渡す。
       # 渡さないと起動時の点検で止まる（それが点検の役目）。
       - name: Refuse to start when the configuration is incomplete
@@ -256,6 +271,36 @@ jobs:
           echo
           echo "--- /api/me（ログインしていないので 401 のはず）---"
           test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8787/api/me)" = "401"
+      # Caddyfile は、書き間違えると入口（https）ごと落ちる。入れ替えの前に、本物の Caddy に読ませて確かめる。
+      # 続けて、上で起こしたアプリの前に立てて、守りの見出しが1つずつ付いていることを見る
+      - name: Check the Caddyfile and the headers it adds
+        run: |
+          set -euo pipefail
+          docker run --rm -e MISENARE_HOST=app.example.com -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          # http の 8080 で立てる（証明書を取りに行かせない）。アプリは同じ台の 8787 にいる
+          docker run -d --name caddy-ci --network host --add-host api:127.0.0.1 -e MISENARE_HOST=http://localhost:8080 \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2
+          for i in $(seq 1 20); do curl -fsS -o /dev/null http://localhost:8080/health && break; sleep 1; done
+          count() { grep -ci "^$1:" "$2" || true; }
+          value() { grep -i "^$1:" "$2" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
+          for path in /health /app/ /admin/; do
+            curl -sS -D headers.txt -o /dev/null "http://localhost:8080$path"
+            echo "--- $path"; grep -iE '^(HTTP|x-frame-options|referrer-policy|strict-transport-security):' headers.txt
+            head -1 headers.txt | grep -q ' 200'
+            # 同じ見出しが2つ付くと、どちらが効くかがブラウザーしだいになる。1つずつにする
+            test "$(count x-frame-options headers.txt)" = 1
+            test "$(count referrer-policy headers.txt)" = 1
+            test "$(count strict-transport-security headers.txt)" = 1
+            test "$(value x-frame-options headers.txt)" = DENY
+            test "$(value strict-transport-security headers.txt)" = max-age=31536000
+          done
+          # アプリが自分で決めているもの（画面は no-referrer）はそのまま通し、決めていないもの（API）には Caddy が付ける
+          curl -sS -D headers.txt -o /dev/null http://localhost:8080/app/
+          test "$(value referrer-policy headers.txt)" = no-referrer
+          curl -sS -D headers.txt -o /dev/null http://localhost:8080/health
+          test "$(value referrer-policy headers.txt)" = strict-origin-when-cross-origin
+          docker rm -f caddy-ci > /dev/null
       # 退避（deploy/backup/backup.sh）が、本番と同じ compose の中で取れて、そこから戻せることを確かめる。
       # 試していない退避は無いのと同じなので、台本を変えるたびに、取る → 壊す → 戻す → アプリが起動する、を通す
       - name: Back up and restore inside the compose stack
@@ -313,5 +358,6 @@ jobs:
         if: failure()
         run: |
           (cd deploy && docker compose logs --tail 40 backup db api 2>/dev/null) || true
+          docker logs caddy-ci 2>&1 | tail -20 || true
           echo "::error title=docker failed::$( { tail -20 migrate.log 2>/dev/null; docker logs misenare 2>&1 | tail -20; } | sed 's/%/%25/g' | tr '\n' '~' | sed 's/~/%0A/g')"
           [ -f import-isolation.tap ] && node .github/scripts/annotate-tap.mjs import-isolation.tap || true

@@ -4,13 +4,15 @@
 FROM node:22-slim AS build
 WORKDIR /app
 
-# 依存だけ先に入れて、コードだけ変えたときは入れ直さずに済むようにする
-COPY package.json package-lock.json* ./
+# 依存だけ先に入れて、コードだけ変えたときは入れ直さずに済むようにする。
+# 入れるのは package-lock.json に書いてある版だけ（npm ci）。組み立てるたびに「そのときの最新」を引かないようにする。
+# 依存を変えたときは、npm install で package-lock.json も一緒に直してコミットする（合っていないと、ここで止まる）
+COPY package.json package-lock.json ./
 COPY packages/search-core/package.json packages/search-core/
 COPY packages/qr/package.json packages/qr/
 COPY apps/api/package.json apps/api/
 COPY apps/web/package.json apps/web/
-RUN npm install --no-audit --no-fund
+RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build:web
