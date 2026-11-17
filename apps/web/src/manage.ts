@@ -374,58 +374,89 @@ interface StaffRow {
   same_name: boolean;
 }
 
-export function staffPanel(storeId: string, meId: string): HTMLElement {
+/** 役割の言い方（一覧と、1人の画面で同じ言葉にする） */
+export function roleLabel(u: { admin_scope: string; trust_level: string }): string {
+  return u.admin_scope === 'tenant' ? '本部' : u.admin_scope === 'store' ? '店長' : u.trust_level === 'trusted' ? 'trusted' : 'visitor';
+}
+
+/**
+ * スタッフの一覧。その場でよく使う操作（trusted の切り替え・無効化）だけを行に置き、
+ * 役割の変更・名前・端末・メールアドレスは、1人ずつの画面（#/staff/<id>）に分ける。
+ *
+ * 操作を出すのは、見ている人がその相手を管理できるときだけ：
+ *   本部 … 自分以外の全員 ／ 店長 … 自店舗の一般のスタッフ（店長・本部は本部が管理する）
+ */
+export function staffPanel(storeId: string, viewer: { id: string; adminScope: 'none' | 'store' | 'tenant' }): HTMLElement {
   return panel('スタッフ', async (body) => {
     const users = await api<StaffRow[]>('GET', `/stores/${storeId}/users`);
-    const list = h('ul', { class: 'rows' });
+    const canManage = (u: StaffRow): boolean => u.id !== viewer.id && (viewer.adminScope === 'tenant' || u.admin_scope === 'none');
     const draw = (u: StaffRow, row: HTMLElement) => {
       clear(row);
-      const role = u.admin_scope === 'tenant' ? '本部' : u.admin_scope === 'store' ? '店長' : u.trust_level === 'trusted' ? 'trusted' : 'visitor';
       // 同名の人がいるときは、名前だけでは見分けられないことを先に伝える。
       // 会社のアカウントで入った人の名前は相手の IdP が名乗ったものなので、
       // 既存の人に似せた名前で入ってくる余地がある。
       const marks: Node[] = [];
-      if (u.same_name) marks.push(h('span', { class: 'warn-badge', title: 'この店に同じ名前の人がいます' }, '同名あり'));
+      if (u.same_name) marks.push(h('span', { class: 'warn-badge', title: 'この一覧に同じ名前の人がいます' }, '同名あり'));
       if (u.via_sso) marks.push(h('span', { class: 'pending' }, '会社アカウント'));
+      const detail = h('a', { href: `#/staff/${u.id}`, class: 'secondary small' }, 'くわしく');
       row.append(
         h('span', {},
           h('strong', {}, u.name),
           u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null,
           ...marks,
           u.email ? h('span', { class: 'staff-email' }, u.email) : null),
-        h('span', { class: 'hint' }, `${role}・端末${u.devices}台・${u.last_used_at ? `${relativeDate(u.last_used_at)}に利用` : '未利用'}`),
-        u.id === meId || u.admin_scope !== 'none' ? h('span', {}) : h('span', { class: 'row-actions' },
-          u.status === 'active'
-            ? action(u.trust_level === 'trusted' ? 'visitor に戻す' : 'trusted にする', 'secondary small', async () => {
-                const next = u.trust_level === 'trusted' ? 'visitor' : 'trusted';
-                await api('PATCH', `/users/${u.id}`, { trustLevel: next });
-                u.trust_level = next;
-                toast(next === 'trusted' ? 'trusted にしました' : 'visitor に戻しました');
-                draw(u, row);
-              })
-            : null,
-          u.status === 'active'
-            ? confirmAction('無効にする', 'secondary small', `${u.name}さんの端末がすぐ使えなくなります。`, async () => {
-                await api('PATCH', `/users/${u.id}`, { status: 'disabled' });
-                u.status = 'disabled';
-                u.devices = 0;
-                toast('無効にしました');
-                draw(u, row);
-              })
-            : action('有効に戻す', 'secondary small', async () => {
-                await api('PATCH', `/users/${u.id}`, { status: 'active' });
-                u.status = 'active';
-                toast('有効に戻しました');
-                draw(u, row);
-              })),
+        h('span', { class: 'hint' }, `${roleLabel(u)}・端末${u.devices}台・${u.last_used_at ? `${relativeDate(u.last_used_at)}に利用` : '未利用'}`),
+        // 本部の人は、自分の行からも名前を直しに行ける
+        !canManage(u) ? (u.id === viewer.id && viewer.adminScope === 'tenant' ? h('span', { class: 'row-actions' }, detail) : h('span', {}))
+          : h('span', { class: 'row-actions' },
+            u.status === 'active' && u.admin_scope === 'none'
+              ? action(u.trust_level === 'trusted' ? 'visitor に戻す' : 'trusted にする', 'secondary small', async () => {
+                  const next = u.trust_level === 'trusted' ? 'visitor' : 'trusted';
+                  await api('PATCH', `/users/${u.id}`, { trustLevel: next });
+                  u.trust_level = next;
+                  toast(next === 'trusted' ? 'trusted にしました' : 'visitor に戻しました');
+                  draw(u, row);
+                })
+              : null,
+            u.status === 'active'
+              ? confirmAction('無効にする', 'secondary small', `${u.name}さんの端末がすぐ使えなくなります。`, async () => {
+                  await api('PATCH', `/users/${u.id}`, { status: 'disabled' });
+                  u.status = 'disabled';
+                  u.devices = 0;
+                  toast('無効にしました');
+                  draw(u, row);
+                })
+              : action('有効に戻す', 'secondary small', async () => {
+                  await api('PATCH', `/users/${u.id}`, { status: 'active' });
+                  u.status = 'active';
+                  toast('有効に戻しました');
+                  draw(u, row);
+                }),
+            detail),
       );
     };
-    for (const u of users) {
-      const row = h('li', { class: 'row' });
-      draw(u, row);
-      list.append(row);
+    const listOf = (rows: StaffRow[]): HTMLElement => {
+      const list = h('ul', { class: 'rows' });
+      for (const u of rows) {
+        const row = h('li', { class: 'row' });
+        draw(u, row);
+        list.append(row);
+      }
+      return list;
+    };
+    body.append(users.length === 0 ? h('p', { class: 'hint' }, 'この店舗には、まだいません。') : listOf(users));
+    // 本部の人は店舗に所属しないことが多く、店舗ごとの一覧には出ない。本部にだけ、別に並べて見せる
+    // （出口がここに無いと、辞めた本部の人を止められない）
+    if (viewer.adminScope === 'tenant') {
+      const shown = new Set(users.map((u) => u.id));
+      const hq = (await api<StaffRow[]>('GET', '/headquarters/users')).filter((u) => !shown.has(u.id));
+      if (hq.length > 0) {
+        body.append(
+          h('h3', {}, '本部の人'),
+          h('p', { class: 'hint' }, 'この店舗に所属していない、会社全体の管理者です。'),
+          listOf(hq));
+      }
     }
-    body.append(users.length === 0 ? h('p', { class: 'hint' }, 'まだいません。') : list);
   });
 }
 

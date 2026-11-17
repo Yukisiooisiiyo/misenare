@@ -243,6 +243,80 @@ describe('招待と端末セッション', () => {
     });
   });
 
+  describe('スタッフの管理', () => {
+    it('本部の人の一覧には、店舗に所属しない本部の人も出る（本部だけが見られる）', async () => {
+      const list = await call(hqToken, 'GET', '/headquarters/users');
+      assert.equal(list.status, 200);
+      assert.ok(list.body.some((u: { id: string }) => u.id === hq.userId), '店舗に所属しない本部の人が出る');
+      assert.ok(list.body.every((u: { admin_scope: string }) => u.admin_scope === 'tenant'));
+      assert.equal((await call(managerToken, 'GET', '/headquarters/users')).status, 403);
+      assert.equal((await call(newbieToken, 'GET', '/headquarters/users')).status, 403);
+      // 店舗ごとの一覧には出ない（だから別の一覧が要る）
+      const store = await call(hqToken, 'GET', `/stores/${STORE_A}/users`);
+      assert.ok(!store.body.some((u: { id: string }) => u.id === hq.userId));
+    });
+
+    it('スタッフ1人の中身（所属と端末）は、その人を管理できる人だけが見られる', async () => {
+      const detail = await call(managerToken, 'GET', `/users/${newbieId}`);
+      assert.equal(detail.status, 200);
+      assert.equal(detail.body.name, '新人バイトA');
+      assert.deepEqual(detail.body.stores.map((x: { id: string }) => x.id), [STORE_A]);
+      assert.equal(detail.body.deviceList.length, 1);
+      assert.equal(detail.body.deviceList[0].deviceName, 'iPhone');
+      assert.equal((await call(managerToken, 'GET', `/users/${hq.userId}`)).status, 403, '店長は本部の人の中身を見られない');
+      assert.equal((await call(newbieToken, 'GET', `/users/${newbieId}`)).status, 403, '一般スタッフは管理の画面を見られない');
+      assert.equal((await call(hqToken, 'GET', `/users/${newbieId}`)).status, 200);
+      assert.equal((await call(hqToken, 'GET', '/users/40000000-0000-0000-0000-0000000000ee')).status, 404);
+    });
+
+    it('名前を直せるのは、その人を管理できる人。本部は自分の名前も直せる', async () => {
+      const renamed = await call(managerToken, 'PATCH', `/users/${newbieId}`, { name: ' 新人バイトA（改） ' });
+      assert.equal(renamed.status, 200);
+      assert.equal(renamed.body.name, '新人バイトA（改）');
+      assert.equal((await call(newbieToken, 'GET', '/me')).body.name, '新人バイトA（改）');
+      await call(managerToken, 'PATCH', `/users/${newbieId}`, { name: '新人バイトA' });
+      assert.equal((await call(managerToken, 'PATCH', `/users/${newbieId}`, { name: '' })).status, 400);
+      assert.equal((await call(managerToken, 'PATCH', `/users/${newbieId}`, { name: 'あ'.repeat(41) })).status, 400);
+      assert.equal((await call(managerToken, 'PATCH', `/users/${newbieId}`, { name: 'https://evil.example/' })).status, 400);
+      assert.equal((await call(newbieToken, 'PATCH', `/users/${newbieId}`, { name: '店長' })).status, 403, '自分では直せない');
+      const mine = await call(managerToken, 'GET', '/me');
+      assert.equal((await call(managerToken, 'PATCH', `/users/${mine.body.id}`, { name: '本部' })).status, 403, '店長は自分の名前を直せない');
+      assert.equal((await call(hqToken, 'PATCH', `/users/${hq.userId}`, { name: '本部' })).status, 200, '本部は自分の名前を直せる');
+      assert.equal((await call(hqToken, 'PATCH', `/users/${hq.userId}`, { name: '本部', status: 'disabled' })).status, 403, '名前のついでに自分を止めることはできない');
+    });
+
+    it('本部は、スタッフを店長にしたり外したりできる。店舗に所属しない人は、店長にも一般にもできない', async () => {
+      const made = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: '店長になる人' });
+      const person = await call(null, 'POST', '/auth/accept', { token: made.body.token, deviceName: 'スマホ' });
+      const id = person.body.userId as string;
+      assert.equal((await call(person.body.sessionToken, 'GET', '/me')).body.trustLevel, 'visitor');
+
+      const up = await call(hqToken, 'PATCH', `/users/${id}`, { adminScope: 'store' });
+      assert.equal(up.status, 200);
+      assert.equal(up.body.admin_scope, 'store');
+      assert.equal(up.body.trust_level, 'trusted', '店長にしたら trusted になる');
+      const asManager = await call(person.body.sessionToken, 'GET', '/me');
+      assert.equal(asManager.body.adminScope, 'store', 'その場で効く');
+      assert.equal((await call(person.body.sessionToken, 'GET', `/stores/${STORE_A}/users`)).status, 200, '店長としてスタッフ一覧を見られる');
+
+      const down = await call(hqToken, 'PATCH', `/users/${id}`, { adminScope: 'none' });
+      assert.equal(down.body.admin_scope, 'none');
+      assert.equal(down.body.trust_level, 'trusted', '外しても visitor には戻さない');
+      assert.equal((await call(person.body.sessionToken, 'GET', `/stores/${STORE_A}/users`)).status, 403);
+
+      // 店舗に所属しない本部の人（運営者の招待で入った人と同じ形）
+      const hqInvite = await call(hqToken, 'POST', '/invitations', { storeId: null, name: 'もう一人の本部', adminScope: 'tenant' });
+      const hq2 = await call(null, 'POST', '/auth/accept', { token: hqInvite.body.token, deviceName: 'PC' });
+      const hq2Id = hq2.body.userId as string;
+      assert.equal((await call(hqToken, 'PATCH', `/users/${hq2Id}`, { adminScope: 'none' })).status, 409, '所属が無いまま本部から外すと、入れても何もできなくなる');
+      assert.equal((await call(hqToken, 'PATCH', `/users/${hq2Id}`, { adminScope: 'store' })).status, 409);
+      assert.equal((await call(hq2.body.sessionToken, 'GET', '/me')).body.adminScope, 'tenant', '変わっていない');
+      // 止めることはできる（辞めた本部の人を、画面から止められるようにするのが目的）
+      assert.equal((await call(hqToken, 'PATCH', `/users/${hq2Id}`, { status: 'disabled' })).status, 200);
+      assert.equal((await call(hq2.body.sessionToken, 'GET', '/me')).status, 401);
+    });
+  });
+
   it('店長は、同じ店の別の店長を止められない。端末も切れない（できるのは本部だけ）', async () => {
     const invited = await call(hqToken, 'POST', '/invitations', { storeId: STORE_A, name: 'もう一人の店長', trustLevel: 'trusted', adminScope: 'store' });
     const other = await call(null, 'POST', '/auth/accept', { token: invited.body.token, deviceName: '店長2のスマホ' });

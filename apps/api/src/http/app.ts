@@ -96,6 +96,8 @@ import {
   confirmEmailChange,
   listMyDevices,
   markDevicesSeen,
+  getUserForAdmin,
+  listHeadquarters,
   requestEmailChange,
   unseenDevices,
   unseenEmailChange,
@@ -288,6 +290,11 @@ function invitationBody(v: unknown): InvitationInput {
 function userPatchBody(v: unknown): UserPatch {
   const b = (v ?? {}) as Record<string, unknown>;
   const patch: UserPatch = {};
+  if (b.name !== undefined) {
+    if (typeof b.name !== 'string') throw new HttpError(400, 'name は文字列にしてください');
+    checkLength('name', b.name, 40);
+    patch.name = b.name;
+  }
   if (b.trustLevel !== undefined) {
     if (b.trustLevel !== 'visitor' && b.trustLevel !== 'trusted') throw new HttpError(400, 'trustLevel は visitor か trusted です');
     patch.trustLevel = b.trustLevel;
@@ -789,6 +796,10 @@ function routes(): Router<Ctx> {
     return json(await inviteByEmail(c.db, c.actor, mailer, appUrl, { ...body, email }), 201);
   });
   r.get('/stores/:storeId/users', async (c, _req, p) => json(await listStoreUsers(c.db, c.actor, p.storeId!)));
+  // 本部の人の一覧（店舗に所属しない人も出す。本部だけが見られる）
+  r.get('/headquarters/users', async (c) => json(await listHeadquarters(c.db, c.actor)));
+  // スタッフ1人の詳しい中身（所属の店舗と、いま入っている端末）
+  r.get('/users/:userId', async (c, _req, p) => json(await getUserForAdmin(c.db, c.actor, p.userId!)));
   r.patch('/users/:userId', async (c, req, p) => json(await updateUser(c.db, c.actor, p.userId!, userPatchBody(await readJson(req)))));
   r.delete('/sessions/:sessionId', async (c, _req, p) => {
     await revokeSession(c.db, c.actor, p.sessionId!);
