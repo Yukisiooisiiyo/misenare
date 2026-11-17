@@ -74,6 +74,19 @@ interface FontDecoder {
 /** 1ページの内容ストリームを繋いだ大きさの上限。文字だけのページがこれを超えることはない */
 const MAX_PAGE_CONTENT_BYTES = 64 * 1024 * 1024;
 
+/**
+ * 1ページから拾う文字のまとまり（1回の「字を出す」命令）の数。
+ * 字でびっしりのページでも、1字ずつ出す作りで2万ほど。これを大きく超えるページは、途中までを読んで知らせる
+ * （小さく縮む命令を何十万と並べて、記憶を使い切らせる形を止める）。
+ */
+export const MAX_PAGE_RUNS = 100_000;
+
+/**
+ * 資料全体から拾う字の数。下書きに使うのは 200件 × 4000字までなので、その数倍あれば足りる。
+ * 超えたら、そこまでのページを読んで知らせる。
+ */
+export const MAX_TEXT_CHARS = 3_000_000;
+
 /** CMap が持てる符号の数。2バイト符号の全域（65536）の数倍あれば足りる。範囲を何万行も並べられても、ここで止まる */
 const MAX_CMAP_ENTRIES = 65536 * 4;
 
@@ -141,18 +154,19 @@ function twoByteDecoder(toUnicode: Map<number, string> | null): FontDecoder {
   return {
     readable: true,
     decode(bytes) {
-      let out = '';
+      // 字は並べてから一度に繋ぐ。1字ずつ足していくと、繋ぎ目が字の数だけ残り、1字に数十バイトを使う
+      const out: string[] = [];
       for (let i = 0; i + 1 < bytes.length; i += 2) {
         const code = (bytes[i]! << 8) | bytes[i + 1]!;
         if (toUnicode) {
           const mapped = toUnicode.get(code);
-          out += mapped === undefined ? UNREADABLE : mapped;
+          out.push(mapped === undefined ? UNREADABLE : mapped);
         } else {
           // UCS-2 の並び（UniJIS-UCS2-H など）はそのまま字になる
-          out += String.fromCharCode(code);
+          out.push(String.fromCharCode(code));
         }
       }
-      return out;
+      return out.join('');
     },
   };
 }
@@ -161,16 +175,17 @@ function singleByteDecoder(table: Map<number, string>, toUnicode: Map<number, st
   return {
     readable: true,
     decode(bytes) {
-      let out = '';
+      // 字は並べてから一度に繋ぐ（上の2バイトの読み方と同じ理由）
+      const out: string[] = [];
       for (const b of bytes) {
         const mapped = toUnicode?.get(b) ?? table.get(b);
-        if (mapped !== undefined) { out += mapped; continue; }
-        out += b >= 0x20 && b < 0x7f ? String.fromCharCode(b)
+        if (mapped !== undefined) { out.push(mapped); continue; }
+        out.push(b >= 0x20 && b < 0x7f ? String.fromCharCode(b)
           : b in WIN_ANSI_HIGH ? String.fromCodePoint(WIN_ANSI_HIGH[b]!)
           : b >= 0xa0 ? String.fromCodePoint(b)
-          : UNREADABLE;
+          : UNREADABLE);
       }
-      return out;
+      return out.join('');
     },
   };
 }
@@ -334,6 +349,10 @@ function readPage(doc: PdfDocument, page: PdfDict, warn: (message: string) => vo
   };
 
   while (!lexer.atEnd()) {
+    if (runs.length >= MAX_PAGE_RUNS) {
+      warn(`${pageNumber}ページ目は文字の数が多すぎるので、途中までを読みました`);
+      break;
+    }
     const before = lexer.pos;
     const value = lexer.readValue();
     if (value !== undefined) { stack.push(value); continue; }
@@ -438,9 +457,12 @@ function readPage(doc: PdfDocument, page: PdfDict, warn: (message: string) => vo
 }
 
 function toLine(runs: Run[]): PdfLine {
+  // いちばん大きい字。Math.max(...) に展開すると、まとまりが何十万個もある行で呼び出しの積み上げが尽きる
+  let size = -Infinity;
+  for (const r of runs) if (r.size > size) size = r.size;
   return {
     text: runs.map((r) => r.text).join('').replace(/\s+/g, ' ').trim(),
-    size: Math.max(...runs.map((r) => r.size)),
+    size,
   };
 }
 
@@ -471,9 +493,16 @@ export function extractPdfText(doc: PdfDocument): PdfText {
   const seen = new Set<string>();
   const warn = (message: string) => { if (!seen.has(message)) { seen.add(message); warnings.push(message); } };
 
-  listPages(doc).forEach((page, i) => {
-    pages.push({ number: i + 1, lines: readPage(doc, page, warn, i + 1) });
-  });
+  let chars = 0;
+  for (const [i, page] of listPages(doc).entries()) {
+    const lines = readPage(doc, page, warn, i + 1);
+    pages.push({ number: i + 1, lines });
+    for (const line of lines) chars += line.text.length;
+    if (chars > MAX_TEXT_CHARS) {
+      warn(`資料が長いので、${i + 1}ページ目までを読みました`);
+      break;
+    }
+  }
 
   let total = 0;
   let unreadable = 0;

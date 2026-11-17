@@ -47,7 +47,8 @@ import {
   restoreHandover,
   setHandoverState,
 } from '../domain/handovers.ts';
-import { discardImport, importManual, listImports, MAX_IMPORT_BYTES } from '../domain/imports.ts';
+import { assertCanImport, discardImport, listImports, MAX_IMPORT_BYTES, readManual, saveImport } from '../domain/imports.ts';
+import type { ParseResult } from '../import/parse.ts';
 import {
   deletePasskey,
   finishRegistration,
@@ -130,7 +131,7 @@ import { addMemo, deleteMemo, listMemos, updateMemo } from '../domain/memos.ts';
 import { handleOperator } from './operator.ts';
 import { clientKey, DatabaseRateLimiter, MemoryRateLimiter, RULES, type Limiter, type RateRule } from './rateLimit.ts';
 import { Alerts, Logger, Metrics, requestId } from './observe.ts';
-import { HttpError, json, matchesEtag, readJson, Router } from './router.ts';
+import { HttpError, json, matchesEtag, outside, readJson, Router, type Deferred } from './router.ts';
 
 interface Ctx {
   actor: Actor;
@@ -638,13 +639,22 @@ function routes(): Router<Ctx> {
   // ファイルの中身をそのまま本文として送る（境界つきの multipart は使わない）。
   // 名前は ?name= で渡す。
   r.post('/stores/:storeId/imports', async (c, req, p) => {
+    const storeId = p.storeId!;
+    // 読み取りは重いので、取り込める人かどうかを先に見て、回数も絞る
+    await assertCanImport(c.db, c.actor, storeId);
+    if (!(await c.limitUser('import', RULES.importManual))) throw new HttpError(429, '取り込みの回数が多すぎます。少し待ってからお試しください');
     const name = new URL(req.url).searchParams.get('name') ?? '';
     if (!name) throw new HttpError(400, 'name（ファイル名）が必要です');
     // 名前は記録に残り画面にも出るので、長すぎるものは受けない
     if (name.length > MAX_IMPORT_NAME) throw new HttpError(400, `name は${MAX_IMPORT_NAME}文字までにしてください`);
     const body = Buffer.from(await req.arrayBuffer());
     if (body.byteLength > MAX_IMPORT_BYTES) throw new HttpError(413, 'ファイルが大きすぎます');
-    return json(await importManual(c.db, c.actor, p.storeId!, name, body), 201);
+    // 読み取りは別のプロセスで行い、数秒かかることがある（import/isolated.ts）。
+    // そのあいだ DB の取引を開けたままにしないよう、いまの取引を閉じてから読み、下書きは新しい取引で作る
+    return outside<Ctx, ParseResult>(
+      () => readManual(name, body),
+      async (c2, parsed) => json(await saveImport(c2.db, c2.actor, storeId, name, parsed), 201),
+    );
   });
   r.get('/stores/:storeId/imports', async (c, _req, p) => json(await listImports(c.db, c.actor, p.storeId!)));
   r.post('/imports/:importId/discard', async (c, _req, p) => json(await discardImport(c.db, c.actor, p.importId!, c.storage)));
@@ -1128,19 +1138,24 @@ export function createApp(deps: AppDeps) {
     // テナントはトークンから DB なしで分かるので、先に取引を開ける。
     const isWrite = req.method !== 'GET' && req.method !== 'HEAD';
     const writeRule = deps.userWriteRule ?? RULES.userWrite;
-    const runHandler = (db: Db, actor: Actor, identity: Identity) =>
-      matched.handler(
-        {
-          actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
-          limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
-          limitUser: (name, rule) => limiter.take(`${name}:user:${actor.userId}`, rule),
-          mailer: () => deps.loginMailer ?? mailerFromEnv(),
-        },
-        req,
-        matched.params,
-      );
+    const contextFor = (db: Db, actor: Actor, identity: Identity): Ctx => ({
+      actor, identity, db, tokenizer: deps.tokenizer, storage, oidc: directory,
+      limit: (r, name, rule) => limiter.take(clientKey(r, name), rule),
+      limitUser: (name, rule) => limiter.take(`${name}:user:${actor.userId}`, rule),
+      mailer: () => deps.loginMailer ?? mailerFromEnv(),
+    });
+    const runHandler = (db: Db, actor: Actor, identity: Identity) => matched.handler(contextFor(db, actor, identity), req, matched.params);
+    /**
+     * ハンドラが「取引の外でやる仕事」を返したときの続き。ここに来る時点で、ハンドラを走らせた取引は閉じている。
+     * 仕事を待つあいだ DB の接続を持たず、終わってから新しい取引で続きをする
+     */
+    const settle = async (result: Response | Deferred<Ctx>, actor: Actor, identity: Identity): Promise<Response> => {
+      if (result instanceof Response) return result;
+      const value = await result.work();
+      return deps.database.withTenant(actor.tenantId, (db) => result.finish(contextFor(db, actor, identity), value));
+    };
     type Outcome =
-      | { kind: 'done'; response: Response }
+      | { kind: 'done'; result: Response | Deferred<Ctx>; actor: Actor; identity: Identity }
       | { kind: 'no_identity' }
       | { kind: 'inactive' }
       | { kind: 'limited' }
@@ -1157,7 +1172,7 @@ export function createApp(deps: AppDeps) {
         if (!limiter.local) return { kind: 'continue', actor, identity };
         if (!(await limiter.take(`write:user:${actor.userId}`, writeRule))) return { kind: 'limited' };
       }
-      return { kind: 'done', response: await runHandler(db, actor, identity) };
+      return { kind: 'done', result: await runHandler(db, actor, identity), actor, identity };
     });
 
     // 失敗したときの回数の数え取りは、取引の外で（DB で数える上限が接続を取り合わないように）
@@ -1168,10 +1183,11 @@ export function createApp(deps: AppDeps) {
     }
     if (outcome.kind === 'inactive') throw new HttpError(401, 'この利用者は無効です');
     if (outcome.kind === 'limited') return tooMany();
-    if (outcome.kind === 'done') return outcome.response;
+    if (outcome.kind === 'done') return settle(outcome.result, outcome.actor, outcome.identity);
 
     if (!(await limiter.take(`write:user:${outcome.actor.userId}`, writeRule))) return tooMany();
-    return await deps.database.withTenant(outcome.actor.tenantId, (db) => runHandler(db, outcome.actor, outcome.identity));
+    const result = await deps.database.withTenant(outcome.actor.tenantId, (db) => runHandler(db, outcome.actor, outcome.identity));
+    return settle(result, outcome.actor, outcome.identity);
   }
 
   async function handle(req: Request): Promise<Response> {

@@ -9,7 +9,8 @@ import type { Storage } from '../storage/storage.ts';
 import { assert, canModerate, DomainError, type Actor } from './actor.ts';
 import { maybeOne, one, type Db } from '../db/db.ts';
 import { assertStore } from './scope.ts';
-import { parseImport, type Draft } from '../import/parse.ts';
+import { parseIsolated } from '../import/isolated.ts';
+import type { Draft, ParseResult } from '../import/parse.ts';
 
 /** 取り込めるファイルの大きさ */
 export const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
@@ -24,23 +25,25 @@ export interface ImportResult {
   preview: Array<{ id: string; title: string; source: string | null }>;
 }
 
-/**
- * 資料を読んで、承認待ちの下書きを作る。
- * 取り込めるのは、承認できる人（trusted 以上）だけ。
- */
-export async function importManual(
-  db: Db, actor: Actor, storeId: string, fileName: string, content: Buffer,
-): Promise<ImportResult> {
+/** 取り込める人か（trusted 以上）と、店舗があるかを確かめる。重い読み取りの前に呼ぶ */
+export async function assertCanImport(db: Db, actor: Actor, storeId: string): Promise<void> {
   assert(canModerate(actor, storeId), 'forbidden', '資料を取り込めるのは trusted 以上です');
   await assertStore(db, storeId);
-  assert(content.byteLength > 0 && content.byteLength <= MAX_IMPORT_BYTES, 'invalid', 'ファイルが大きすぎます');
+}
 
-  let drafts: Draft[];
-  let warnings: string[] = [];
+/**
+ * 資料を読んで、下書きの素を作る（DB は使わない）。
+ * 読み取りは、本体とは別のプロセスで行う（import/isolated.ts。使える記憶と時間に上限がある）。
+ * `parse` は試験で読み取りを差し替えるための口で、ふだんは渡さない。
+ */
+export async function readManual(
+  fileName: string, content: Buffer,
+  parse: (fileName: string, content: Buffer) => Promise<ParseResult> = parseIsolated,
+): Promise<ParseResult> {
+  assert(content.byteLength > 0 && content.byteLength <= MAX_IMPORT_BYTES, 'invalid', 'ファイルが大きすぎます');
+  let parsed: ParseResult;
   try {
-    const parsed = parseImport(fileName, content);
-    drafts = parsed.drafts;
-    warnings = parsed.warnings;
+    parsed = await parse(fileName, content);
   } catch (err) {
     // 自分で書いた案内だけ返す。内部の例外文（Buffer の範囲外など）は 400 にしつつ文面は固定にする
     if (err instanceof ImportError) throw new DomainError('invalid', err.message);
@@ -48,10 +51,21 @@ export async function importManual(
   }
   // 読めなかった理由が分かっていれば、それをそのまま伝える
   assert(
-    drafts.length > 0,
+    parsed.drafts.length > 0,
     'invalid',
-    warnings[0] ?? 'この資料からは下書きを作れませんでした。見出しや列の名前を確かめてください。',
+    parsed.warnings[0] ?? 'この資料からは下書きを作れませんでした。見出しや列の名前を確かめてください。',
   );
+  return parsed;
+}
+
+/** 読んだ下書きの素を、承認待ちの下書きとして置く */
+export async function saveImport(
+  db: Db, actor: Actor, storeId: string, fileName: string, parsed: ParseResult,
+): Promise<ImportResult> {
+  await assertCanImport(db, actor, storeId);
+  const drafts: Draft[] = parsed.drafts;
+  const warnings = parsed.warnings;
+  assert(drafts.length > 0, 'invalid', warnings[0] ?? 'この資料からは下書きを作れませんでした。見出しや列の名前を確かめてください。');
 
   const imported = await one<{ id: string }>(
     db,
@@ -80,6 +94,19 @@ export async function importManual(
   await syncApprovalNotice(db, actor.tenantId, storeId);
 
   return { importId: imported.id, fileName, drafts: drafts.length, warnings, preview };
+}
+
+/**
+ * 資料を読んで、承認待ちの下書きを作る（確かめる → 読む → 置く、をひと続きに行う）。
+ * 取り込めるのは、承認できる人（trusted 以上）だけ。
+ * HTTP の口は、読むあいだ DB の取引を開けたままにしないよう、この3つを分けて呼ぶ（http/app.ts）。
+ */
+export async function importManual(
+  db: Db, actor: Actor, storeId: string, fileName: string, content: Buffer,
+  parse: (fileName: string, content: Buffer) => Promise<ParseResult> = parseIsolated,
+): Promise<ImportResult> {
+  await assertCanImport(db, actor, storeId);
+  return saveImport(db, actor, storeId, fileName, await readManual(fileName, content, parse));
 }
 
 /** 取り込んだ資料の一覧と、残っている下書きの数 */

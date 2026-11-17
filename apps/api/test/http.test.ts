@@ -189,6 +189,32 @@ describe('入力の範囲と長さ', () => {
     assert.equal(res.status, 400);
   });
 
+  it('資料の取り込み：visitor は 403、trusted は取り込めて、続けて打つと 429', async () => {
+    const send = (actor: Actor, name: string, body: string) => app(new Request(`http://localhost/stores/${STORE_A}/imports?name=${encodeURIComponent(name)}`, {
+      method: 'POST',
+      headers: { 'x-dev-tenant-id': actor.tenantId, 'x-dev-user-id': actor.userId },
+      body,
+    }));
+    const denied = await send(visitor, '手順.md', '# 題\n本文\n');
+    assert.equal(denied.status, 403);
+    assert.equal(((await denied.json()) as { error: string }).error, 'forbidden');
+
+    // 読み取りは別のプロセスで行われる（import/isolated.ts）。結果は同じ形で返る
+    const ok = await send(manager, '手順.md', '# 返品の受付\nレシートを確かめる。\n\n# 配送の受付\n15時まで。\n');
+    assert.equal(ok.status, 201);
+    assert.equal(((await ok.json()) as { drafts: number }).drafts, 2);
+    const unreadable = await send(manager, '資料.rtf', '{\\rtf1}');
+    assert.equal(unreadable.status, 400);
+    assert.match(((await unreadable.json()) as { message: string }).message, /\.txt \.md \.csv/);
+
+    // 1人あたり10分に30回まで（ここまでで manager は2回）。名前の無い要求も1回に数える
+    for (let i = 0; i < 28; i++) assert.equal((await send(manager, '', 'x')).status, 400, `${i + 3}回目`);
+    const limited = await send(manager, '手順.md', '# 題\n本文\n');
+    assert.equal(limited.status, 429);
+    // ほかの人は巻き添えにならない
+    assert.equal((await send(hq, '', 'x')).status, 400);
+  });
+
   it('タグの読みの確定で readings が21個以上なら 400', async () => {
     const readings = Array.from({ length: 21 }, (_, i) => `ヨミ${i}`);
     const r = await call(manager, 'POST', `/tag-readings/${STORE_A}`, { readings });
