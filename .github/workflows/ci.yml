@@ -286,7 +286,7 @@ jobs:
           value() { grep -i "^$1:" "$2" | head -1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
           for path in /health /app/ /admin/; do
             curl -sS -D headers.txt -o /dev/null "http://localhost:8080$path"
-            echo "--- $path"; grep -iE '^(HTTP|x-frame-options|referrer-policy|strict-transport-security):' headers.txt
+            echo "--- $path"; grep -iE '^(HTTP/|x-frame-options:|referrer-policy:|strict-transport-security:)' headers.txt
             head -1 headers.txt | grep -q ' 200'
             # 同じ見出しが2つ付くと、どちらが効くかがブラウザーしだいになる。1つずつにする
             test "$(count x-frame-options headers.txt)" = 1
@@ -354,10 +354,75 @@ jobs:
           test "$(docker compose exec -T api cat /var/misenare/photos/ci/a.webp)" = photo
           # 戻した写真は、アプリの利用者（node）の持ち物のまま
           test "$(docker compose exec -T api stat -c %U /var/misenare/photos/ci/a.webp)" = node
+      # 入れ替えの台本（deploy/deploy.sh）を、本番と同じ compose の中でそのまま走らせる。
+      # 本番でしか走らない台本は、間違っていても気づけない（前は、Caddyfile を変えても Caddy が作り直されていなかった）。
+      # ここまでの手順で、DB・アプリ・退避が動いている。そこに「新しい版を入れる」ことを、場合を変えて5回やる
+      - name: Rehearse the deploy script
+        working-directory: deploy
+        run: |
+          set -euo pipefail
+          id_of() { docker compose ps -q "$1"; }
+          # 入口が返した見出しを headers.txt に取る（つなぎながら grep に流すと、途中で切れたときの結果が分かりにくい）
+          entrance() { curl -sk -o /dev/null -D - https://localhost/health | tr -d '\r' > headers.txt; }
+          has_rehearsal_header() { entrance; grep -qi '^x-rehearsal: 1$' headers.txt; }
+
+          echo "=== 1回目：全部を起こす（Caddy と夜間バッチは、ここで初めて起きる）"
+          sudo bash deploy.sh
+          entrance
+          cat headers.txt
+          head -1 headers.txt | grep -q ' 200'
+          grep -qi '^strict-transport-security: max-age=31536000$' headers.txt
+          test "$(grep -ci '^x-frame-options:' headers.txt)" = 1
+          test "$(grep -ci '^referrer-policy:' headers.txt)" = 1
+          api=$(id_of api); caddy=$(id_of caddy); backup=$(id_of backup); batch=$(id_of batch); db=$(id_of db)
+          test -n "$api" && test -n "$caddy" && test -n "$backup" && test -n "$batch" && test -n "$db"
+
+          echo "=== 2回目：何も変えていなければ、何も作り直さない"
+          sudo bash deploy.sh
+          test "$api $caddy $backup $batch $db" = "$(id_of api) $(id_of caddy) $(id_of backup) $(id_of batch) $(id_of db)"
+
+          echo "=== Caddyfile を変える → Caddy だけを作り直す"
+          cp Caddyfile Caddyfile.orig
+          # git が置き換えるのと同じやり方（別のファイルを作って、名前を付け替える）
+          sed 's|Strict-Transport-Security "max-age=31536000"|&\n\t\tX-Rehearsal "1"|' Caddyfile.orig > Caddyfile.new
+          mv Caddyfile.new Caddyfile
+          sudo bash deploy.sh
+          test "$(id_of caddy)" != "$caddy"
+          test "$api $backup $batch $db" = "$(id_of api) $(id_of backup) $(id_of batch) $(id_of db)"
+          has_rehearsal_header
+          caddy=$(id_of caddy)
+
+          echo "=== 書き間違えた Caddyfile → 何も入れ替えずに止まる（入口は、前のまま応える）"
+          printf '%s\n' '{$MISENARE_HOST} {' '	this_is_not_a_directive' > Caddyfile.new
+          mv Caddyfile.new Caddyfile
+          if sudo bash deploy.sh > broken.log 2>&1; then
+            echo "::error title=入れ替えの台本::書き間違えた Caddyfile なのに、入れ替えが通ってしまった"
+            cat broken.log
+            exit 1
+          fi
+          tail -4 broken.log
+          test "$api $caddy $backup $batch $db" = "$(id_of api) $(id_of caddy) $(id_of backup) $(id_of batch) $(id_of db)"
+          has_rehearsal_header
+
+          echo "=== 元に戻す（その場で書き換える）→ Caddy を作り直して、元の中身になる"
+          cat Caddyfile.orig > Caddyfile
+          sudo bash deploy.sh
+          test "$(id_of caddy)" != "$caddy"
+          if has_rehearsal_header; then echo "::error title=入れ替えの台本::Caddyfile を戻したのに、前の中身のまま"; exit 1; fi
+          caddy=$(id_of caddy)
+
+          echo "=== アプリを変える → アプリと夜間バッチを作り直す（Caddy・DB・退避は、そのまま）"
+          echo '// 入れ替えの通し確認' >> ../apps/api/src/server.ts
+          sudo bash deploy.sh
+          test "$(id_of api)" != "$api"
+          test "$(id_of batch)" != "$batch"
+          test "$caddy $backup $db" = "$(id_of caddy) $(id_of backup) $(id_of db)"
+          # 夜間バッチは口を開けないので、「動いているかの確認」は切ってある（unhealthy と出ない）
+          test "$(docker inspect -f '{{ if .State.Health }}{{ .State.Health.Status }}{{ else }}none{{ end }}' "$(id_of batch)")" = none
       - name: Report failures as annotations
         if: failure()
         run: |
-          (cd deploy && docker compose logs --tail 40 backup db api 2>/dev/null) || true
+          (cd deploy && docker compose logs --tail 40 backup db api caddy 2>/dev/null) || true
           docker logs caddy-ci 2>&1 | tail -20 || true
           echo "::error title=docker failed::$( { tail -20 migrate.log 2>/dev/null; docker logs misenare 2>&1 | tail -20; } | sed 's/%/%25/g' | tr '\n' '~' | sed 's/~/%0A/g')"
           [ -f import-isolation.tap ] && node .github/scripts/annotate-tap.mjs import-isolation.tap || true

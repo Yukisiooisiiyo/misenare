@@ -27,38 +27,8 @@ jobs:
           script: |
             set -eu
             cd /opt/misenare
-            before=$(sudo git rev-parse HEAD)
             sudo git pull --ff-only
-            cd deploy
-            # Caddyfile を変えたときは、入れ替える前に、この台の Caddy に読ませて確かめる。
-            # 書き間違いがあるまま作り直すと、入口（https）ごと落ちる。ここで止まれば、何も入れ替わらない
-            if ! sudo git diff --quiet "$before" HEAD -- deploy/Caddyfile; then
-              sudo docker run --rm -e MISENARE_HOST=check.example.com -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-            fi
-            # 新しいイメージを先に作る（マイグレーションのファイルも取り込まれる）
-            sudo docker compose build
-            # DB を起動（すでに動いていれば何もしない）
-            sudo docker compose up -d db
-            # スキーマのマイグレーションを、新しいイメージで適用してからアプリを入れ替える。
-            # 失敗したら script_stop でここで止まり、アプリは旧版のまま（壊れた新版を出さない）。
-            sudo docker compose run --rm api npx tsx apps/api/src/cli/migrate.ts
-            # アプリ・バッチ・Caddy・退避を新イメージで起動
-            sudo docker compose up -d
-            # Caddyfile は1ファイルだけを差し込んでいるので、書き換わっても動いている Caddy には届かない。
-            # 変わったときだけ作り直す（証明書は caddy_data に残る）
-            if ! sudo git diff --quiet "$before" HEAD -- deploy/Caddyfile; then
-              sudo docker compose up -d --force-recreate caddy
-            fi
-            # 退避の台本（deploy/backup）はフォルダごと差し込んでいるので、書き換えは次の晩の分から効く。
-            # 次の時刻まで寝ている輪も新しくしたいので、変わっていたら作り直す（初めて入れるときは、上の up -d が起こしている）
-            if sudo git cat-file -e "$before:deploy/backup/backup.sh" 2>/dev/null && ! sudo git diff --quiet "$before" HEAD -- deploy/backup; then
-              sudo docker compose up -d --force-recreate backup
-            fi
-            sudo docker image prune -f
-            # 新しいアプリが起きて、DB につながっていることを確かめる（起きなければ、ここで失敗にして気づけるようにする）
-            for i in $(seq 1 30); do sudo docker compose exec -T api node -e "fetch('http://127.0.0.1:8787/ready').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" && break; sleep 2; done
-            sudo docker compose exec -T api node -e "fetch('http://127.0.0.1:8787/ready').then(async (r) => { console.log('アプリ: /ready', r.status, await r.text()); process.exit(r.ok ? 0 : 1); }).catch((e) => { console.log('アプリ: 応答なし', String(e)); process.exit(1); })"
-            sudo docker compose ps
-            # 退避が取れているかを、この記録に残す（退避が1つも無いときは、起動してすぐに1回取る）
-            for i in $(seq 1 45); do sudo docker compose exec -T backup test -s /status/status.json && break; sleep 2; done
-            sudo docker compose exec -T backup bash /opt/backup/backup.sh status
+            # 入れ替えの中身は deploy/deploy.sh にある（いま取り出した、新しい版の台本を使う）。
+            # 前はここに直に書いていたが、本番でしか走らないので、間違いに気づけなかった
+            # （Caddyfile を変えても Caddy が作り直されていなかった）。台本に出して、CI が同じものを走らせて確かめる
+            sudo bash deploy/deploy.sh

@@ -272,12 +272,29 @@ docker run --rm -e DATABASE_URL=… misenare:latest npx tsx apps/api/src/batch/n
   （GitHub の Dependabot の知らせを有効にしておくと、気づけます）。
 - デプロイに使う外部のアクション（`appleboy/ssh-action`）も、タグではなくコミットで指しています（`.github/workflows/deploy.yml`）。
 
-**入れ替え（`.github/workflows/deploy.yml`）が確かめていること**
+**入れ替えは、`deploy/deploy.sh` が行います。**
+main に入ると、`.github/workflows/deploy.yml` が台に入り、`git pull` のあとにこの台本を呼びます。
+手で入れ替えるときも、同じものを使います。
 
-- `Caddyfile` を変えたときは、作り直す前に、その台の Caddy に読ませて確かめる（書き間違いで入口ごと落とさない）
+```
+cd /opt/misenare && sudo git pull --ff-only && sudo bash deploy/deploy.sh
+```
+
+台本がしていること：
+
+- `Caddyfile` が、動いている Caddy のものと違っていたら、入れ替える前に、その台の Caddy に読ませて確かめる
+  （書き間違いがあれば、何も入れ替えずに止まる。入口は前のまま応え続ける）
 - マイグレーションが通ってから、アプリを入れ替える（通らなければ、古い版のまま）
-- 入れ替えたあと、新しいアプリの `/ready` が 200 を返す（起きなければ、入れ替えを失敗にする）
+- 変わったものだけを作り直す。`Caddyfile` が変わっていたら、Caddy を作り直す（数秒。証明書は残る）
+- 入れ替えたあと、新しいアプリの `/ready` が 200 を返すこと、入口（https）が応えることを確かめる
+  （起きなければ、入れ替えを失敗にする。記録には、入口が返した守りの見出しも残る）
 - 退避（15 章）の、いちばん新しい結果を記録に残す
+
+**この台本は、CI（`docker` の仕事）が compose の中でそのまま走らせて確かめています。**
+全部を起こす／何も変えていなければ何も作り直さない／`Caddyfile` を変えたら Caddy だけを作り直す／
+書き間違えた `Caddyfile` では止まる／アプリを変えたらアプリを作り直す、の5通りです。
+前は、同じ手順をワークフローの中に直に書いていて、本番でしか走らなかったので、
+「`Caddyfile` を変えても Caddy が作り直されない」という間違いに気づけませんでした。
 
 ---
 
