@@ -92,6 +92,14 @@ export function dayLabel(iso: string | null): string {
   return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}年${md}`;
 }
 
+/** 日付だけの文字列（YYYY-MM-DD。日付の欄の値）を「11月20日」のように表す（年が違うときは年も付ける） */
+export function dateOnlyLabel(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return '';
+  const md = `${Number(m[2])}月${Number(m[3])}日`;
+  return Number(m[1]) === new Date().getFullYear() ? md : `${m[1]}年${md}`;
+}
+
 /** 日付の欄（<input type="date">）に入れる形。端末の暦で読む */
 export function dateValue(iso: string | null | undefined): string {
   const d = parseDate(iso ?? null);

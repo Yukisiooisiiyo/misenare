@@ -13,6 +13,7 @@ import {
   receivePhoto,
   startPhotoUpload,
   sweepAbandonedPhotos,
+  updatePhotoCaption,
 } from '../src/domain/photos.ts';
 import { LocalStorage, S3Storage, storageFromEnv } from '../src/storage/storage.ts';
 import { presignS3, signingKey, uriEncode } from '../src/storage/s3.ts';
@@ -264,6 +265,27 @@ describe('写真', () => {
       assert.equal((await listPhotos(q, storage, trusted, id)).length, 0);
     });
     await assert.rejects(readFile(join(dir, T, id, `${mine}.jpg`)), /ENOENT/);
+  });
+
+  it('写真の説明は、付けた本人と承認できる人が、あとから付けられる・直せる・外せる', async () => {
+    const id = await published('説明つきの写真');
+    const photoId = await upload(id, trusted);
+    await db.withTenant(T, async (q) => {
+      assert.equal((await listPhotos(q, storage, visitor, id))[0]!.caption, null);
+      assert.deepEqual(await updatePhotoCaption(q, trusted, photoId, '  レジ横の\n棚の配置  '), { id: photoId, caption: 'レジ横の 棚の配置' });
+      assert.equal((await listPhotos(q, storage, visitor, id))[0]!.caption, 'レジ横の 棚の配置');
+      // 店長（承認できる人）も直せる。新人・他店の人には直せない
+      await updatePhotoCaption(q, manager, photoId, '棚の配置（3月）');
+      await assert.rejects(updatePhotoCaption(q, visitor, photoId, 'いたずら'), /直せません/);
+      await assert.rejects(updatePhotoCaption(q, storeBStaff, photoId, 'いたずら'), /直せません/);
+      await assert.rejects(updatePhotoCaption(q, trusted, photoId, 'あ'.repeat(201)), /200文字以内/);
+      await assert.rejects(updatePhotoCaption(q, trusted, photoId, 123), /文字で入力/);
+      await assert.rejects(updatePhotoCaption(q, trusted, '60000000-0000-0000-0000-00000000dead', 'x'), /見つかりません/);
+      assert.equal((await listPhotos(q, storage, visitor, id))[0]!.caption, '棚の配置（3月）');
+      // 空にすると外れる
+      assert.deepEqual(await updatePhotoCaption(q, trusted, photoId, '   '), { id: photoId, caption: null });
+      assert.equal((await listPhotos(q, storage, visitor, id))[0]!.caption, null);
+    });
   });
 
   it('送りかけのまま残った写真は、夜間バッチが片付ける', async () => {

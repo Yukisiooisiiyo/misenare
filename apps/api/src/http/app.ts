@@ -78,6 +78,7 @@ import {
   openPhoto,
   receivePhoto,
   startPhotoUpload,
+  updatePhotoCaption,
 } from '../domain/photos.ts';
 import { recordSearchFeedback, search, zeroHitQueries } from '../domain/search.ts';
 import {
@@ -156,6 +157,8 @@ const MAX_DEVICE_NAME = 60;
 const MAX_TAGS = 20;
 /** 1件に結びつけられる売場の数 */
 const MAX_AREAS = 50;
+/** 引き継ぎを、何日先の分まで書けるか */
+const MAX_HANDOVER_AHEAD_DAYS = 60;
 /** 取り込むファイル名の長さ */
 const MAX_IMPORT_NAME = 200;
 /** タグの読みの確定で一度に送れる件数。ドメイン側の重複除去後の検査より前に、本文の大きさで止める */
@@ -529,6 +532,9 @@ function routes(): Router<Ctx> {
     return new Response(out.body, { headers: { 'content-type': out.contentType, 'cache-control': 'private, max-age=86400', 'x-content-type-options': 'nosniff' } });
   });
   r.delete('/photos/:photoId', async (c, _req, p) => json(await deletePhoto(c.db, c.storage, c.actor, p.photoId!)));
+  // 写真の説明を付ける・直す（空にすると外れる）
+  r.patch('/photos/:photoId', async (c, req, p) =>
+    json(await updatePhotoCaption(c.db, c.actor, p.photoId!, ((await readJson<Record<string, unknown> | null>(req)) ?? {}).caption ?? null)));
 
   // --- 連絡事項 -------------------------------------------------------------
   r.get('/stores/:storeId/notices', async (c, req, p) => {
@@ -591,6 +597,14 @@ function routes(): Router<Ctx> {
     const b = (await readJson<Record<string, unknown>>(req)) ?? {};
     if (typeof b.body !== 'string') throw new HttpError(400, 'body（文字列）が必要です');
     if (b.forDate !== undefined && !isDateOnly(b.forDate)) throw new HttpError(400, 'forDate は YYYY-MM-DD の形の実在する日付にしてください');
+    if (typeof b.forDate === 'string') {
+      // 日付を指定して書けるのは、今日から先の分だけ。前の日付で書くと、持ち越しの期間を過ぎていて、どこにも出ないことがある
+      const today = todayIn();
+      const limit = new Date(`${today}T00:00:00Z`);
+      limit.setUTCDate(limit.getUTCDate() + MAX_HANDOVER_AHEAD_DAYS);
+      if (b.forDate < today) throw new HttpError(400, '前の日付では書けません。今日の分として書いてください');
+      if (b.forDate > limit.toISOString().slice(0, 10)) throw new HttpError(400, `日付は${MAX_HANDOVER_AHEAD_DAYS}日先までにしてください`);
+    }
     return json(await addHandover(c.db, c.actor, p.storeId!, b.body, b.forDate as string | undefined, b.labels), 201);
   });
   r.get('/stores/:storeId/handover-labels', async (c, _req, p) => json({ labels: await handoverLabels(c.db, c.actor, p.storeId!) }));
