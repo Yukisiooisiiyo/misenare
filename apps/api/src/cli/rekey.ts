@@ -16,6 +16,7 @@
 
 import { isSealed, secretBoxFromEnv, sealedWith } from '../crypto/secretBox.ts';
 import type { Database } from '../db/db.ts';
+import { totpAad } from '../domain/operator.ts';
 
 const dryRun = process.argv.includes('--dry-run');
 
@@ -59,6 +60,20 @@ for (const { id: tenantId } of tenants) {
       changed++;
     }
   });
+}
+
+// 運営者の2段階の確認の鍵（会社に属さない表）
+const operators = (await database.raw(`SELECT id, totp_secret FROM operators WHERE totp_secret IS NOT NULL`)) as Array<{ id: string; totp_secret: string }>;
+for (const row of operators) {
+  looked++;
+  const aad = totpAad(row.id);
+  const already = sealedWith(row.totp_secret);
+  if (already === box.keyId) continue;
+  const sealed = box.seal(box.open(row.totp_secret, aad), aad);
+  const what = isSealed(row.totp_secret) ? `${already} → ${box.keyId}` : `平の形 → ${box.keyId}`;
+  console.log(`${dryRun ? '（やらない）' : '包み直す'} operators ${row.id}（${what}）`);
+  if (!dryRun) await database.raw(`UPDATE operators SET totp_secret = $2 WHERE id = $1`, [row.id, sealed]);
+  changed++;
 }
 
 console.log(`見た ${looked} 件 / ${dryRun ? '包み直すべき' : '包み直した'} ${changed} 件`);
