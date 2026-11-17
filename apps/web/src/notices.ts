@@ -4,7 +4,7 @@
 // 引き継ぎ … その日のメモ。承認はなく、誰でも書けて誰でも片付けられる
 
 import { api } from './api.ts';
-import { clear, h, relativeDate, submitOnce, toast } from './dom.ts';
+import { clear, dayLabel, h, relativeDate, submitOnce, toast } from './dom.ts';
 import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
@@ -69,8 +69,10 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
         h('h3', {}, n.title)),
       ...paragraphs(n.body),
       h('p', { class: 'hint' },
-        n.createdBy ? `${n.createdBy}さん・${relativeDate(n.createdAt)}` : `ツギガミから・${relativeDate(n.createdAt)}`
-        + (n.endsAt ? `・${relativeDate(n.endsAt)}まで` : '')
+        // 三項演算子は + より後に決まるので、括弧で先に閉じる。括弧が無いと、人が出した連絡では
+        // 後ろの「〜まで」「未確認 N人」が丸ごと捨てられる
+        (n.createdBy ? `${n.createdBy}さん・${relativeDate(n.createdAt)}` : `ツギガミから・${relativeDate(n.createdAt)}`)
+        + (n.endsAt ? `・${dayLabel(n.endsAt)}まで` : '')
         + (canSeeReaders && n.pendingAcks !== undefined ? `・未確認 ${n.pendingAcks}人` : '')),
       ...(n.requiresAck
         ? [n.ackedAt

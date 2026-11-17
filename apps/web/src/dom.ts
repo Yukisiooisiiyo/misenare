@@ -81,6 +81,17 @@ export function relativeDate(iso: string | null): string {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
+/**
+ * 日付だけを「11月20日」のように表す（年が違うときは年も付ける）。
+ * 期限のような**先の日付**に使う。relativeDate は過ぎた日時のためのもので、先の日付を渡すと「今日」になってしまう
+ */
+export function dayLabel(iso: string | null): string {
+  const d = iso ? parseDate(iso) : null;
+  if (!d) return '';
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}年${md}`;
+}
+
 /** タグの中身。「#」だけ色を変えるために分ける（読み上げや文字としては「#名前」のまま） */
 export function tagLabel(name: string): [HTMLElement, string] {
   return [h('span', { class: 'tag-hash' }, '#'), name];

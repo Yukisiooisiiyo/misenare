@@ -46,7 +46,7 @@ async function knowledgeTable(db: Db): Promise<ExportTable> {
             cu.name AS created_by, k.created_at::text AS created_at,
             eu.name AS updated_by, v.edited_at::text AS updated_at,
             au.name AS approved_by, k.verified_at::text AS verified_at,
-            (SELECT count(*) FROM knowledge_photos p WHERE p.knowledge_id = k.id AND p.state = 'active')::int AS photos,
+            (SELECT count(*) FROM knowledge_photos p WHERE p.knowledge_id = k.id AND p.state = 'active' AND p.pending_version IS NULL)::int AS photos,
             (SELECT count(*) FROM search_logs l WHERE l.opened_knowledge_id = k.id)::int AS opens
        FROM knowledge k
        JOIN knowledge_versions v ON v.knowledge_id = k.id AND v.version = k.current_version

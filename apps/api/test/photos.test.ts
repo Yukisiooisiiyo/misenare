@@ -3,7 +3,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { createKnowledge, approveVersion, editKnowledge } from '../src/domain/knowledge.ts';
+import { createKnowledge, approveVersion, editKnowledge, getKnowledge, rejectVersion, revertToVersion } from '../src/domain/knowledge.ts';
 import {
   deletePhoto,
   finishPhotoUpload,
@@ -143,6 +143,94 @@ describe('写真', () => {
     await upload(shared, hq);
   });
 
+  describe('修正案と一緒に付けた写真は、案と一緒に承認を待つ', () => {
+    const run = <R>(fn: (q: Parameters<Parameters<typeof db.withTenant>[1]>[0]) => Promise<R>): Promise<R> => db.withTenant(T, fn);
+    const ids = async (actor: Actor, id: string) => (await run((q) => listPhotos(q, storage, actor, id))).map((p) => p.id);
+    /** 公開済みのナレッジに、新人が修正案を出して写真を1枚付ける */
+    async function proposeWithPhoto(title: string) {
+      const id = await published(title);
+      const edit = await run((q) => editKnowledge(q, tokenizer, visitor, id, { title, body: '本文（修正案）', tagNames: ['#写真'], baseVersion: 1 }));
+      assert.equal(edit.published, false);
+      const photo = await upload(id, visitor);
+      return { id, version: edit.version, photo };
+    }
+
+    it('承認されるまで、付けた本人と承認できる人にしか見えない（ID を知っていても開けない）', async () => {
+      const { id, photo } = await proposeWithPhoto('写真は案と一緒に待つ');
+      assert.deepEqual(await ids(visitor, id), [photo], '付けた本人には見える');
+      assert.deepEqual(await ids(trusted, id), [photo], '承認できる人には見える');
+      assert.deepEqual(await ids(manager, id), [photo]);
+      assert.deepEqual(await ids(otherVisitor, id), [], 'ほかの人には、まだ出ない');
+      await assert.rejects(run((q) => openPhoto(q, storage, otherVisitor, photo)), /見つかりません/);
+      assert.equal((await run((q) => openPhoto(q, storage, trusted, photo))).kind, 'body');
+      const mine = await run((q) => listPhotos(q, storage, visitor, id));
+      assert.equal(mine[0]!.pending, true, '待っていることが分かる');
+      // 本文も、まだ前のまま
+      assert.equal((await run((q) => getKnowledge(q, otherVisitor, id))).body, '本文');
+    });
+
+    it('案が承認されると、写真も全員に見える', async () => {
+      const { id, version, photo } = await proposeWithPhoto('承認で写真も出る');
+      await run((q) => approveVersion(q, tokenizer, trusted, id, version));
+      assert.deepEqual(await ids(otherVisitor, id), [photo]);
+      assert.equal((await run((q) => listPhotos(q, storage, otherVisitor, id)))[0]!.pending, false);
+      assert.equal((await run((q) => openPhoto(q, storage, otherVisitor, photo))).kind, 'body');
+    });
+
+    it('案が却下されると、写真はだれの一覧からも消え、夜間バッチが実体を片付ける', async () => {
+      const { id, version, photo } = await proposeWithPhoto('却下で写真も消える');
+      await run((q) => rejectVersion(q, trusted, id, version));
+      for (const who of [visitor, trusted, manager, otherVisitor]) assert.deepEqual(await ids(who, id), []);
+      await assert.rejects(run((q) => openPhoto(q, storage, visitor, photo)), /見つかりません/);
+      await readFile(join(dir, T, id, `${photo}.jpg`)); // まだ実体はある
+      assert.ok(await run((q) => sweepAbandonedPhotos(q, storage)) >= 1);
+      await assert.rejects(readFile(join(dir, T, id, `${photo}.jpg`)), /ENOENT/);
+    });
+
+    it('本人が案を出し直すと、写真は新しい案に付いて待ち続ける', async () => {
+      const { id, photo } = await proposeWithPhoto('出し直しても待つ');
+      const again = await run((q) => editKnowledge(q, tokenizer, visitor, id, { title: '出し直しても待つ', body: '本文（出し直し）', tagNames: ['#写真'], baseVersion: 1 }));
+      assert.deepEqual(await ids(visitor, id), [photo]);
+      assert.deepEqual(await ids(otherVisitor, id), []);
+      await run((q) => approveVersion(q, tokenizer, trusted, id, again.version));
+      assert.deepEqual(await ids(otherVisitor, id), [photo]);
+    });
+
+    it('別の案が先に公開されて閉じられた案の写真は、出ないまま捨てる', async () => {
+      const { id, photo } = await proposeWithPhoto('閉じられた案の写真');
+      // 承認できる人が自分で直して公開する（新人の案は、土台が古くなって閉じられる）
+      await run((q) => editKnowledge(q, tokenizer, trusted, id, { title: '閉じられた案の写真', body: '店長が直した本文', tagNames: ['#写真'], baseVersion: 1 }));
+      for (const who of [visitor, trusted, otherVisitor]) assert.deepEqual(await ids(who, id), []);
+      await assert.rejects(run((q) => openPhoto(q, storage, visitor, photo)), /見つかりません/);
+    });
+
+    it('過去の版に戻したときも、閉じられた案の写真は出ない', async () => {
+      const { id } = await proposeWithPhoto('戻しでも出ない');
+      await run((q) => revertToVersion(q, tokenizer, trusted, id, 1));
+      for (const who of [visitor, trusted, otherVisitor]) assert.deepEqual(await ids(who, id), []);
+    });
+
+    it('承認できる人が付けた写真と、まだ公開されていない投稿の写真は、これまでどおり待たない', async () => {
+      const id = await published('すぐ出る写真');
+      const direct = await upload(id, trusted);
+      assert.deepEqual(await ids(otherVisitor, id), [direct]);
+      // 新人の新規投稿（未公開）は、ナレッジごと関係者にしか見えない。承認されたら写真ごと出る
+      const draft = await run((q) => createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '新人の投稿', body: '本文', tagNames: ['#写真'] }));
+      const own = await upload(draft.id, visitor);
+      assert.equal((await run((q) => listPhotos(q, storage, visitor, draft.id)))[0]!.pending, false);
+      await run((q) => approveVersion(q, tokenizer, trusted, draft.id, 1));
+      assert.deepEqual(await ids(otherVisitor, draft.id), [own]);
+    });
+
+    it('待っている写真も枚数に数える。捨てた写真は数えない', async () => {
+      const { id, version } = await proposeWithPhoto('枚数の数え方');
+      for (let i = 0; i < 7; i++) await upload(id, visitor);
+      await assert.rejects(upload(id, trusted), /8枚まで/);
+      await run((q) => rejectVersion(q, trusted, id, version));
+      await upload(id, trusted); // 捨てたぶんは空く
+    });
+  });
+
   it('未公開のナレッジの写真は、書いた人と承認できる人だけが見られる', async () => {
     const id = await db.withTenant(T, async (q) => {
       const k = await createKnowledge(q, tokenizer, visitor, { storeId: STORE_A, title: '承認待ち', body: '本文', tagNames: ['#写真'] });
@@ -181,6 +269,8 @@ describe('写真', () => {
   it('送りかけのまま残った写真は、夜間バッチが片付ける', async () => {
     const id = await published('片付けの確認');
     await db.withTenant(T, async (q) => {
+      // 前の試験で捨てた写真（案が通らなかったもの）が残っていれば、先に片付けておく
+      await sweepAbandonedPhotos(q, storage);
       const plan = await startPhotoUpload(q, storage, trusted, id, { contentType: 'image/jpeg', bytes: 8 });
       await receivePhoto(q, storage, trusted, plan.photoId, JPEG, 'image/jpeg');
       assert.equal(await sweepAbandonedPhotos(q, storage), 0, '新しいものは片付けない');

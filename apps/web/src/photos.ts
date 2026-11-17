@@ -17,6 +17,8 @@ export interface Photo {
   caption: string | null;
   createdBy: string | null;
   createdAt: string;
+  /** 修正案と一緒に承認を待っている写真（付けた本人と承認できる人にだけ届く） */
+  pending?: boolean;
 }
 
 interface UploadPlan {
@@ -142,6 +144,8 @@ export function photoSection(knowledgeId: string, canEdit: boolean, options: { a
       open.addEventListener('click', () => { if (img.src) openViewer(img.src, img.alt); });
       const figure = h('figure', { class: 'photo-item' },
         open,
+        // 修正案と一緒に付けた写真は、案が承認されるまで全員には出ない。出ていると思い込ませないように書く
+        p.pending ? h('figcaption', { class: 'pending' }, '承認待ち（承認されると全員に見えます）') : null,
         p.caption ? h('figcaption', {}, p.caption) : null,
         canDelete
           ? confirmAction('×', 'photo-remove', '消しますか？', async () => {

@@ -5,7 +5,9 @@
 //   2. 端末が中身を送る（ローカル保存なら API 経由、S3 なら署名付きURLで直接）
 //   3. 端末が「上げ終わりました」と伝える → 一覧に出るようになる
 //
-// 写真そのものに承認はない（ナレッジの版が承認制なので、未公開のナレッジは関係者しか見られない）。
+// 写真も承認を通す。承認できない人（visitor）が、公開中のナレッジへの修正案と一緒に付けた写真は、
+// その案が承認されるまで本人と承認できる人にしか見えない（pending_version）。案が通れば全員に見え、
+// 通らなければ捨てる（knowledge.ts の settlePhotos）。未公開のナレッジは、もともと関係者しか見られない。
 // 消すのは、投稿した本人と承認できる人だけ。
 
 import { randomUUID } from 'node:crypto';
@@ -69,6 +71,8 @@ export interface PhotoView {
   caption: string | null;
   createdBy: string | null;
   createdAt: string;
+  /** 修正案と一緒に承認を待っている写真。本人と承認できる人にだけ返る（ほかの人には写真ごと無い） */
+  pending: boolean;
 }
 
 interface PhotoRow {
@@ -77,16 +81,17 @@ interface PhotoRow {
   storage_key: string;
   content_type: string;
   bytes: number;
-  state: 'uploading' | 'active';
+  state: 'uploading' | 'active' | 'discarded';
   caption: string | null;
   created_by: string;
   created_at: string;
+  pending_version: number | null;
   store_id: string | null;
   status: 'draft' | 'published' | 'expired';
 }
 
 /** 写真の置き場所（ナレッジ）を見られるか。未公開なら、書いた人と承認できる人だけ */
-async function assertCanRead(db: Db, actor: Actor, knowledgeId: string): Promise<{ store_id: string | null }> {
+async function assertCanRead(db: Db, actor: Actor, knowledgeId: string): Promise<{ store_id: string | null; status: string }> {
   const k = await maybeOne<{ store_id: string | null; status: string }>(
     db, `SELECT store_id, status FROM knowledge WHERE id = $1`, [knowledgeId],
   );
@@ -105,25 +110,33 @@ async function assertCanRead(db: Db, actor: Actor, knowledgeId: string): Promise
  *   店舗     … その店舗の trusted 以上。visitor は自分の案（承認待ちの版）がある間だけ
  * 「読める＝足せる」にすると、駅前店の visitor が本部のナレッジに好きな画像を付けられ、承認も通らずに全員に見える
  */
-async function assertCanAttach(db: Db, actor: Actor, knowledgeId: string): Promise<{ store_id: string | null }> {
+async function assertCanAttach(
+  db: Db, actor: Actor, knowledgeId: string,
+): Promise<{ store_id: string | null; pendingVersion: number | null }> {
   const k = await assertCanRead(db, actor, knowledgeId);
   if (k.store_id === null) {
     assert(actor.adminScope === 'tenant', 'forbidden', '全店共通のナレッジに写真を足せるのは本部のみです');
-    return k;
+    return { ...k, pendingVersion: null };
   }
-  if (canModerate(actor, k.store_id)) return k;
-  const mine = await maybeOne(
-    db, `SELECT 1 FROM knowledge_versions WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending'`, [knowledgeId, actor.userId],
+  if (canModerate(actor, k.store_id)) return { ...k, pendingVersion: null };
+  const mine = await maybeOne<{ version: number }>(
+    db,
+    `SELECT version FROM knowledge_versions
+      WHERE knowledge_id = $1 AND edited_by = $2 AND state = 'pending' ORDER BY version DESC LIMIT 1`,
+    [knowledgeId, actor.userId],
   );
   assert(mine !== undefined, 'forbidden', '写真を足せるのは trusted 以上か、修正案を出している本人です');
-  return k;
+  // **公開中のナレッジに付ける写真は、案と一緒に承認を待たせる。**
+  // すぐ見せると、本文は承認待ちなのに写真だけが承認を通らずに全員に出る。
+  // まだ公開されていないナレッジ（新規の投稿）は、ナレッジごと関係者にしか見えないので待たせる必要がない
+  return { ...k, pendingVersion: k.status === 'published' ? mine.version : null };
 }
 
 async function loadPhoto(db: Db, photoId: string): Promise<PhotoRow> {
   const row = await maybeOne<PhotoRow>(
     db,
     `SELECT p.id, p.knowledge_id, p.storage_key, p.content_type, p.bytes, p.state, p.caption,
-            p.created_by, p.created_at::text AS created_at, k.store_id, k.status
+            p.created_by, p.created_at::text AS created_at, p.pending_version, k.store_id, k.status
        FROM knowledge_photos p JOIN knowledge k ON k.id = p.knowledge_id
       WHERE p.id = $1`,
     [photoId],
@@ -147,12 +160,13 @@ export async function startPhotoUpload(
   db: Db, storage: Storage, actor: Actor, knowledgeId: string,
   input: { contentType: string; bytes: number },
 ): Promise<UploadPlan> {
-  await assertCanAttach(db, actor, knowledgeId);
+  const target = await assertCanAttach(db, actor, knowledgeId);
   assert((ALLOWED_TYPES as readonly string[]).includes(input.contentType), 'invalid', '写真は JPEG・PNG・WebP で送ってください');
   assert(Number.isInteger(input.bytes) && input.bytes > 0 && input.bytes <= MAX_PHOTO_BYTES, 'invalid', '写真が大きすぎます');
-  // 送りかけ（uploading）も数える。でないと枠だけ無限に作れる（掃除されるまでの24時間）
+  // 送りかけ（uploading）と承認待ちも数える。でないと枠だけ無限に作れる（掃除されるまでの24時間）。
+  // 捨てたもの（discarded）は数えない
   const count = await one<{ n: number }>(
-    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1`, [knowledgeId],
+    db, `SELECT count(*)::int AS n FROM knowledge_photos WHERE knowledge_id = $1 AND state <> 'discarded'`, [knowledgeId],
   );
   assert(count.n < MAX_PHOTOS, 'conflict', `写真は${MAX_PHOTOS}枚までです`);
 
@@ -162,9 +176,9 @@ export async function startPhotoUpload(
     db, `SELECT coalesce(max(sort_order), 0) + 1 AS n FROM knowledge_photos WHERE knowledge_id = $1`, [knowledgeId],
   );
   await db.query(
-    `INSERT INTO knowledge_photos (id, tenant_id, knowledge_id, storage_key, content_type, bytes, sort_order, created_by)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-    [photoId, actor.tenantId, knowledgeId, key, input.contentType, input.bytes, sortOrder.n, actor.userId],
+    `INSERT INTO knowledge_photos (id, tenant_id, knowledge_id, storage_key, content_type, bytes, sort_order, created_by, pending_version)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [photoId, actor.tenantId, knowledgeId, key, input.contentType, input.bytes, sortOrder.n, actor.userId, target.pendingVersion],
   );
 
   const presigned = storage.presignPut(key, input.contentType);
@@ -220,20 +234,29 @@ function view(p: PhotoRow, storage: Storage, createdBy: string | null): PhotoVie
     caption: p.caption,
     createdBy,
     createdAt: p.created_at,
+    pending: p.pending_version !== null,
   };
 }
 
+/** 承認を待っている写真を見られるか：付けた本人と、承認できる人だけ */
+function canSeePending(actor: Actor, p: { created_by: string; store_id: string | null }): boolean {
+  return p.created_by === actor.userId || canModerate(actor, p.store_id);
+}
+
 export async function listPhotos(db: Db, storage: Storage, actor: Actor, knowledgeId: string): Promise<PhotoView[]> {
-  await assertCanRead(db, actor, knowledgeId);
+  const k = await assertCanRead(db, actor, knowledgeId);
   const rows = await db.query<PhotoRow & { author: string | null }>(
     `SELECT p.id, p.knowledge_id, p.storage_key, p.content_type, p.bytes, p.state, p.caption,
-            p.created_by, p.created_at::text AS created_at, u.name AS author
+            p.created_by, p.created_at::text AS created_at, p.pending_version, u.name AS author
        FROM knowledge_photos p LEFT JOIN users u ON u.id = p.created_by
       WHERE p.knowledge_id = $1 AND p.state = 'active'
       ORDER BY p.sort_order, p.created_at`,
     [knowledgeId],
   );
-  return rows.map((r) => view(r, storage, r.author));
+  // 承認を待っている写真は、付けた本人と承認できる人にだけ返す
+  return rows
+    .filter((r) => r.pending_version === null || canSeePending(actor, { created_by: r.created_by, store_id: k.store_id }))
+    .map((r) => view(r, storage, r.author));
 }
 
 /** 閲覧。保存先が署名付きURLを作れるならそこへ飛ばし、作れないなら中身を返す */
@@ -243,6 +266,8 @@ export async function openPhoto(
   const p = await loadPhoto(db, photoId);
   await assertCanRead(db, actor, p.knowledge_id);
   assert(p.state === 'active', 'not_found', '写真が見つかりません');
+  // 承認を待っている写真は、一覧と同じく本人と承認できる人だけ（ID を知っていても開けない）
+  assert(p.pending_version === null || canSeePending(actor, p), 'not_found', '写真が見つかりません');
   const url = storage.presignGet(p.storage_key);
   if (url) return { kind: 'redirect', url };
   return { kind: 'body', body: await storage.get(p.storage_key), contentType: p.content_type };
@@ -260,11 +285,12 @@ export async function deletePhoto(db: Db, storage: Storage, actor: Actor, photoI
   return { ok: true };
 }
 
-/** どのナレッジからも参照されていない中身を片付ける（夜間バッチ用） */
+/** 送りかけのまま残った枠と、案が通らずに捨てた写真を、実体ごと片付ける（夜間バッチ用） */
 export async function sweepAbandonedPhotos(db: Db, storage: Storage, olderThanHours = 24): Promise<number> {
   const rows = await db.query<{ id: string; storage_key: string }>(
     `DELETE FROM knowledge_photos
-      WHERE state = 'uploading' AND created_at < now() - ($1 || ' hours')::interval
+      WHERE (state = 'uploading' AND created_at < now() - ($1 || ' hours')::interval)
+         OR state = 'discarded'
       RETURNING id, storage_key`,
     [String(olderThanHours)],
   );

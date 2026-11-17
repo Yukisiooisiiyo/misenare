@@ -214,6 +214,8 @@ export interface Knowledge {
   verifiedAt: string | null;
   verifiedBy: string | null;
   pendingEdits: Array<{ version: number; editedBy: string | null; editedAt: string; mine: boolean }>;
+  /** まだ一度も公開されていないときの、いちばん新しい案の状態（公開済みなら無い） */
+  draftState?: 'pending' | 'rejected';
   /** 自分がブックマークしているか */
   bookmarked: boolean;
   /** 付けられるか（自分が書いたものには付けられない） */
