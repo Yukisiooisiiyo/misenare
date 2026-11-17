@@ -89,6 +89,10 @@ services:
       - photos:/var/misenare/photos
       - backup_status:/var/misenare/backup-status:ro
     restart: unless-stopped
+    # イメージの「動いているかの確認」は、アプリ（8787 番）を見るもの。夜間バッチは口を開けないので、ここでは切る
+    # （切らないと、ずっと unhealthy と出る）
+    healthcheck:
+      disable: true
     # 日本時間の 03:30（= 18:30 UTC）に走る
     command:
       - sh
@@ -118,6 +122,8 @@ services:
       PGUSER: postgres
       PGPASSWORD: ${DB_ADMIN_PASSWORD:?DB_ADMIN_PASSWORD を決めてください}
       PGDATABASE: misenare
+      # 取る時刻（UTC）。18:00 = 日本時間の 03:00。夜間バッチ（03:30）の前に取る
+      BACKUP_AT_UTC: ${BACKUP_AT_UTC:-18:00}
       # 残す日数（DB の退避）と、元から消えた写真を写しの側に残す日数
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
       BACKUP_PHOTO_GRACE_DAYS: ${BACKUP_PHOTO_GRACE_DAYS:-30}

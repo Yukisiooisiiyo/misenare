@@ -306,16 +306,21 @@ seconds_until_next() {
   echo $((target - now))
 }
 
+# 輪。起動したときは「取り逃していないか」を見てから、次の時刻まで待つ。
+# 1回取るたびに、この台本を読み込み直して続きをする（resume）。台本が新しくなっていれば、輪の中身ごと新しくなる。
+# 続きのときは、取り逃しの確かめをしない（失敗した直後にすぐ取り直して、回り続けないように）
 run_loop() {
-  local newest age wait_for
+  local resume="${1:-}" newest age wait_for
   trap 'kill "${sleeper:-}" 2>/dev/null; exit 0' TERM INT
   mkdir -p "$BACKUP_DIR/db"
-  # 入れ替え（デプロイ）のたびに取り直さないよう、新しい退避があるときは次の時刻まで待つ
-  newest=$(newest_dump)
-  age=$((FRESH_HOURS * 3600 + 1))
-  [ -n "$newest" ] && age=$(( $(date -u +%s) - $(stat -c %Y "$newest") ))
-  if [ "$age" -gt $((FRESH_HOURS * 3600)) ]; then
-    bash "$0" once || say "退避に失敗しました（次の時刻にやり直します）"
+  if [ "$resume" != resume ]; then
+    # 入れ替え（デプロイ）や起こし直しのたびに取り直さないよう、新しい退避があるときは次の時刻まで待つ
+    newest=$(newest_dump)
+    age=$((FRESH_HOURS * 3600 + 1))
+    [ -n "$newest" ] && age=$(( $(date -u +%s) - $(stat -c %Y "$newest") ))
+    if [ "$age" -gt $((FRESH_HOURS * 3600)) ]; then
+      bash "$0" once || say "退避に失敗しました（次の時刻にやり直します）"
+    fi
   fi
   while true; do
     wait_for=$(seconds_until_next)
@@ -323,13 +328,15 @@ run_loop() {
     sleep "$wait_for" &
     sleeper=$!
     wait "$sleeper" || true
-    # 台本が新しくなっていても拾えるよう、毎回あらためて読み込んで走らせる
     bash "$0" once || say "退避に失敗しました（次の時刻にやり直します）"
+    # 台本が読める形なら、読み込み直して続ける。書き間違えた台本が置かれていたら、いまの輪のまま続ける
+    if bash -n "$0" 2>/dev/null; then exec bash "$0" loop resume; fi
+    say "台本を読み込み直せませんでした。いまの輪のまま続けます"
   done
 }
 
 case "${1:-}" in
-  loop) run_loop ;;
+  loop) run_loop "${2:-}" ;;
   once) run_once ;;
   status) status_line ;;
   list) dumps | while IFS= read -r f; do printf '%s\t%s バイト\n' "$(basename "$f")" "$(stat -c %s "$f")"; done ;;
