@@ -8,6 +8,7 @@
     "start": "tsx src/server.ts"
   },
   "dependencies": {
+    "@misenare/qr": "*",
     "@misenare/search-core": "*",
     "pg": "^8.13.0"
   },
