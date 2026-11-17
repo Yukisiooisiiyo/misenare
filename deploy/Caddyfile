@@ -18,11 +18,14 @@
 	# 接続元の IP は X-Forwarded-For の最後に積まれる。
 	# アプリは TRUST_PROXY=1 のとき、その最後（Caddy が見た接続元）を使う
 	header {
-		# 同じ出どころ以外に埋め込ませない（パスキーの画面を囲われないため）
-		X-Frame-Options "DENY"
-		Referrer-Policy "strict-origin-when-cross-origin"
-		# 1年間 https のみ（証明書が取れてから入れる。試す段では外してよい）
-		# Strict-Transport-Security "max-age=31536000"
+		# 同じ出どころ以外に埋め込ませない（パスキーの画面を囲われないため）。
+		# 先頭の ? は「アプリが付けていなければ足す」。画面のファイルにはアプリが自分で付けているので、
+		# ここでも付けると同じ見出しが2つになる（Referrer-Policy は値まで違っていた）。
+		# アプリが付けない応答（API、アプリが落ちているあいだの 502）には、ここで付く
+		?X-Frame-Options "DENY"
+		?Referrer-Policy "strict-origin-when-cross-origin"
+		# 1年間 https のみ。一度 https で開いたブラウザーは、次から http を試さない
+		Strict-Transport-Security "max-age=31536000"
 	}
 
 	log {

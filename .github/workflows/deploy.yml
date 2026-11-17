@@ -14,7 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to the VM over SSH
-        uses: appleboy/ssh-action@v1.0.3
+        # このアクションには、本番の台に入る鍵を渡している。タグ（v1.0.3）は付け替えられるので、中身の決まるコミットで指す。
+        # このコミットの Dockerfile は、実行するイメージもダイジェストで固定している（ghcr.io/appleboy/drone-ssh:1.7.3@sha256:…）。
+        # 版を上げるときは、新しいタグのコミットを確かめてから書き換える
+        uses: appleboy/ssh-action@029f5b4aeeeb58fdfe1410a5d17f967dacf36262 # v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
@@ -27,6 +30,11 @@ jobs:
             before=$(sudo git rev-parse HEAD)
             sudo git pull --ff-only
             cd deploy
+            # Caddyfile を変えたときは、入れ替える前に、この台の Caddy に読ませて確かめる。
+            # 書き間違いがあるまま作り直すと、入口（https）ごと落ちる。ここで止まれば、何も入れ替わらない
+            if ! sudo git diff --quiet "$before" HEAD -- deploy/Caddyfile; then
+              sudo docker run --rm -e MISENARE_HOST=check.example.com -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+            fi
             # 新しいイメージを先に作る（マイグレーションのファイルも取り込まれる）
             sudo docker compose build
             # DB を起動（すでに動いていれば何もしない）
