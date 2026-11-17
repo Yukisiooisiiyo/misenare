@@ -101,7 +101,7 @@ import {
 import { mailerFromEnv, noMailer, type Mailer } from '../mail/mailer.ts';
 import { contactRecipients, parseContact, submitContact } from '../domain/contact.ts';
 import {
-  addProvider, checkConnection, disableProvider, finishSso, listProviders, ssoSiteFromEnv, startSso,
+  addProvider, checkConnection, disableProvider, finishSso, listProviders, redeemSsoHandoff, ssoSiteFromEnv, startSso,
   verifyDomain, type SsoSite,
 } from '../domain/sso.ts';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -785,6 +785,8 @@ export interface AppDeps {
   userWriteRule?: RateRule;
   /** 問い合わせの知らせを出す口（試験で差し替える。既定は環境変数から） */
   contactMailer?: Mailer;
+  /** ログインリンクのメールを出す口（試験で差し替える。既定は環境変数から） */
+  loginMailer?: Mailer;
   /** 運営者のパスワード設定リンクを出す口（試験で差し替える。既定は環境変数から） */
   operatorMailer?: Mailer;
   /** 運営者の設定を読む先（試験で差し替える。既定は process.env） */
@@ -803,16 +805,27 @@ export function createApp(deps: AppDeps) {
   // 相手の IdP の設定と鍵は覚えておく（毎回取りに行くと、相手が落ちている間こちらも入れない）
   const directory = deps.oidc ?? new OidcDirectory();
 
+  // 応答を返したあとに続ける仕事（メールを送る、など）。応答を待たせないので、かかった時間から中身が漏れない。
+  // 失敗しても応答には出せないので、記録にだけ残す。試験は settled() で終わるのを待てる
+  const background = new Set<Promise<void>>();
+  const later = (name: string, work: Promise<unknown>): void => {
+    const p: Promise<void> = work.then(() => {}, (err) => {
+      logger.warn('background work failed', { name, error: err instanceof Error ? err.message : String(err) });
+    }).finally(() => { background.delete(p); });
+    background.add(p);
+  };
+
   /** 画面に戻す。断片（#）に載せたものはサーバーに送られないので、記録に残らない */
   const appRedirect = (fragment: string): Response =>
     new Response(null, { status: 302, headers: { location: `/app/#${fragment}` } });
   const tooMany = () => json({ error: 'rate_limited', message: '試行回数が多すぎます。しばらく待ってからもう一度お試しください。' }, 429);
 
   /** 数え取りは、設定した合言葉を知っている人だけに見せる（本番で合言葉が無ければ出さない） */
-  function metricsAllowed(req: Request, url: URL): boolean {
+  function metricsAllowed(req: Request): boolean {
     const token = process.env.METRICS_TOKEN;
     if (!token) return process.env.NODE_ENV !== 'production';
-    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? url.searchParams.get('token');
+    // 合言葉は見出し（Authorization）でだけ受ける。URL に付けると、途中の記録や履歴に残る
+    const given = req.headers.get('authorization')?.replace(/^Bearer\s+/i, '') ?? null;
     if (given === null) return false;
     // 1文字ずつ比べて途中で返す比較だと、かかる時間から合言葉の先頭が分かる
     const a = Buffer.from(given);
@@ -832,7 +845,7 @@ export function createApp(deps: AppDeps) {
       }
     }
     if (url.pathname === '/metrics') {
-      if (!metricsAllowed(req, url)) return json({ error: 'not_found' }, 404);
+      if (!metricsAllowed(req)) return json({ error: 'not_found' }, 404);
       return new Response(metrics.render(), { headers: { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' } });
     }
 
@@ -867,11 +880,12 @@ export function createApp(deps: AppDeps) {
       if (!(await limiter.take(clientKey(req, 'email-link'), RULES.emailLogin))) return tooMany();
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       const email = typeof b.email === 'string' ? b.email : '';
-      const mailer = mailerFromEnv();
+      const mailer = deps.loginMailer ?? mailerFromEnv();
       const appUrl = process.env.APP_URL ?? process.env.WEBAUTHN_ORIGINS?.split(',')[0]?.trim();
       if (mailer !== noMailer && appUrl) {
-        // 失敗やタイミングで存在が漏れないよう、結果は見ずに握りつぶす。
-        await sendEmailLogin(deps.database, mailer, appUrl, email).catch(() => {});
+        // **送り終わるのを待たずに返す。** 待つと、登録のあるアドレスのときだけ応答が遅くなり、
+        // 応答の中身を揃えていても、かかった時間から登録の有無が分かってしまう。失敗は記録にだけ残す
+        later('email-link', sendEmailLogin(deps.database, mailer, appUrl, email));
       }
       return json({ requested: true });
     }
@@ -880,7 +894,7 @@ export function createApp(deps: AppDeps) {
     if (url.pathname.startsWith('/operator/')) {
       const env = deps.operatorEnv ?? process.env;
       return handleOperator(
-        { database: deps.database, mailer: deps.operatorMailer ?? mailerFromEnv(), storage, limiter, appUrl: env.APP_URL ?? url.origin, env },
+        { database: deps.database, mailer: deps.operatorMailer ?? mailerFromEnv(), storage, limiter, appUrl: env.APP_URL ?? url.origin, env, later },
         req, url, tooMany,
       );
     }
@@ -942,7 +956,25 @@ export function createApp(deps: AppDeps) {
       const b = (await readJson<Record<string, unknown>>(req)) ?? {};
       if (typeof b.email !== 'string') throw new HttpError(400, 'メールアドレスが必要です');
       checkLength('email', b.email, MAX_EMAIL);
-      return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo }));
+      // ブラウザーが作った合言葉の指紋。戻りで鍵を受け取れるのは、これを預けたブラウザーだけ
+      if (typeof b.challenge !== 'string' || b.challenge.length > 64) throw new HttpError(400, '画面を読み込み直してから、もう一度お試しください');
+      return json(await startSso(deps.database, directory, site, { email: b.email, returnTo: b.returnTo, clientChallenge: b.challenge }));
+    }
+    // 戻ってきた画面が、引換の符丁と合言葉を持って鍵を受け取りに来る
+    if (url.pathname === '/auth/sso/finish' && req.method === 'POST') {
+      const ssoKey = clientKey(req, 'sso');
+      if (await limiter.blocked(ssoKey, RULES.ssoLogin)) return tooMany();
+      const b = (await readJson<Record<string, unknown>>(req)) ?? {};
+      if (typeof b.code !== 'string' || typeof b.verifier !== 'string' || b.code.length > 200 || b.verifier.length > 200) {
+        throw new HttpError(400, 'code と verifier が必要です');
+      }
+      try {
+        const done = await redeemSsoHandoff(deps.database, { code: b.code, verifier: b.verifier, deviceName: 'ブラウザ（会社アカウント）' });
+        return json({ sessionToken: done.sessionToken, returnTo: done.returnTo });
+      } catch (err) {
+        await limiter.take(ssoKey, RULES.ssoLogin);
+        throw err;
+      }
     }
     if (url.pathname === '/auth/sso/callback' && req.method === 'GET') {
       // start で1回数えているので、戻りは失敗だけ数える
@@ -956,11 +988,10 @@ export function createApp(deps: AppDeps) {
       if (denied !== null) return appRedirect(`sso-error=${encodeURIComponent(denied.slice(0, 200))}`);
       if (code === null || state === null) return appRedirect('sso-error=' + encodeURIComponent('戻り方が正しくありませんでした'));
       try {
-        const result = await finishSso(deps.database, directory, site, {
-          code, state, deviceName: 'ブラウザ（会社アカウント）',
-        });
+        const result = await finishSso(deps.database, directory, site, { code, state });
         const back = result.returnTo === null ? '' : `&to=${encodeURIComponent(result.returnTo)}`;
-        return appRedirect(`sso=${encodeURIComponent(result.sessionToken)}${back}`);
+        // URL に載せるのは引換の符丁だけ（端末セッションの鍵は載せない）
+        return appRedirect(`sso-code=${encodeURIComponent(result.handoffCode)}${back}`);
       } catch (err) {
         await limiter.take(ssoKey, RULES.ssoLogin);
         const detail = err instanceof Error ? err.message : String(err);
@@ -1032,7 +1063,7 @@ export function createApp(deps: AppDeps) {
     return await deps.database.withTenant(outcome.actor.tenantId, (db) => runHandler(db, outcome.actor, outcome.identity));
   }
 
-  return async function handle(req: Request): Promise<Response> {
+  async function handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const id = requestId(req);
     const startedAt = Date.now();
@@ -1075,5 +1106,9 @@ export function createApp(deps: AppDeps) {
     if (!headers.has('cache-control')) headers.set('cache-control', 'no-store');
     headers.set('x-content-type-options', 'nosniff');
     return new Response(response.body, { status: response.status, headers });
-  };
+  }
+
+  /** 応答のあとに続けている仕事が、全部終わるのを待つ（試験と、止める前の片付け用） */
+  const settled = async (): Promise<void> => { while (background.size > 0) await Promise.all([...background]); };
+  return Object.assign(handle, { settled });
 }

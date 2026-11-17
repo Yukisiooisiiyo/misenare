@@ -3,7 +3,10 @@ import { after, before, describe, it } from 'node:test';
 import type { Db } from '../src/db/db.ts';
 import type { Mail, Mailer } from '../src/mail/mailer.ts';
 import { acceptInvitation, inviteByEmail, sendEmailLogin, setMyEmail } from '../src/domain/users.ts';
-import { freshDatabase, manager, STORE_A, T, trusted, visitor } from './helpers.ts';
+import { createApp } from '../src/http/app.ts';
+import { SessionAuthenticator } from '../src/http/auth.ts';
+import { MemoryRateLimiter } from '../src/http/rateLimit.ts';
+import { freshDatabase, manager, STORE_A, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
 describe('メールでログインリンク／メアド登録', () => {
@@ -32,6 +35,36 @@ describe('メールでログインリンク／メアド登録', () => {
     const { mailer, sent } = collector();
     await sendEmailLogin(db, mailer, 'https://app.example.com', 'nobody@example.com');
     assert.equal(sent.length, 0);
+  });
+
+  it('ログインリンクの依頼は、メールを送り終わるのを待たずに、登録の有無によらず同じ応答を返す', async () => {
+    // いつまでも送り終わらない口。応答が送信を待つ作りだと、登録のあるアドレスのときだけ返ってこなくなる
+    // （＝かかった時間から、そのアドレスの登録の有無が外から分かる）
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sent: Mail[] = [];
+    const slow: Mailer = { send: async (m) => { await gate; sent.push(m); return true; } };
+    const app = createApp({ database: db, auth: new SessionAuthenticator(db), tokenizer, limiter: new MemoryRateLimiter(), loginMailer: slow });
+    const before = process.env.APP_URL;
+    process.env.APP_URL = 'https://app.example.com';
+    try {
+      const ask = (email: string) => app(new Request('http://localhost/auth/email-link', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+      }));
+      const known = await ask('baito@example.com');
+      const unknown = await ask('nobody@example.com');
+      assert.equal(known.status, 200);
+      assert.deepEqual(await known.json(), { requested: true });
+      assert.deepEqual(await unknown.json(), { requested: true });
+      assert.equal(sent.length, 0, '応答した時点では、まだ送り終わっていない');
+      release();
+      await app.settled();
+      assert.equal(sent.length, 1, '登録のあるアドレスにだけ、あとから届く');
+      assert.deepEqual(sent[0]!.to, ['baito@example.com']);
+    } finally {
+      if (before === undefined) delete process.env.APP_URL;
+      else process.env.APP_URL = before;
+    }
   });
 
   it('同じメアドは社内の別アカウントには登録できない', async () => {

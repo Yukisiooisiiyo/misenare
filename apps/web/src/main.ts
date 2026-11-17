@@ -1,7 +1,7 @@
 // ミセナレ Web 版。スマホのブラウザで「探す・書く・バーコード」を使う。
 // 画面は URL のハッシュで切り替える：#/home（#/search?q= も同じ画面） #/k/<id> #/write #/edit/<id> #/scan #/memo #/settings #/manage #/device
 
-import { api, ApiError, fetchDictionary, onUnauthorized, session, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
+import { api, ApiError, fetchDictionary, onUnauthorized, session, ssoSecret, type BookmarkItem, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
 import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
@@ -21,15 +21,10 @@ let dict: LocalDictionary | null = null;
 async function boot(): Promise<void> {
   // 招待のQRコードは /app/#invite=<token> を開く
   const invite = /^#invite=(.+)$/.exec(location.hash);
-  if (invite) return acceptInvite(decodeURIComponent(invite[1]!));
-  // 会社アカウントから戻ってきたところ。#sso=<token>[&to=#/...]
-  const sso = /^#sso=([^&]+)(?:&to=(.+))?$/.exec(location.hash);
-  if (sso) {
-    session.token = decodeURIComponent(sso[1]!);
-    const to = sso[2] ? decodeURIComponent(sso[2]) : '#/home';
-    history.replaceState(null, '', `${location.pathname}${to.startsWith('#/') ? to : '#/home'}`);
-    return boot();
-  }
+  if (invite) return receiveInvite(decodeURIComponent(invite[1]!));
+  // 会社アカウントから戻ってきたところ。#sso-code=<引換の符丁>[&to=#/...]
+  const sso = /^#sso-code=([^&]+)(?:&to=(.+))?$/.exec(location.hash);
+  if (sso) return finishSso(decodeURIComponent(sso[1]!), sso[2] ? decodeURIComponent(sso[2]) : '#/home');
   const ssoError = /^#sso-error=(.+)$/.exec(location.hash);
   if (ssoError) {
     history.replaceState(null, '', location.pathname);
@@ -87,6 +82,57 @@ const isTrusted = () => me !== null && (me.trustLevel === 'trusted' || me.adminS
 const isAdmin = () => me !== null && me.adminScope !== 'none';
 
 // --- 招待の受け取り ------------------------------------------------------------
+
+/**
+ * 招待のリンクで開かれたとき。**この端末がすでに誰かとして入っているなら、受け取る前に確かめる。**
+ *
+ * 招待を受け取ると、この端末は招待された人のアカウントに入れ替わる。確かめずに受け取ると、
+ * 送られてきたリンクを開いただけで、いまのログインが黙って別のアカウントに替わってしまう。
+ */
+async function receiveInvite(token: string): Promise<void> {
+  if (!session.token) return acceptInvite(token);
+  let current: Me;
+  try {
+    current = await api<Me>('GET', '/me');
+  } catch {
+    // いまの登録がもう使えない（切れている・通信できない）なら、確かめる相手がいない。そのまま受け取る
+    return acceptInvite(token);
+  }
+  const stay = (): void => {
+    history.replaceState(null, '', `${location.pathname}#/home`);
+    void boot();
+  };
+  shell(null, h('section', { class: 'page welcome' },
+    h('h1', {}, 'この端末を切り替えますか'),
+    h('p', {}, `この端末は、いま「${current.name}」さんとして使っています。`),
+    h('p', {}, '開いた招待を受け取ると、この端末は招待された人のアカウントに切り替わります。心当たりのないリンクなら、切り替えないでください。'),
+    h('button', { type: 'button', class: 'primary block', onclick: stay }, `このまま「${current.name}」さんで使う`),
+    h('button', { type: 'button', class: 'secondary block', onclick: () => { void acceptInvite(token); } }, '招待を受け取って切り替える'),
+  ));
+}
+
+/**
+ * 会社のアカウントから戻ってきたところ。引換の符丁と、入口でこの端末に控えた合言葉を持って、鍵を受け取る。
+ * 合言葉が無い（＝この端末で始めていない）なら受け取らない。よそから渡された戻りの URL では入れ替わらない。
+ */
+async function finishSso(code: string, to: string): Promise<void> {
+  history.replaceState(null, '', location.pathname);
+  const verifier = ssoSecret.take();
+  if (verifier === null) {
+    if (session.token) return boot(); // すでに入っている端末で開かれただけ。いまのログインのまま続ける
+    return renderWelcome('会社のアカウントでのログインは、始めたのと同じブラウザーで終えてください。もう一度お試しください。');
+  }
+  shell(null, h('section', { class: 'page center' }, h('p', {}, 'ログインしています…')));
+  try {
+    const r = await api<{ sessionToken: string }>('POST', '/auth/sso/finish', { code, verifier });
+    session.token = r.sessionToken;
+    history.replaceState(null, '', `${location.pathname}${to.startsWith('#/') ? to : '#/home'}`);
+    await boot();
+  } catch (e) {
+    if (session.token) return boot();
+    renderWelcome(e instanceof Error ? e.message : String(e));
+  }
+}
 
 /** 招待の受け取り中。コードの貼り付け・QR・リンクのどこから来ても、同時に1回だけ走らせる */
 let accepting = false;
@@ -152,7 +198,9 @@ function renderWelcome(error?: string): void {
     if (value === '') { problem.textContent = '会社のメールアドレスを入れてください。'; problem.hidden = false; return; }
     email.disabled = true;
     try {
-      const r = await api<{ authorizeUrl: string }>('POST', '/auth/sso/start', { email: value });
+      // 戻ってきたときに鍵を受け取れるのは、ここで合言葉を控えたこの端末だけ
+      const challenge = await ssoSecret.create();
+      const r = await api<{ authorizeUrl: string }>('POST', '/auth/sso/start', { email: value, challenge });
       leaving = true;
       // 「戻る」で戻ってきたとき（ページが丸ごと復元される）は、もう一度押せるようにする
       window.addEventListener('pageshow', () => { leaving = false; }, { once: true });

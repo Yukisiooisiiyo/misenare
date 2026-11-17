@@ -9,7 +9,8 @@
 //   1. 会社のメールアドレスを打つ → ドメインから相手の IdP を決める
 //   2. こちらで乱数（state・nonce・PKCE）を作って覚え、相手の画面へ送る
 //   3. 相手が戻してきた引換券を ID トークンに替え、署名と中身を確かめる
-//   4. こちらの利用者と結びつけ、端末セッションを渡す
+//   4. こちらの利用者と結びつけ、**始めたブラウザーにだけ**端末セッションを渡す
+//      （戻りの URL に載せるのは引換の符丁だけ。鍵は、入口で作った合言葉を持つブラウザーが受け取りに来る）
 //
 // 「誰か」を決める手がかりは2つある。**subject（sub）を鍵にする。**
 // メールアドレスは変わる（結婚・異動・社名変更）が、sub は相手が変えない印。
@@ -20,12 +21,17 @@ import { maybeOne, one, type Database, type Db } from '../db/db.ts';
 import { SecretError, secretBoxFromEnv, type SecretBox } from '../crypto/secretBox.ts';
 import { recordRequest } from './accessRequests.ts';
 import { assert, DomainError, type Actor } from './actor.ts';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { hashToken, issueToken } from './users.ts';
 import { createPkce, OidcError, randomToken, safeReturnTo, type OidcDirectory } from '../auth/oidc.ts';
 import { verifyIdToken, type IdTokenClaims } from '../auth/jwt.ts';
 
 /** 行きと帰りをつなぐ覚えの寿命。相手の画面で手間取る人がいるので少し長めに取る */
 export const STATE_TTL_MS = 10 * 60_000;
+/** 戻ってきてから、ブラウザーが鍵を受け取りに来るまでの寿命。画面が開いてすぐ取りに来るので短くてよい */
+export const HANDOFF_TTL_MS = 2 * 60_000;
+/** 入口でブラウザーが作る合言葉の指紋（SHA-256 を base64url にしたもの）の形 */
+const CLIENT_CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 
 type Raw = (sql: string, params?: readonly unknown[]) => Promise<unknown[]>;
 
@@ -108,10 +114,14 @@ export interface StartResult {
  */
 export async function startSso(
   database: Database, directory: OidcDirectory, site: SsoSite,
-  input: { email: string; returnTo?: unknown },
+  input: { email: string; returnTo?: unknown; clientChallenge: string },
 ): Promise<StartResult> {
   const domain = emailDomain(input.email);
   if (!domain) throw new DomainError('invalid', 'メールアドレスの形が違います');
+  // 戻りで鍵を受け取れるのは、ここで指紋を預けたブラウザーだけ（finishSso と redeemSsoHandoff）
+  if (typeof input.clientChallenge !== 'string' || !CLIENT_CHALLENGE.test(input.clientChallenge)) {
+    throw new DomainError('invalid', '画面を読み込み直してから、もう一度お試しください');
+  }
 
   const raw: Raw = (sql, params) => database.raw(sql, params);
   // **確かめ済みのドメインだけを使う。** 確かめていないドメインを使うと、
@@ -138,9 +148,9 @@ export async function startSso(
   const state = randomToken();
   const nonce = randomToken();
   await raw(
-    `INSERT INTO sso_states (state, provider_id, tenant_id, code_verifier, nonce, return_to, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, now() + make_interval(secs => $7))`,
-    [state, provider.id, provider.tenant_id, pkce.verifier, nonce, safeReturnTo(input.returnTo), STATE_TTL_MS / 1000],
+    `INSERT INTO sso_states (state, provider_id, tenant_id, code_verifier, nonce, return_to, client_challenge, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, now() + make_interval(secs => $8))`,
+    [state, provider.id, provider.tenant_id, pkce.verifier, nonce, safeReturnTo(input.returnTo), input.clientChallenge, STATE_TTL_MS / 1000],
   );
 
   const url = new URL(discovery.authorization_endpoint);
@@ -160,31 +170,46 @@ export async function startSso(
 }
 
 export interface FinishResult {
-  sessionToken: string;
+  /** 引換の符丁。始めたブラウザーが、これと合言葉を持って鍵を受け取りに来る（redeemSsoHandoff） */
+  handoffCode: string;
   userId: string;
   /** 入った後に戻す画面。無ければホーム */
   returnTo: string | null;
 }
 
+export interface RedeemResult {
+  sessionToken: string;
+  userId: string;
+  returnTo: string | null;
+}
+
 /**
- * 相手から戻ってきたところ。引換券を確かめて、端末セッションを渡す。
+ * 相手から戻ってきたところ。引換券を確かめて、**引換の符丁**を返す（端末セッションはまだ作らない）。
+ *
+ * ここで鍵を作って URL に載せると、その URL を開いた端末がそのまま入れてしまう
+ * （自分のアカウントの戻り URL を人に踏ませて、相手の端末を自分のアカウントに入れ替える、ができる）。
+ * 鍵は、入口で合言葉を作ったブラウザーが redeemSsoHandoff で受け取る。
  *
  * 覚え（state）は1回しか使えない。取り出したら消す。
  */
 export async function finishSso(
   database: Database, directory: OidcDirectory, site: SsoSite,
-  input: { code: string; state: string; deviceName?: string },
+  input: { code: string; state: string },
 ): Promise<FinishResult> {
   const raw: Raw = (sql, params) => database.raw(sql, params);
   const memo = await maybeOneRaw<{
     provider_id: string; tenant_id: string; code_verifier: string; nonce: string; return_to: string | null;
+    client_challenge: string | null;
   }>(
     raw,
     `DELETE FROM sso_states WHERE state = $1 AND expires_at > now()
-      RETURNING provider_id, tenant_id, code_verifier, nonce, return_to`,
+      RETURNING provider_id, tenant_id, code_verifier, nonce, return_to, client_challenge`,
     [input.state],
   );
   if (!memo) throw new DomainError('conflict', '時間が経ちすぎました。もう一度やり直してください');
+  // 指紋の無い覚え（この仕組みを入れる前に始めたもの）は、受け取り手を確かめられないので通さない
+  const clientChallenge = memo.client_challenge;
+  if (clientChallenge === null) throw new DomainError('conflict', 'もう一度やり直してください');
 
   const provider = await database.withTenant(memo.tenant_id, (db) => loadProvider(db, memo.provider_id));
 
@@ -225,16 +250,18 @@ export async function finishSso(
     // （パスキーで複製を止めるときと同じ理由。試験では「申請を出しました」と
     //  出るのに一覧が空、という形で出た）
     if (resolved.kind === 'request') return resolved;
-    const sessionToken = issueToken(memo.tenant_id);
-    await db.query(
-      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
-      [memo.tenant_id, resolved.userId, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
-    );
-    return { kind: 'session' as const, sessionToken, userId: resolved.userId };
+    return { kind: 'session' as const, userId: resolved.userId };
   });
 
   if (outcome.kind === 'session') {
-    return { sessionToken: outcome.sessionToken, userId: outcome.userId, returnTo: memo.return_to };
+    const handoffCode = randomToken();
+    await raw(`DELETE FROM sso_handoffs WHERE expires_at < now()`);
+    await raw(
+      `INSERT INTO sso_handoffs (code_hash, tenant_id, user_id, client_challenge, return_to, expires_at)
+       VALUES ($1, $2, $3, $4, $5, now() + make_interval(secs => $6))`,
+      [hashToken(handoffCode), memo.tenant_id, outcome.userId, clientChallenge, memo.return_to, HANDOFF_TTL_MS / 1000],
+    );
+    return { handoffCode, userId: outcome.userId, returnTo: memo.return_to };
   }
 
   const recorded = await database.withTenant(memo.tenant_id, (db) => recordRequest(db, {
@@ -250,6 +277,39 @@ export async function finishSso(
   throw new DomainError('forbidden', recorded.kind === 'created'
     ? '利用の申請を出しました。店長が承認すると使えるようになります'
     : 'まだ承認されていません。店長にご確認ください');
+}
+
+/**
+ * 引換の符丁を、端末セッションに替える。**入口で合言葉を作ったブラウザーだけ**が替えられる。
+ *
+ * 符丁は1回しか使えない。合言葉が合わなくても消す（当て直しをさせない）。
+ */
+export async function redeemSsoHandoff(
+  database: Database, input: { code: string; verifier: string; deviceName?: string },
+): Promise<RedeemResult> {
+  const raw: Raw = (sql, params) => database.raw(sql, params);
+  const row = await maybeOneRaw<{ tenant_id: string; user_id: string; client_challenge: string; return_to: string | null }>(
+    raw,
+    `DELETE FROM sso_handoffs WHERE code_hash = $1 AND expires_at > now()
+      RETURNING tenant_id, user_id, client_challenge, return_to`,
+    [hashToken(String(input.code ?? ''))],
+  );
+  if (!row) throw new DomainError('conflict', '時間が経ちすぎました。もう一度やり直してください');
+  const given = Buffer.from(createHash('sha256').update(String(input.verifier ?? '')).digest('base64url'));
+  const want = Buffer.from(row.client_challenge);
+  if (given.length !== want.length || !timingSafeEqual(given, want)) {
+    throw new DomainError('forbidden', '会社のアカウントでのログインは、始めたのと同じブラウザーで終えてください。もう一度お試しください');
+  }
+  return database.withTenant(row.tenant_id, async (db) => {
+    const u = await maybeOne<{ status: string }>(db, `SELECT status FROM users WHERE id = $1`, [row.user_id]);
+    assert(u?.status === 'active', 'forbidden', 'この利用者は無効化されています');
+    const sessionToken = issueToken(row.tenant_id);
+    await db.query(
+      `INSERT INTO sessions (tenant_id, user_id, token_hash, device_name) VALUES ($1, $2, $3, $4)`,
+      [row.tenant_id, row.user_id, hashToken(sessionToken), input.deviceName?.slice(0, 60) ?? null],
+    );
+    return { sessionToken, userId: row.user_id, returnTo: row.return_to };
+  });
 }
 
 /**
@@ -518,6 +578,7 @@ export async function disableProvider(db: Db, actor: Actor, id: string): Promise
 /** 期限切れの覚えを捨てる（夜間バッチ） */
 export async function sweepSsoStates(raw: Raw): Promise<number> {
   const rows = await raw(`DELETE FROM sso_states WHERE expires_at < now() RETURNING state`);
+  await raw(`DELETE FROM sso_handoffs WHERE expires_at < now()`);
   return rows.length;
 }
 

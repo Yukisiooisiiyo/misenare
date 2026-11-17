@@ -160,7 +160,7 @@ describe('サーバーから見たとき', () => {
       process.env.METRICS_TOKEN = 'secret-token';
       assert.equal((await call('GET', '/metrics')).status, 404, '合言葉が違えば、あることも知らせない');
       assert.equal((await call('GET', '/metrics', { authorization: 'Bearer secret-token' })).status, 200);
-      assert.equal((await call('GET', '/metrics?token=secret-token')).status, 200);
+      assert.equal((await call('GET', '/metrics?token=secret-token')).status, 404, 'URL に付けた合言葉は受けない（記録や履歴に残るため）');
     } finally {
       if (before === undefined) delete process.env.METRICS_TOKEN;
       else process.env.METRICS_TOKEN = before;

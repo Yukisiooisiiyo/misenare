@@ -4,7 +4,16 @@
 // 確かめたいのは**こちらの確かめ方**なので、相手の振る舞いを自分で作る。
 // 署名は本物の鍵で作るので、検証の筋道は本番と同じものが走る。
 
-import { createSign, generateKeyPairSync } from 'node:crypto';
+import { createHash, createSign, generateKeyPairSync } from 'node:crypto';
+
+/**
+ * 試験の中の「ブラウザー」。入口で合言葉を作って指紋を預け、戻りで合言葉そのものを出す。
+ * 本番では画面（apps/web/src/api.ts の ssoSecret）が同じことをする。
+ */
+export const BROWSER = (() => {
+  const verifier = 'test-browser-verifier-0123456789abcdefghijk';
+  return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
+})();
 
 export interface FakeIdp {
   issuer: string;

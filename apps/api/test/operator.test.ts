@@ -23,7 +23,7 @@ const env = { OPERATOR_EMAILS: `${OP}, second@tsugigami.example`, APP_URL: 'http
 
 describe('運営者の管理', () => {
   let db: TestDatabase;
-  let app: (req: Request) => Promise<Response>;
+  let app: ((req: Request) => Promise<Response>) & { settled(): Promise<void> };
   let userApp: (req: Request) => Promise<Response>;
   const sent: Mail[] = [];
   const removed: string[] = [];
@@ -39,11 +39,17 @@ describe('運営者の管理', () => {
   });
   after(async () => { await db.close(); });
 
-  const call = (method: string, path: string, body?: unknown, auth: string | null = token, from?: string) => app(new Request(`https://app.tsugigami.example/operator${path}`, {
-    method,
-    headers: { 'content-type': 'application/json', 'x-misenare-client-ip': from ?? `198.51.100.${++ip % 250}`, ...(auth ? { authorization: `Bearer ${auth}` } : {}) },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }));
+  // 設定リンクのメールは応答のあとに送る（応答の速さで運営者のアドレスかどうかを知らせないため）。
+  // 試験では、送り終わるのを待ってから結果を見る
+  const call = async (method: string, path: string, body?: unknown, auth: string | null = token, from?: string) => {
+    const res = await app(new Request(`https://app.tsugigami.example/operator${path}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'x-misenare-client-ip': from ?? `198.51.100.${++ip % 250}`, ...(auth ? { authorization: `Bearer ${auth}` } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }));
+    await app.settled();
+    return res;
+  };
   const asManager = (path: string) => userApp(new Request(`https://app.tsugigami.example${path}`, { headers: { 'x-dev-tenant-id': T, 'x-dev-user-id': manager.userId } }));
   const setupToken = (): string => decodeURIComponent(/#setup=(\S+)/.exec(sent.at(-1)!.text)![1]!);
 

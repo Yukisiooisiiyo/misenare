@@ -39,6 +39,11 @@ export function sameHash(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** 人の名前として受け取れるか。メールの本文に入るので、リンクに見える形と制御文字は通さない */
+export function looksLikePersonName(name: string): boolean {
+  return !/[\u0000-\u001f\u007f]/.test(name) && !/:\/\/|https?:|www\.|[\w-]+\.[a-z]{2,}\//i.test(name);
+}
+
 export interface InvitationInput {
   storeId: string | null;
   /** 新しい利用者の表示名（userId を指定しないとき必須） */
@@ -79,6 +84,8 @@ export async function createInvitation(db: Db, actor: Actor, input: InvitationIn
   } else {
     assert(typeof input.name === 'string' && input.name.trim().length > 0 && input.name.length <= 40, 'invalid', '名前を1〜40文字で入力してください');
   }
+  // 名前は招待メールの本文の頭にそのまま入る。リンクや改行を混ぜて、別の用件のメールに仕立てさせない
+  if (typeof input.name === 'string') assert(looksLikePersonName(input.name), 'invalid', '名前に URL や改行は入れられません');
   // userId を指定したときも name は記録に残るので、あれば同じ上限で止める
   if (input.userId && input.name !== undefined) assert(input.name.length <= 40, 'invalid', '名前は40文字以内にしてください');
 
@@ -248,11 +255,23 @@ export async function acceptInvitation(db: Db, tenantId: string, token: string, 
     );
   }
   // 招待メールで来た人は、その宛先を本人のメアドとして控える（復帰のログインリンク送付に使う）。
-  // 既にメアドがある人は上書きしない。同じメアドが別の人に使われていれば（一意制約）、黙って見送る。
+  // 既にメアドがある人は上書きしない。
   if (inv.email) {
-    try {
-      await db.query(`UPDATE users SET email = $2 WHERE id = $1 AND email IS NULL`, [userId, inv.email]);
-    } catch { /* 一意制約などは紐付けを諦めるだけ。ログインは止めない */ }
+    // 同じアドレスを持っているのが、もう使えない（無効化された）アカウントなら、そちらから外す。
+    // 端末をなくした人を新しい人として招き直したとき、メールでの入り直しが古いほうへ向かないように
+    await db.query(
+      `UPDATE users SET email = NULL WHERE lower(email) = lower($2) AND id <> $1 AND status = 'disabled'`,
+      [userId, inv.email],
+    );
+    // ほかに使っている人がいれば、黙って見送る。
+    // **一意制約に当ててから握りつぶす、はしない**：PostgreSQL は失敗した時点で取引を中断するので、
+    // 例外を握っても後ろの文が全部失敗し、招待の受け取りそのものが 500 になる
+    await db.query(
+      `UPDATE users SET email = $2
+        WHERE id = $1 AND email IS NULL
+          AND NOT EXISTS (SELECT 1 FROM users o WHERE lower(o.email) = lower($2) AND o.id <> $1)`,
+      [userId, inv.email],
+    );
   }
   await db.query(`UPDATE invitations SET used_at = now(), used_by = $2 WHERE id = $1`, [inv.id, userId]);
 
@@ -286,13 +305,22 @@ export async function revokeSession(db: Db, actor: Actor, sessionId: string) {
   await db.query(`UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL`, [sessionId]);
 }
 
-/** その利用者を管理できるか：本部は全員、店長は自店舗に所属する人（本部の人は除く） */
+/**
+ * その利用者を管理できるか：本部は全員、店長は自店舗に所属する**一般のスタッフ**だけ。
+ *
+ * 店長・本部の人を止めたり、端末を切ったりできるのは本部だけにする。
+ * 店長同士で相手を止められると、同じ店の店長が互いを締め出せる（招待の側は、すでに店長・本部の鍵を本部だけにしている）。
+ */
 async function assertCanManageUser(db: Db, actor: Actor, userId: string) {
-  if (actor.adminScope === 'tenant') return;
-  assert(actor.adminScope === 'store', 'forbidden', '利用者を管理できるのは administrator のみです');
   const target = await maybeOne<{ admin_scope: AdminScope }>(db, `SELECT admin_scope FROM users WHERE id = $1`, [userId]);
+  if (actor.adminScope === 'tenant') {
+    assert(target !== undefined, 'not_found', '利用者が見つかりません');
+    return;
+  }
+  assert(actor.adminScope === 'store', 'forbidden', '利用者を管理できるのは administrator のみです');
   assert(target !== undefined, 'not_found', '利用者が見つかりません');
   assert(target.admin_scope !== 'tenant', 'forbidden', '本部の利用者は管理できません');
+  assert(target.admin_scope === 'none', 'forbidden', '店長の利用者を管理できるのは本部のみです');
   const m = await maybeOne(db, `SELECT 1 FROM memberships WHERE user_id = $1 AND store_id = ANY($2::uuid[])`, [userId, actor.storeIds]);
   assert(m !== undefined, 'forbidden', '自店舗の利用者ではありません');
 }

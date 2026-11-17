@@ -10,9 +10,9 @@ import { DomainError } from '../src/domain/actor.ts';
 import { OidcDirectory } from '../src/auth/oidc.ts';
 import { approveRequest, getNotifySettings, listRequests, pendingDigest, rejectRequest, requestBadge, setNotifyEmail } from '../src/domain/accessRequests.ts';
 import { runNightly } from '../src/batch/nightly.ts';
-import { addProvider, finishSso, startSso } from '../src/domain/sso.ts';
+import { addProvider, finishSso, redeemSsoHandoff, startSso } from '../src/domain/sso.ts';
 import { verifySession } from '../src/domain/users.ts';
-import { claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
+import { BROWSER, claimsFor, fakeIdp, type FakeIdp } from './ssoHelper.ts';
 import { freshDatabase, hq, manager, OTHER_T, otherTenant, STORE_A, STORE_B, T, tokenizer, trusted, visitor } from './helpers.ts';
 import type { TestDatabase } from './helpers.ts';
 
@@ -55,10 +55,11 @@ async function setup() {
 
 /** 会社のアカウントで入ろうとする（登録が無いので弾かれる） */
 async function knock(over: Record<string, unknown> = {}) {
-  const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp' });
+  const start = await startSso(db, directory, SITE, { email: 'tanaka@kdenki.example.co.jp', clientChallenge: BROWSER.challenge });
   const url = new URL(start.authorizeUrl);
   idp.issue(claimsFor(idp, { nonce: url.searchParams.get('nonce')!, ...over }));
-  return finishSso(db, directory, SITE, { code: 'c', state: url.searchParams.get('state')! });
+  const back = await finishSso(db, directory, SITE, { code: 'c', state: url.searchParams.get('state')! });
+  return redeemSsoHandoff(db, { code: back.handoffCode, verifier: BROWSER.verifier });
 }
 
 describe('利用の申請', () => {
