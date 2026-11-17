@@ -67,7 +67,8 @@ export function renderMemos(container: HTMLElement): void {
           }, undefined, load)));
     };
     const edit = (): void => {
-      const area = h('textarea', { rows: 3, maxlength: 2000, value: m.body, 'aria-label': 'メモを直す' });
+      const area = h('textarea', { rows: 3, maxlength: 2000, 'aria-label': 'メモを直す' });
+      area.value = m.body; // textarea の中身は、属性ではなく値で入れる（value 属性では、空の欄が出る）
       const form = h('form', { class: 'write memo-edit' }, area,
         h('div', { class: 'row-actions' },
           h('button', { type: 'submit', class: 'primary small' }, '保存'),

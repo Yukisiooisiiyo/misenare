@@ -861,6 +861,7 @@ function renderNoticesTab(): void {
     storeId: storeId(),
     userName: me!.name,
     isTrusted: isTrusted(),
+    isHq: me!.adminScope === 'tenant',
     onBadges: () => void refreshBadges(),
   });
 }

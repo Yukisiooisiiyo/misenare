@@ -4,7 +4,7 @@
 // 引き継ぎ … その日のメモ。承認はなく、誰でも書けて誰でも片付けられる
 
 import { api } from './api.ts';
-import { clear, dayLabel, h, relativeDate, submitOnce, toast } from './dom.ts';
+import { clear, dayLabel, h, parseDate, relativeDate, submitOnce, toast } from './dom.ts';
 import { action, confirmAction, countedList } from './manage.ts';
 
 export interface Notice {
@@ -21,7 +21,15 @@ export interface Notice {
   readAt: string | null;
   ackedAt: string | null;
   pendingAcks?: number;
+  /** これから出る・いま出ている・掲示が終わった（サーバーの時計で決まる） */
+  state?: 'scheduled' | 'active' | 'ended';
+  /** 自分が、直す・掲示をやめる・消すことができるか */
+  canEdit?: boolean;
+  /** 自分が、確認した人・まだの人の一覧を見られるか */
+  canSeeReaders?: boolean;
 }
+
+interface Reader { id: string; name: string; read_at: string | null; acked_at: string | null }
 
 export interface Handover {
   id: string;
@@ -59,24 +67,69 @@ function paragraphs(text: string): HTMLElement[] {
   return text.split(/\n{2,}/).map((p) => h('p', {}, ...p.split('\n').flatMap((line, i) => (i === 0 ? [line] : [h('br', {}), line]))));
 }
 
-function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HTMLElement {
-  const card = h('article', { class: `notice${n.priority === 'important' ? ' notice-important' : ''}${n.readAt ? '' : ' notice-unread'}` });
+/** 日付の欄（<input type="date">）に入れる形。端末の暦で読む */
+function dateValue(iso: string | null): string {
+  const d = parseDate(iso);
+  if (!d) return '';
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+// 日付だけを選んでもらい、「いつから」はその日の始まり、「いつまで」はその日の終わりにする
+const startOfDay = (date: string): string => new Date(`${date}T00:00:00`).toISOString();
+const endOfDay = (date: string): string => new Date(`${date}T23:59:59`).toISOString();
+
+/** 確認した人・まだの人（開いたときに読む） */
+function readersPanel(n: Notice): HTMLElement {
+  const box = h('div', { class: 'notice-readers-body' });
+  const panel = h('details', { class: 'notice-readers' }, h('summary', {}, '確認した人・まだの人'), box);
+  const names = (list: Reader[], note: (r: Reader) => string): string => list.map((r) => `${r.name}${note(r)}`).join('、');
+  panel.addEventListener('toggle', () => {
+    if (!panel.open) return;
+    clear(box);
+    box.append(h('p', { class: 'hint' }, '読み込んでいます…'));
+    void api<Reader[]>('GET', `/notices/${n.id}/readers`).then((rows) => {
+      const pending = rows.filter((r) => !r.acked_at);
+      const done = rows.filter((r) => r.acked_at);
+      clear(box);
+      box.append(
+        h('p', {}, h('b', {}, `まだの人（${pending.length}人）`), pending.length > 0 ? `　${names(pending, (r) => (r.read_at ? '（読んだ）' : ''))}` : ''),
+        h('p', {}, h('b', {}, `確認した人（${done.length}人）`), done.length > 0 ? `　${names(done, () => '')}` : ''));
+    }).catch((e) => {
+      clear(box);
+      box.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    });
+  });
+  return panel;
+}
+
+interface CardContext {
+  /** 「読んだ」「確認した」で、印（未読の数）を取り直す */
+  onChange: () => void;
+  /** 直した・掲示をやめた・消したあとに、一覧を取り直す */
+  reload: () => void;
+}
+
+function noticeCard(n: Notice, ctx: CardContext): HTMLElement {
+  const state = n.state ?? 'active';
+  const card = h('article', { class: `notice${n.priority === 'important' ? ' notice-important' : ''}${n.readAt || state !== 'active' ? '' : ' notice-unread'}` });
   const draw = () => {
     clear(card);
     card.append(
       h('div', { class: 'notice-head' },
         n.priority === 'important' ? h('span', { class: 'notice-badge' }, '重要') : null,
         n.storeId === null ? h('span', { class: 'notice-badge notice-all' }, '全店') : null,
-        !n.readAt ? h('span', { class: 'notice-badge notice-new' }, '未読') : null,
+        state === 'scheduled' ? h('span', { class: 'notice-badge' }, 'これから') : null,
+        state === 'active' && !n.readAt ? h('span', { class: 'notice-badge notice-new' }, '未読') : null,
         h('h3', {}, n.title)),
       ...paragraphs(n.body),
       h('p', { class: 'hint' },
         // 三項演算子は + より後に決まるので、括弧で先に閉じる。括弧が無いと、人が出した連絡では
         // 後ろの「〜まで」「未確認 N人」が丸ごと捨てられる
         (n.createdBy ? `${n.createdBy}さん・${relativeDate(n.createdAt)}` : `ツギガミから・${relativeDate(n.createdAt)}`)
-        + (n.endsAt ? `・${dayLabel(n.endsAt)}まで` : '')
-        + (canSeeReaders && n.pendingAcks !== undefined ? `・未確認 ${n.pendingAcks}人` : '')),
-      ...(n.requiresAck
+        + (state === 'scheduled' ? `・${dayLabel(n.startsAt)}から出ます` : '')
+        + (n.endsAt ? (state === 'ended' ? `・${dayLabel(n.endsAt)}に掲示を終えました` : `・${dayLabel(n.endsAt)}まで`) : '')
+        + (n.canSeeReaders && n.pendingAcks !== undefined ? `・未確認 ${n.pendingAcks}人` : '')),
+      ...(n.requiresAck && state === 'active'
         ? [n.ackedAt
           ? h('p', { class: 'notice-acked' }, `${relativeDate(n.ackedAt)}に確認しました`)
           : action('確認しました', 'primary', async () => {
@@ -85,15 +138,83 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
               n.readAt = n.readAt ?? r.ackedAt;
               toast('確認しました');
               draw();
-              onChange();
+              ctx.onChange();
             })]
         : []),
+      ...(n.requiresAck && n.canSeeReaders ? [readersPanel(n)] : []),
+      // 消す・掲示をやめるは、直す画面の中にだけ置く（読んでいるだけのときに、誤って押さないように）
+      ...(n.canEdit ? [h('p', { class: 'notice-tools' }, h('button', { type: 'button', class: 'secondary small', onclick: () => edit() }, '直す'))] : []),
     );
+  };
+
+  const edit = () => {
+    // 同じ画面に連絡が何件も並ぶので、欄の名前（id）は連絡ごとに分ける
+    const id = (name: string): string => `n${name}-${n.id}`;
+    const title = h('input', { id: id('title'), type: 'text', maxlength: 100, value: n.title });
+    const body = h('textarea', { id: id('body'), rows: 4, maxlength: 2000 });
+    body.value = n.body; // textarea の中身は、属性ではなく値で入れる
+    const important = h('input', { type: 'checkbox', checked: n.priority === 'important' });
+    const ack = h('input', { type: 'checkbox', checked: n.requiresAck });
+    const initialFrom = dateValue(n.startsAt);
+    const initialUntil = dateValue(n.endsAt);
+    const from = h('input', { id: id('from'), type: 'date', value: initialFrom });
+    const until = h('input', { id: id('until'), type: 'date', value: initialUntil });
+    const message = h('p', { class: 'error', role: 'alert', hidden: true });
+    const fail = (e: unknown): void => {
+      message.textContent = e instanceof Error ? e.message : String(e);
+      message.hidden = false;
+    };
+    const form = h('form', { class: 'write notice-edit' },
+      h('label', { for: id('title') }, '件名'), title,
+      h('label', { for: id('body') }, '本文'), body,
+      h('label', { class: 'check' }, important, '重要（いちばん上に出す）'),
+      h('label', { class: 'check' }, ack, '読んだら「確認しました」を押してもらう'),
+      ...(state === 'scheduled' ? [h('label', { for: id('from') }, 'いつから出すか（空なら今すぐ）'), from] : []),
+      h('label', { for: id('until') }, 'いつまで出すか（空なら期限なし）'), until,
+      state === 'ended' ? h('p', { class: 'hint' }, '「いつまで」を先の日付に変えると、もう一度出せます。') : null,
+      h('p', { class: 'hint' }, '直しても、読んだ・確認した記録はそのまま残ります。中身を大きく変えるときは、掲示をやめて出し直すと、みんなに未読で届きます。'),
+      message,
+      h('div', { class: 'row-actions' },
+        h('button', { type: 'submit', class: 'primary small' }, '保存'),
+        h('button', { type: 'button', class: 'secondary small', onclick: () => draw() }, 'やめる')));
+    submitOnce(form, async () => {
+      message.hidden = true;
+      try {
+        await api('PUT', `/notices/${n.id}`, {
+          title: title.value,
+          body: body.value,
+          priority: important.checked ? 'important' : 'normal',
+          requiresAck: ack.checked,
+          // 日付を変えていなければ、いまの終わりをそのまま送る（掲示をやめた時刻を、その日の終わりに書き換えない）
+          endsAt: until.value === initialUntil ? (parseDate(n.endsAt)?.toISOString() ?? null) : (until.value ? endOfDay(until.value) : null),
+          // 始まりは、これから出る連絡のときだけ動かせる。空にしたら、今すぐ出す
+          ...(state === 'scheduled' && from.value !== initialFrom ? { startsAt: from.value ? startOfDay(from.value) : new Date().toISOString() } : {}),
+        });
+        toast('直しました');
+        ctx.reload();
+        ctx.onChange();
+      } catch (e) {
+        fail(e);
+      }
+    });
+    const after = (text: string) => async (): Promise<void> => { toast(text); ctx.reload(); ctx.onChange(); };
+    clear(card);
+    card.append(form,
+      h('div', { class: 'notice-danger' },
+        state === 'ended' ? null : confirmAction('掲示をやめる', 'secondary small', '掲示をやめますか？（終わった連絡として残ります）', async () => {
+          await api('POST', `/notices/${n.id}/end`);
+          await after('掲示をやめました')();
+        }, undefined, ctx.reload),
+        confirmAction('消す', 'secondary small', '消しますか？（元に戻せません。読んだ・確認した記録も消えます）', async () => {
+          await api('DELETE', `/notices/${n.id}`);
+          await after('消しました')();
+        }, undefined, ctx.reload)));
+    title.focus();
   };
   draw();
 
-  // 画面に出たら「読んだ」として記録する
-  if (!n.readAt) {
+  // 画面に出たら「読んだ」として記録する（いま出ている連絡だけ）
+  if (!n.readAt && state === 'active') {
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some((e) => e.isIntersecting)) return;
       observer.unobserve(card); // 送っている間に重ねて送らない
@@ -101,7 +222,7 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
         observer.disconnect();
         n.readAt = new Date().toISOString();
         card.classList.remove('notice-unread');
-        onChange();
+        ctx.onChange();
       }).catch(() => {
         // 電波が悪くて記録できなかったときは、見張りを戻して、もう一度見えたときに送り直す。
         // 戻した瞬間にまだ見えていると即座に再送になり、通信できない間は叩き続けてしまうので、少し置く
@@ -114,31 +235,37 @@ function noticeCard(n: Notice, canSeeReaders: boolean, onChange: () => void): HT
 }
 
 /** お知らせを出すフォーム（trusted 以上） */
-function noticeForm(storeId: string, onPosted: () => void): HTMLElement {
+function noticeForm(storeId: string, isHq: boolean, onPosted: () => void): HTMLElement {
   const title = h('input', { id: 'ntitle', type: 'text', maxlength: 100, placeholder: '例：年末年始の営業時間' });
   const body = h('textarea', { id: 'nbody', rows: 4, placeholder: '伝えたいこと' });
   const important = h('input', { id: 'nimportant', type: 'checkbox' });
   const ack = h('input', { id: 'nack', type: 'checkbox' });
+  const from = h('input', { id: 'nfrom', type: 'date' });
   const until = h('input', { id: 'nuntil', type: 'date' });
+  // 全店に出せるのは本部だけ
+  const target = h('select', { id: 'ntarget' }, h('option', { value: 'store' }, 'この店舗だけ'), h('option', { value: 'all' }, 'すべての店舗（全店）'));
   const message = h('p', { class: 'error', role: 'alert', hidden: true });
 
   const submit = async () => {
     message.hidden = true;
     try {
-      await api('POST', `/stores/${storeId}/notices`, {
+      const scheduled = from.value !== '' && Date.parse(startOfDay(from.value)) > Date.now();
+      await api('POST', isHq && target.value === 'all' ? '/notices' : `/stores/${storeId}/notices`, {
         title: title.value,
         body: body.value,
         priority: important.checked ? 'important' : 'normal',
         requiresAck: ack.checked,
-        // 日付だけを選んでもらい、その日の終わりまで出す
-        endsAt: until.value ? new Date(`${until.value}T23:59:59`).toISOString() : null,
+        ...(from.value ? { startsAt: startOfDay(from.value) } : {}),
+        endsAt: until.value ? endOfDay(until.value) : null,
       });
       title.value = '';
       body.value = '';
       important.checked = false;
       ack.checked = false;
+      from.value = '';
       until.value = '';
-      toast('連絡事項を出しました');
+      target.value = 'store'; // 次の連絡を、うっかり全店に出さないように戻す
+      toast(scheduled ? 'その日から出ます（「これから出す連絡」で直せます）' : '連絡事項を出しました');
       onPosted();
     } catch (err) {
       message.textContent = err instanceof Error ? err.message : String(err);
@@ -147,10 +274,12 @@ function noticeForm(storeId: string, onPosted: () => void): HTMLElement {
   };
 
   const form = h('form', { class: 'write panel-body' },
+    ...(isHq ? [h('label', { for: 'ntarget' }, '出す先'), target] : []),
     h('label', { for: 'ntitle' }, '件名'), title,
     h('label', { for: 'nbody' }, '本文'), body,
     h('label', { class: 'check' }, important, '重要（いちばん上に出す）'),
     h('label', { class: 'check' }, ack, '読んだら「確認しました」を押してもらう'),
+    h('label', { for: 'nfrom' }, 'いつから出すか（空なら今すぐ）'), from,
     h('label', { for: 'nuntil' }, 'いつまで出すか（空なら期限なし）'), until,
     message,
     h('button', { type: 'submit', class: 'primary' }, '出す'));
@@ -262,9 +391,13 @@ function historyRow(item: HandoverHistoryItem, redraw: () => void): HTMLElement 
 /** 連絡タブの中身 */
 export function renderNotices(
   container: HTMLElement,
-  options: { storeId: string; userName: string; isTrusted: boolean; onBadges?: () => void },
+  options: { storeId: string; userName: string; isTrusted: boolean; isHq?: boolean; onBadges?: () => void },
 ): void {
   const noticeList = h('div', { class: 'notices' });
+  const cardContext: CardContext = {
+    onChange: () => options.onBadges?.(),
+    reload: () => { void loadNotices(); void loadArchive(); },
+  };
   const handoverList = h('div');
   const input = h('textarea', { id: 'hbody', rows: 2, maxlength: 1000, placeholder: '次の人に伝えること（例：冷蔵庫の在庫が1台。発注済み）' });
 
@@ -281,13 +414,43 @@ export function renderNotices(
         noticeList.append(h('p', { class: 'hint' }, '今の連絡事項はありません。'));
         return;
       }
-      for (const n of list) noticeList.append(noticeCard(n, options.isTrusted, () => options.onBadges?.()));
+      for (const n of list) noticeList.append(noticeCard(n, cardContext));
     } catch (e) {
       if (mine !== noticeSeq) return;
       clear(noticeList);
       noticeList.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
     }
   };
+
+  // これから出す連絡（自分が直せるものだけ届く）と、掲示が終わった連絡。開いたときに読む
+  const archiveBody = h('div', { class: 'panel-body notices' });
+  const archive = h('details', { class: 'panel' },
+    h('summary', {}, options.isTrusted ? 'これから出す連絡・終わった連絡' : '終わった連絡'), archiveBody);
+  let archiveSeq = 0;
+  const loadArchive = async () => {
+    if (!archive.open) return;
+    const mine = ++archiveSeq;
+    try {
+      const all = await api<Notice[]>('GET', `/stores/${options.storeId}/notices?all=1`);
+      if (mine !== archiveSeq) return;
+      const scheduled = all.filter((n) => n.state === 'scheduled');
+      const ended = all.filter((n) => n.state === 'ended');
+      clear(archiveBody);
+      if (scheduled.length > 0 || options.isTrusted) {
+        archiveBody.append(h('h3', {}, `これから出す連絡（${scheduled.length}件）`),
+          ...(scheduled.length === 0 ? [h('p', { class: 'hint' }, 'ありません。「いつから出すか」に先の日付を入れて出すと、ここに並びます。')] : []),
+          ...scheduled.map((n) => noticeCard(n, cardContext)));
+      }
+      archiveBody.append(h('h3', {}, `終わった連絡（${ended.length}件）`),
+        ...(ended.length === 0 ? [h('p', { class: 'hint' }, 'ありません。')] : []),
+        ...ended.map((n) => noticeCard(n, cardContext)));
+    } catch (e) {
+      if (mine !== archiveSeq) return;
+      clear(archiveBody);
+      archiveBody.append(h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+    }
+  };
+  archive.addEventListener('toggle', () => { void loadArchive(); });
 
   // ラベルで絞る。既定は「すべて」（今までどおり全部出す）。絞っても、数（タブの印）は変えない
   let filter: string | null = null;
@@ -415,7 +578,8 @@ export function renderNotices(
     h('h1', {}, '連絡'),
     h('h2', {}, '連絡事項'),
     noticeList,
-    ...(options.isTrusted ? [noticeForm(options.storeId, () => void loadNotices())] : []),
+    ...(options.isTrusted ? [noticeForm(options.storeId, options.isHq === true, () => { void loadNotices(); void loadArchive(); })] : []),
+    archive,
     h('h2', {}, '引き継ぎ'),
     h('p', { class: 'hint' }, '承認はありません。誰でも書けて、誰でも片付けられます。片付かないものは次の日に持ち越します。'),
     handoverForm,

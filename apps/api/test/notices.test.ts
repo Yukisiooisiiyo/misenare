@@ -143,6 +143,87 @@ describe('連絡事項', () => {
     });
   });
 
+  it('先の日付で出した連絡は、直せる人にだけ「これから出る」として見える', async () => {
+    const tomorrow = new Date(Date.now() + 24 * 3600_000).toISOString();
+    const { id } = await run((q) => createNotice(q, trusted, STORE_A, { title: '予約の連絡', body: '本文', startsAt: tomorrow }));
+    const all = await run((q) => createNotice(q, hq, null, { title: '全店の予約', body: '本文', startsAt: tomorrow }));
+    await run(async (q) => {
+      const find = async (actor: typeof trusted, target: string) => (await listNotices(q, actor, STORE_A, true)).find((n) => n.id === target);
+      // ふつうの一覧には、出した本人にも出ない
+      assert.ok(!(await listNotices(q, trusted, STORE_A)).some((n) => n.id === id));
+      // 終わったものも含めて見るときは、出した本人と、その店の店長・本部にだけ出る
+      for (const actor of [trusted, manager, hq]) {
+        const n = await find(actor, id);
+        assert.deepEqual([n?.state, n?.canEdit], ['scheduled', true]);
+      }
+      assert.equal(await find(visitor, id), undefined, '直せない人には、その日まで見せない');
+      // 1件を直接引いても同じ
+      await assert.rejects(getNotice(q, visitor, id), /見つかりません/);
+      assert.equal((await getNotice(q, trusted, id)).state, 'scheduled');
+      // 全店共通のものは、本部にだけ
+      assert.equal((await find(hq, all.id))?.state, 'scheduled');
+      assert.equal(await find(manager, all.id), undefined);
+      assert.equal(await find(trusted, all.id), undefined);
+      // 他店の人には、その店の予約は出ない
+      assert.ok(!(await listNotices(q, storeBStaff, STORE_B, true)).some((n) => n.id === id));
+      await deleteNotice(q, trusted, id);
+      await deleteNotice(q, hq, all.id);
+    });
+  });
+
+  it('一覧に、状態と、直せるか・確認の一覧を見られるかが付く', async () => {
+    const { id } = await run((q) => createNotice(q, trusted, STORE_A, { title: '札つき', body: '本文', requiresAck: true }));
+    const all = await run((q) => createNotice(q, hq, null, { title: '全店の札', body: '本文', requiresAck: true }));
+    await run(async (q) => {
+      const as = async (actor: typeof trusted, target = id) => (await listNotices(q, actor, STORE_A, true)).find((n) => n.id === target)!;
+      assert.deepEqual(
+        [(await as(trusted)).canEdit, (await as(manager)).canEdit, (await as(hq)).canEdit, (await as(visitor)).canEdit],
+        [true, true, true, false]);
+      assert.deepEqual([(await as(trusted)).canSeeReaders, (await as(manager)).canSeeReaders, (await as(visitor)).canSeeReaders], [true, true, false]);
+      assert.equal((await as(visitor)).state, 'active');
+      // 全店共通：直せるのも、確認の一覧を見られるのも本部だけ（API の判定と同じ）
+      assert.deepEqual([(await as(manager, all.id)).canEdit, (await as(manager, all.id)).canSeeReaders], [false, false]);
+      assert.deepEqual([(await as(hq, all.id)).canEdit, (await as(hq, all.id)).canSeeReaders], [true, true]);
+      await assert.rejects(noticeReaders(q, manager, all.id), /権限がありません/);
+      await assert.rejects(updateNotice(q, manager, all.id, { title: 'x', body: 'y' }), /本部のみ/);
+      // 掲示をやめたものは ended
+      await endNotice(q, trusted, id);
+      assert.equal((await as(visitor)).state, 'ended');
+      // ツギガミが自動で出した知らせは、だれも直せない
+      const auto = await q.query<{ id: string }>(
+        `INSERT INTO notices (tenant_id, store_id, title, body, kind, audience) VALUES ($1, $2, '承認待ちが1件あります', '本文', 'approvals', 'trusted') RETURNING id`,
+        [T, STORE_A],
+      );
+      assert.equal((await as(manager, auto[0]!.id)).canEdit, false);
+      assert.equal((await as(hq, auto[0]!.id)).canEdit, false);
+      await q.query(`DELETE FROM notices WHERE id = $1`, [auto[0]!.id]);
+      await deleteNotice(q, hq, all.id);
+    });
+  });
+
+  it('直すときに日付を送らなければ、始まりは動かず、終わりは空になる（画面は、いまの終わりを送り直す）', async () => {
+    const { id } = await run((q) => createNotice(q, manager, STORE_A, { title: '期間つき', body: '本文', endsAt: new Date(Date.now() + 3 * 24 * 3600_000).toISOString() }));
+    await run(async (q) => {
+      const before = await getNotice(q, manager, id);
+      await updateNotice(q, manager, id, { title: '期間つき（直した）', body: '本文', endsAt: new Date(Date.parse(before.endsAt!.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))).toISOString() });
+      const kept = await getNotice(q, manager, id);
+      assert.equal(kept.title, '期間つき（直した）');
+      assert.equal(kept.startsAt, before.startsAt);
+      assert.equal(Date.parse(kept.endsAt!.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00')), Math.floor(Date.parse(before.endsAt!.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))));
+      // 掲示をやめたものを直しても、送り直した終わりのままなら、出し直しにはならない
+      await endNotice(q, manager, id);
+      const ended = await getNotice(q, manager, id);
+      await updateNotice(q, manager, id, { title: '期間つき（終えてから直した）', body: '本文', endsAt: new Date(Date.parse(ended.endsAt!.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'))).toISOString() });
+      assert.equal((await getNotice(q, manager, id)).state, 'ended');
+      assert.ok(!(await listNotices(q, visitor, STORE_A)).some((n) => n.id === id));
+      // 終わりを先の日付にすれば、もう一度出る
+      await updateNotice(q, manager, id, { title: '期間つき（出し直し）', body: '本文', endsAt: new Date(Date.now() + 24 * 3600_000).toISOString() });
+      assert.equal((await getNotice(q, manager, id)).state, 'active');
+      assert.ok((await listNotices(q, visitor, STORE_A)).some((n) => n.id === id));
+      await deleteNotice(q, manager, id);
+    });
+  });
+
   it('直せるのは出した人と administrator だけ', async () => {
     const { id } = await run((q) => createNotice(q, trusted, STORE_A, { title: '元の件名', body: '本文' }));
     await run(async (q) => {

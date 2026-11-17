@@ -37,6 +37,12 @@ export interface NoticeView {
   ackedAt: string | null;
   /** 確認が要るお知らせで、まだ確認していない人の数（trusted 以上だけに入る） */
   pendingAcks?: number;
+  /** これから出る（scheduled）・いま出ている（active）・掲示が終わった（ended） */
+  state: 'scheduled' | 'active' | 'ended';
+  /** 見ている人が、直す・掲示をやめる・消すことができるか（画面がボタンを出すかどうかに使う） */
+  canEdit: boolean;
+  /** 見ている人が、確認した人・まだの人の一覧を見られるか */
+  canSeeReaders: boolean;
 }
 
 interface NoticeRow {
@@ -54,9 +60,34 @@ interface NoticeRow {
   acked_at: string | null;
   pending_acks: number | null;
   audience?: 'all' | 'trusted';
+  created_by: string | null;
+  kind: string;
+  state: NoticeView['state'];
 }
 
-function view(row: NoticeRow, withCounts: boolean): NoticeView {
+/** 一覧と1件の両方で使う列。state は DB の時計で決める（端末の時計がずれていても同じ答えになる） */
+const NOTICE_COLUMNS = `n.id, n.store_id, n.title, n.body, n.priority, n.requires_ack,
+            n.starts_at::text AS starts_at, n.ends_at::text AS ends_at,
+            u.name AS author, n.created_at::text AS created_at,
+            r.read_at::text AS read_at, r.acked_at::text AS acked_at,
+            n.created_by, n.kind, n.audience,
+            CASE WHEN n.starts_at > now() THEN 'scheduled'
+                 WHEN n.ends_at IS NOT NULL AND n.ends_at <= now() THEN 'ended'
+                 ELSE 'active' END AS state`;
+
+/**
+ * 直す・掲示をやめる・消すことができるか。
+ *   ・ツギガミが自動で出した知らせは、人が直せない（直しても次の投稿で書き換わる）
+ *   ・全店共通（store_id が無い）は本部だけ。出すのが本部だけなのと対にする
+ *   ・店舗の連絡事項は、出した人か「その店舗の」administrator。他店の店長は直せない
+ */
+function canEditNotice(actor: Actor, row: { store_id: string | null; created_by: string | null; kind: string }): boolean {
+  if (row.kind !== 'manual' || !canAccessStore(actor, row.store_id)) return false;
+  if (row.store_id === null) return actor.adminScope === 'tenant';
+  return row.created_by === actor.userId || canAdminister(actor, row.store_id);
+}
+
+function view(actor: Actor, row: NoticeRow, withCounts: boolean): NoticeView {
   return {
     id: row.id,
     storeId: row.store_id,
@@ -71,6 +102,9 @@ function view(row: NoticeRow, withCounts: boolean): NoticeView {
     readAt: row.read_at,
     ackedAt: row.acked_at,
     ...(withCounts && row.requires_ack ? { pendingAcks: Number(row.pending_acks ?? 0) } : {}),
+    state: row.state,
+    canEdit: canEditNotice(actor, row),
+    canSeeReaders: canModerate(actor, row.store_id),
   };
 }
 
@@ -85,21 +119,21 @@ function validate(input: NoticeInput): void {
   }
   if (input.startsAt && input.endsAt) {
     assert(Date.parse(input.endsAt) > Date.parse(input.startsAt), 'invalid', '掲示の終わりは、始まりより後にしてください');
-  } else if (input.endsAt && !input.startsAt) {
-    // 始まりを省くと DB で now() が入る。終わりが過去だと CHECK (ends_at > starts_at) で 500 になるので先に断る
-    assert(Date.parse(input.endsAt) > Date.now(), 'invalid', '掲示の終わりは、今より後にしてください');
   }
+  // 始まりを省いたときの終わりは、出すとき（始まりが「今」になる）と直すとき（いまの始まりのまま）で比べる相手が違うので、それぞれの側で確かめる
 }
 
-/** その店舗で今まさに掲示されているお知らせ（全店共通のものも含む） */
+/**
+ * その店舗で今まさに掲示されているお知らせ（全店共通のものも含む）。
+ *
+ * includeEnded を付けると、掲示が終わったものも返す。あわせて、**これから出るもののうち、自分が直せるもの**も返す：
+ * 先の日付で出した連絡は、その日までだれにも見えない。出した本人にも見えないと、直すことも取りやめることもできない。
+ */
 export async function listNotices(db: Db, actor: Actor, storeId: string, includeEnded = false): Promise<NoticeView[]> {
   assert(canAccessStore(actor, storeId), 'forbidden', 'この店舗の連絡事項は見られません');
   await assertStore(db, storeId);
   const rows = await db.query<NoticeRow>(
-    `SELECT n.id, n.store_id, n.title, n.body, n.priority, n.requires_ack,
-            n.starts_at::text AS starts_at, n.ends_at::text AS ends_at,
-            u.name AS author, n.created_at::text AS created_at,
-            r.read_at::text AS read_at, r.acked_at::text AS acked_at,
+    `SELECT ${NOTICE_COLUMNS},
             CASE WHEN n.requires_ack THEN (
               SELECT count(DISTINCT m.user_id)::int FROM memberships m
                -- 無効化された人は確認しようが無い。数えると永遠に「未確認」で残る
@@ -113,25 +147,22 @@ export async function listNotices(db: Db, actor: Actor, storeId: string, include
        LEFT JOIN users u ON u.id = n.created_by
        LEFT JOIN notice_reads r ON r.notice_id = n.id AND r.user_id = $2
       WHERE (n.store_id = $1 OR n.store_id IS NULL)
-        AND n.starts_at <= now()
+        AND (n.starts_at <= now() OR ($3 AND n.kind = 'manual'
+             AND CASE WHEN n.store_id IS NULL THEN $5 ELSE n.created_by = $2 OR $6 END))
         AND ($3 OR n.ends_at IS NULL OR n.ends_at > now())
         -- 承認できない人に承認待ちの知らせを見せても、できることが無い
         AND (n.audience = 'all' OR $4)
       ORDER BY (n.priority = 'important') DESC, n.starts_at DESC
       LIMIT 200`,
-    [storeId, actor.userId, includeEnded, isTrusted(actor)],
+    [storeId, actor.userId, includeEnded, isTrusted(actor), actor.adminScope === 'tenant', canAdminister(actor, storeId)],
   );
-  return rows.map((r) => view(r, isTrusted(actor)));
+  return rows.map((r) => view(actor, r, isTrusted(actor)));
 }
 
 export async function getNotice(db: Db, actor: Actor, id: string): Promise<NoticeView> {
   const row = await maybeOne<NoticeRow>(
     db,
-    `SELECT n.id, n.store_id, n.title, n.body, n.priority, n.requires_ack,
-            n.starts_at::text AS starts_at, n.ends_at::text AS ends_at,
-            u.name AS author, n.created_at::text AS created_at,
-            r.read_at::text AS read_at, r.acked_at::text AS acked_at, NULL::int AS pending_acks,
-            n.audience
+    `SELECT ${NOTICE_COLUMNS}, NULL::int AS pending_acks
        FROM notices n LEFT JOIN users u ON u.id = n.created_by
        LEFT JOIN notice_reads r ON r.notice_id = n.id AND r.user_id = $2
       WHERE n.id = $1`,
@@ -140,12 +171,16 @@ export async function getNotice(db: Db, actor: Actor, id: string): Promise<Notic
   assert(row !== undefined, 'not_found', '連絡事項が見つかりません');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は見られません');
   assert(row.audience === 'all' || isTrusted(actor), 'forbidden', 'この連絡事項は見られません');
-  return view(row, false);
+  // これから出る連絡は、直せる人にだけ見せる（一覧と同じ）
+  assert(row.state !== 'scheduled' || canEditNotice(actor, row), 'not_found', '連絡事項が見つかりません');
+  return view(actor, row, false);
 }
 
 /** お知らせを出す。全店共通は本部だけ */
 export async function createNotice(db: Db, actor: Actor, storeId: string | null, input: NoticeInput) {
   validate(input);
+  // 始まりを省くと DB で now() が入る。終わりが過去だと CHECK (ends_at > starts_at) で 500 になるので先に断る
+  if (input.endsAt && !input.startsAt) assert(Date.parse(input.endsAt) > Date.now(), 'invalid', '掲示の終わりは、今より後にしてください');
   if (storeId === null) {
     assert(actor.adminScope === 'tenant', 'forbidden', '全店共通の連絡事項は本部のみ出せます');
   } else {
@@ -171,13 +206,11 @@ async function assertCanEdit(db: Db, actor: Actor, id: string): Promise<{ store_
     db, `SELECT store_id, created_by, kind FROM notices WHERE id = $1`, [id],
   );
   assert(row !== undefined, 'not_found', '連絡事項が見つかりません');
-  // ミセナレが自動で出した知らせは人が直せない（直しても次の投稿で書き換わる）
+  // 断るときは、理由を言い分ける（判定そのものは canEditNotice と同じ）
   assert(row.kind === 'manual', 'forbidden', 'この連絡事項はミセナレが自動で出しています');
   assert(canAccessStore(actor, row.store_id), 'forbidden', 'この連絡事項は直せません');
-  // 全店共通（store_id が無い）は本部だけ。出すのが本部だけなのと対にする
   if (row.store_id === null) assert(actor.adminScope === 'tenant', 'forbidden', '全店共通の連絡事項は本部のみ直せます');
-  // 店舗の連絡事項は、出した人か「その店舗の」administrator。他店の店長は直せない
-  assert(row.created_by === actor.userId || canAdminister(actor, row.store_id), 'forbidden', '出した人か administrator だけが直せます');
+  assert(canEditNotice(actor, row), 'forbidden', '出した人か administrator だけが直せます');
   return row;
 }
 
