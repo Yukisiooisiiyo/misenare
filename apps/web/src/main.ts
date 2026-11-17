@@ -4,7 +4,7 @@
 import { api, ApiError, fetchDictionary, onUnauthorized, session, ssoSecret, type BookmarkItem, type Device, type Dictionary, type Hit, type Knowledge, type Me, type ProductCard, type ScanResult, type SearchResult } from './api.ts';
 import { busyGuard, clear, freshness, freshnessBadge, getStaleDays, h, relativeDate, setStaleDays, submitOnce, tagChip, toast } from './dom.ts';
 import { LocalDictionary, renderSuggestions, type PickEvent } from './tagInput.ts';
-import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
+import { accessRequestPanel, action, askReadings, confirmAction, countedList, exportPanel, importPanel, productPanel, readingPanel, roleLabel, ssoPanel, staffPanel, tagPanel } from './manage.ts';
 import { deletePasskey, guessDeviceName, listPasskeys, loginWithPasskey, passkeySupported, registerPasskey, type PasskeyRow } from './passkey.ts';
 import { decodeImage } from './ean.ts';
 import { renderMemos } from './memo.ts';
@@ -652,6 +652,8 @@ function route(): void {
   if (path === '/memo') return renderMemoTab();
   if (path === '/manage') return void renderManage(stale);
   if (path === '/device') return void renderDevice(stale);
+  const staff = /^\/staff\/([0-9a-f-]{36})$/.exec(path);
+  if (staff) return void renderStaff(staff[1]!, stale);
   return void renderHome('');
 }
 
@@ -1480,7 +1482,7 @@ async function renderManage(stale: () => boolean): Promise<void> {
   if (isAdmin()) {
     section.append(
       accessRequestPanel(me!.stores, storeId(), () => { void refreshBadges().then(updateManageCount); }),
-      staffPanel(storeId(), me!.id),
+      staffPanel(storeId(), { id: me!.id, adminScope: me!.adminScope }),
       inviteForm(),
     );
     // 会社のアカウントの設定は本部だけ（会社全体に効くため）
@@ -1488,27 +1490,172 @@ async function renderManage(stale: () => boolean): Promise<void> {
   }
 }
 
+// --- スタッフ1人の管理 ----------------------------------------------------------
+//
+// 一覧の行に置くと混み合う操作（役割・名前・メールアドレス・端末）を、1人ずつの画面にまとめる。
+// 開けるのは、その人を管理できる人だけ（サーバーが確かめる）。
+
+interface StaffDetail {
+  id: string; name: string; trust_level: 'visitor' | 'trusted'; admin_scope: 'none' | 'store' | 'tenant';
+  status: 'active' | 'disabled'; email: string | null; via_sso: boolean;
+  stores: Array<{ id: string; name: string }>;
+  deviceList: Device[];
+  isSelf: boolean;
+}
+
+async function renderStaff(userId: string, stale: () => boolean): Promise<void> {
+  if (!isAdmin()) { location.hash = '#/home'; return; }
+  const section = h('section', { class: 'page' });
+  shell('settings', section);
+  const draw = async (): Promise<void> => {
+    let u: StaffDetail;
+    try {
+      u = await api<StaffDetail>('GET', `/users/${userId}`);
+    } catch (e) {
+      if (stale()) return;
+      clear(section);
+      section.append(
+        h('a', { href: '#/manage', class: 'back' }, '承認・管理へ戻る'),
+        h('p', { class: 'error', role: 'alert' }, e instanceof Error ? e.message : String(e)));
+      return;
+    }
+    if (stale()) return;
+    clear(section);
+    const patch = async (body: Record<string, unknown>, done: string): Promise<void> => {
+      await api('PATCH', `/users/${u.id}`, body);
+      toast(done);
+      await draw();
+    };
+    section.append(
+      h('a', { href: '#/manage', class: 'back' }, '承認・管理へ戻る'),
+      h('h1', {}, u.name, u.status === 'disabled' ? h('span', { class: 'pending' }, '（無効）') : null),
+      h('p', { class: 'hint' }, [roleLabel(u), u.stores.length > 0 ? u.stores.map((x) => x.name).join('・') : '店舗に所属していません', u.via_sso ? '会社アカウント' : ''].filter(Boolean).join('・')),
+    );
+
+    // 名前
+    const nameInput = h('input', { id: 'staff-name', type: 'text', maxlength: 40, value: u.name });
+    section.append(
+      h('h2', {}, '名前'),
+      h('p', { class: 'hint' }, '投稿や承認に出る名前です。'),
+      h('label', { for: 'staff-name' }, '名前'), nameInput,
+      action('名前を直す', 'secondary', async () => { await patch({ name: nameInput.value }, '名前を直しました'); }));
+
+    // 自分の権限・状態は変えられない（締め出し防止）。本部が自分の画面を開いたときは、名前だけ
+    if (u.isSelf) {
+      section.append(h('p', { class: 'note' }, '自分の役割と状態は、自分では変えられません。端末とメールアドレスは「この端末の設定」から。'));
+      return;
+    }
+
+    // 役割（本部だけが変えられる）
+    if (me!.adminScope === 'tenant') {
+      const to = (scope: 'none' | 'store' | 'tenant', label: string, question: string, done: string): HTMLElement =>
+        confirmAction(label, 'secondary', question, async () => { await patch({ adminScope: scope }, done); });
+      section.append(
+        h('h2', {}, '役割'),
+        h('p', {}, `いまは「${roleLabel(u)}」です。`),
+        h('div', { class: 'actions' },
+          u.admin_scope !== 'store' ? to('store', '店長にする', `${u.name}さんを、所属している店舗の店長にします。スタッフの招待と無効化、承認ができるようになります。`, '店長にしました') : null,
+          u.admin_scope !== 'tenant' ? to('tenant', '本部にする', `${u.name}さんを本部にします。全店舗の管理と、店長・本部の変更ができるようになります。`, '本部にしました') : null,
+          u.admin_scope !== 'none' ? to('none', '一般のスタッフにする', `${u.name}さんから、管理の権限を外します。`, '一般のスタッフにしました') : null),
+      );
+    }
+    if (u.admin_scope === 'none' && u.status === 'active') {
+      section.append(
+        h('h2', {}, '投稿の扱い'),
+        h('p', {}, u.trust_level === 'trusted' ? 'trusted：投稿がすぐ公開され、ほかの人の投稿を承認できます。' : 'visitor：投稿は、承認されてから公開されます。'),
+        action(u.trust_level === 'trusted' ? 'visitor に戻す' : 'trusted にする', 'secondary', async () => {
+          const next = u.trust_level === 'trusted' ? 'visitor' : 'trusted';
+          await patch({ trustLevel: next }, next === 'trusted' ? 'trusted にしました' : 'visitor に戻しました');
+        }));
+    }
+
+    // 状態
+    section.append(
+      h('h2', {}, '利用の状態'),
+      u.status === 'active'
+        ? confirmAction('無効にする', 'secondary', `${u.name}さんの端末がすぐ使えなくなります。`, async () => { await patch({ status: 'disabled' }, '無効にしました'); })
+        : action('有効に戻す', 'secondary', async () => { await patch({ status: 'active' }, '有効に戻しました'); }));
+
+    // メールアドレス（外すことだけできる。別のアドレスは、本人が自分で確認して登録する）
+    section.append(
+      h('h2', {}, 'メールアドレス'),
+      u.email
+        ? h('p', {}, `登録中：${u.email}`)
+        : h('p', { class: 'hint' }, '登録されていません（本人が「この端末の設定」から登録します）。'));
+    if (u.email) {
+      section.append(confirmAction('登録を外す', 'secondary', `${u.name}さんは、メールのリンクで入り直せなくなります。`,
+        async () => { await patch({ email: null }, '登録を外しました'); }));
+    }
+
+    // 端末
+    const out = h('div', { class: 'invite-out', 'aria-live': 'polite' });
+    section.append(
+      h('h2', {}, '端末'),
+      u.deviceList.length === 0
+        ? h('p', { class: 'hint' }, 'いま入っている端末はありません。')
+        : h('ul', { class: 'rows' }, ...u.deviceList.map((d) => h('li', { class: 'row' },
+            h('span', {}, d.deviceName ?? '名前のない端末'),
+            h('span', { class: 'hint' }, [deviceOrigin(d), `${relativeDate(d.createdAt)}に登録`, `最後に使った日 ${relativeDate(d.lastUsedAt)}`].filter(Boolean).join('・')),
+            h('span', { class: 'row-actions' },
+              confirmAction('止める', 'secondary small', `${d.deviceName ?? 'この端末'}を止めます。その端末からは使えなくなります。`,
+                async () => { await api('DELETE', `/sessions/${d.id}`); toast('止めました'); await draw(); }))))),
+    );
+    if (u.status === 'active') {
+      section.append(
+        h('p', { class: 'hint' }, '機種変更や紛失のときは、新しい端末を足せます。足したことは、本人のほかの端末に知らされます。'),
+        action('端末を足す（QR・リンクを作る）', 'secondary', async () => {
+          // 所属している店舗の招待として出す。店舗に所属しない本部の人は、店舗なしで出す
+          const store = u.stores.some((x) => x.id === storeId()) ? storeId() : u.stores[0]?.id ?? null;
+          const r = await api<{ token: string }>('POST', '/invitations', { storeId: store, userId: u.id });
+          showInvite(out, r.token, u.name, `${u.name}さんの新しい端末でこのQRコードを読み取ってもらってください（1回限り・72時間有効）。読み取った端末は、${u.name}さんとして入ります。`);
+        }),
+        out);
+    }
+  };
+  await draw();
+}
+
+/** 招待（または端末の追加）の鍵を、QRコードとリンクで見せる */
+function showInvite(out: HTMLElement, token: string, who: string, lead: string): void {
+  const link = `${location.origin}${location.pathname}#invite=${encodeURIComponent(token)}`;
+  clear(out);
+  const qr = h('div', { class: 'qr' });
+  qr.innerHTML = qrToSvg(encodeQr(link), { label: `${who}さんの招待QRコード` });
+  out.append(
+    h('p', {}, lead),
+    qr,
+    h('textarea', { rows: 3, readonly: true, class: 'invite-link' }, link),
+    h('div', { class: 'actions' },
+      h('button', { type: 'button', class: 'secondary', onclick: async () => { await navigator.clipboard.writeText(link).catch(() => {}); toast('コピーしました'); } }, 'リンクをコピー'),
+      h('button', { type: 'button', class: 'secondary', onclick: () => printQr(who, qr.innerHTML) }, '印刷する')));
+}
+
 function inviteForm(): HTMLElement {
   const name = h('input', { id: 'iname', type: 'text', maxlength: 40, placeholder: '例：佐藤' });
   const trusted = h('input', { id: 'itrusted', type: 'checkbox' });
   const out = h('div', { class: 'invite-out', 'aria-live': 'polite' });
+  // 店長・本部として招けるのは本部だけ。本部には、役割を選ぶ欄を出す
+  const canPickRole = me!.adminScope === 'tenant';
+  const role = h('select', { id: 'irole' },
+    h('option', { value: 'none' }, '一般のスタッフ'),
+    h('option', { value: 'store' }, '店長（この店舗の管理者）'),
+    h('option', { value: 'tenant' }, '本部（会社全体の管理者）'));
+  const trustedRow = h('label', { class: 'check' }, trusted, '最初から trusted にする（投稿がすぐ公開される）');
+  role.addEventListener('change', () => { trustedRow.hidden = role.value !== 'none'; });
+  /** 招待に付ける権限。店長・本部は承認もできる立場なので trusted。本部は店舗に所属させない */
+  const grant = (): Record<string, unknown> => {
+    const picked = canPickRole ? role.value : 'none';
+    return {
+      storeId: picked === 'tenant' ? null : storeId(),
+      trustLevel: picked !== 'none' || trusted.checked ? 'trusted' : 'visitor',
+      ...(picked !== 'none' ? { adminScope: picked } : {}),
+    };
+  };
   const submit = async () => {
     try {
-      const r = await api<{ token: string; expiresAt: string }>('POST', '/invitations', {
-        storeId: storeId(), name: name.value, trustLevel: trusted.checked ? 'trusted' : 'visitor',
-      });
-      const link = `${location.origin}${location.pathname}#invite=${encodeURIComponent(r.token)}`;
       const who = name.value;
-      clear(out);
-      const qr = h('div', { class: 'qr' });
-      qr.innerHTML = qrToSvg(encodeQr(link), { label: `${who}さんの招待QRコード` });
-      out.append(
-        h('p', {}, `${who}さんのスマホでこのQRコードを読み取ってもらってください（1回限り・72時間有効）。`),
-        qr,
-        h('textarea', { rows: 3, readonly: true, class: 'invite-link' }, link),
-        h('div', { class: 'actions' },
-          h('button', { type: 'button', class: 'secondary', onclick: async () => { await navigator.clipboard.writeText(link).catch(() => {}); toast('コピーしました'); } }, 'リンクをコピー'),
-          h('button', { type: 'button', class: 'secondary', onclick: () => printQr(who, qr.innerHTML) }, '印刷する')));
+      const r = await api<{ token: string; expiresAt: string }>('POST', '/invitations', { ...grant(), name: who });
+      showInvite(out, r.token, who, `${who}さんのスマホでこのQRコードを読み取ってもらってください（1回限り・72時間有効）。`);
       name.value = '';
     } catch (err) {
       clear(out);
@@ -1520,9 +1667,7 @@ function inviteForm(): HTMLElement {
   const sendMail = async () => {
     clear(out);
     try {
-      const r = await api<{ sent: boolean }>('POST', '/invitations/email', {
-        storeId: storeId(), name: name.value, trustLevel: trusted.checked ? 'trusted' : 'visitor', email: email.value,
-      });
+      const r = await api<{ sent: boolean }>('POST', '/invitations/email', { ...grant(), name: name.value, email: email.value });
       if (r.sent) {
         out.append(h('p', {}, `${email.value} に招待リンクを送りました（1回限り・72時間有効）。`));
         name.value = ''; email.value = '';
@@ -1536,7 +1681,8 @@ function inviteForm(): HTMLElement {
   const form = h('form', { class: 'write' },
     h('h2', {}, 'スタッフを招待する'),
     h('label', { for: 'iname' }, '名前'), name,
-    h('label', { class: 'check' }, trusted, '最初から trusted にする（投稿がすぐ公開される）'),
+    ...(canPickRole ? [h('label', { for: 'irole' }, '役割'), role] : []),
+    trustedRow,
     h('button', { type: 'submit', class: 'primary' }, 'QR・招待リンクを作る'),
     h('label', { for: 'iemail' }, 'メールで送る場合の宛先（任意）'), email,
     h('button', { type: 'button', class: 'secondary', onclick: () => void sendMail() }, 'メールで招待を送る'),

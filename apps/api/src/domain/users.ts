@@ -496,10 +496,7 @@ async function assertCanManageUser(db: Db, actor: Actor, userId: string) {
 export async function listStoreUsers(db: Db, actor: Actor, storeId: string) {
   assert(canAdminister(actor, storeId), 'forbidden', '利用者の一覧を見られるのは administrator のみです');
   return db.query(
-    `SELECT u.id, u.name, u.trust_level, u.admin_scope, u.status, u.email,
-            (SELECT max(s.last_used_at)::text FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS last_used_at,
-            (SELECT count(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS devices,
-            EXISTS (SELECT 1 FROM sso_identities si WHERE si.user_id = u.id) AS via_sso,
+    `SELECT ${STAFF_COLUMNS},
             -- この店に、生きている同名の人が2人以上いるか
             count(*) FILTER (WHERE u.status = 'active') OVER (PARTITION BY u.name) > 1 AS same_name
        FROM users u JOIN memberships m ON m.user_id = u.id
@@ -509,7 +506,53 @@ export async function listStoreUsers(db: Db, actor: Actor, storeId: string) {
   );
 }
 
+const STAFF_COLUMNS = `u.id, u.name, u.trust_level, u.admin_scope, u.status, u.email,
+            (SELECT max(s.last_used_at)::text FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS last_used_at,
+            (SELECT count(*)::int FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL) AS devices,
+            EXISTS (SELECT 1 FROM sso_identities si WHERE si.user_id = u.id) AS via_sso`;
+
+/**
+ * 本部の人の一覧（本部だけが見られる）。
+ *
+ * 本部の人は店舗に所属しないことが多い（運営者が会社を作ったときの最初の管理者がそう）。
+ * 店舗ごとのスタッフ一覧にしか出口が無いと、その人たちはどの画面にも出ず、辞めたあとも止められない。
+ */
+export async function listHeadquarters(db: Db, actor: Actor) {
+  assert(actor.adminScope === 'tenant', 'forbidden', '本部の人の一覧を見られるのは本部のみです');
+  return db.query(
+    `SELECT ${STAFF_COLUMNS},
+            count(*) FILTER (WHERE u.status = 'active') OVER (PARTITION BY u.name) > 1 AS same_name
+       FROM users u
+      WHERE u.admin_scope = 'tenant'
+      ORDER BY u.name`,
+  );
+}
+
+/**
+ * スタッフ1人の詳しい中身（管理の画面用）：所属の店舗と、いま入っている端末。
+ * 見られるのは、その人を管理できる人だけ（本部は全員、店長は自店舗の一般スタッフ）。
+ */
+export async function getUserForAdmin(db: Db, actor: Actor, userId: string) {
+  await assertCanManageUser(db, actor, userId);
+  const u = await one<Record<string, unknown>>(db, `SELECT ${STAFF_COLUMNS} FROM users u WHERE u.id = $1`, [userId]);
+  const stores = await db.query<{ id: string; name: string }>(
+    `SELECT st.id, st.name FROM memberships m JOIN stores st ON st.id = m.store_id WHERE m.user_id = $1 ORDER BY st.name`,
+    [userId],
+  );
+  const devices = await db.query<DeviceRow>(
+    `SELECT ${DEVICE_COLUMNS}
+       FROM sessions s LEFT JOIN users iu ON iu.id = s.issued_by
+      WHERE s.user_id = $1 AND s.revoked_at IS NULL
+        AND s.last_used_at >= now() - make_interval(days => $2)
+      ORDER BY s.created_at DESC`,
+    [userId, SESSION_IDLE_DAYS],
+  );
+  return { ...u, stores, deviceList: devices.map((d) => deviceView(d, null)), isSelf: userId === actor.userId };
+}
+
 export interface UserPatch {
+  /** 表示名を直す（結婚・書き間違いなど）。投稿や承認に出る名前が変わる */
+  name?: string;
   trustLevel?: TrustLevel;
   adminScope?: AdminScope;
   status?: 'active' | 'disabled';
@@ -522,14 +565,34 @@ export interface UserPatch {
  * 店長・本部の権限を変えられるのは本部だけ。自分自身の権限は変えられない（締め出し防止）。
  */
 export async function updateUser(db: Db, actor: Actor, userId: string, patch: UserPatch) {
-  assert(userId !== actor.userId, 'forbidden', '自分自身の権限は変更できません');
+  // 自分の権限・状態は変えられない（締め出し防止）。名前だけは、本部の人なら自分のものも直せる
+  const onlyName = Object.keys(patch).every((k) => k === 'name');
+  assert(userId !== actor.userId || (onlyName && actor.adminScope === 'tenant'), 'forbidden', '自分自身の権限は変更できません');
   await assertCanManageUser(db, actor, userId);
   if (patch.adminScope !== undefined) assert(actor.adminScope === 'tenant', 'forbidden', '店長・本部の権限を変えられるのは本部のみです');
+  if (patch.name !== undefined) {
+    const name = patch.name.trim();
+    assert(name.length > 0 && name.length <= 40, 'invalid', '名前を1〜40文字で入力してください');
+    assert(looksLikePersonName(name), 'invalid', '名前に URL や改行は入れられません');
+    await db.query(`UPDATE users SET name = $2 WHERE id = $1`, [userId, name]);
+  }
   if (patch.trustLevel !== undefined) {
     await db.query(`UPDATE users SET trust_level = $2 WHERE id = $1`, [userId, patch.trustLevel]);
   }
   if (patch.adminScope !== undefined) {
-    await db.query(`UPDATE users SET admin_scope = $2 WHERE id = $1`, [userId, patch.adminScope]);
+    // 店舗に所属していない人を、店長にも一般のスタッフにもできない。
+    // 所属が無いまま本部でなくなると、入ったあと「所属している店舗がありません」で止まり、何もできなくなる
+    if (patch.adminScope !== 'tenant') {
+      const m = await maybeOne(db, `SELECT 1 FROM memberships WHERE user_id = $1 LIMIT 1`, [userId]);
+      assert(m !== undefined, 'conflict', patch.adminScope === 'store'
+        ? 'この人は店舗に所属していないので、店長にできません。先に店舗の招待（端末の追加）で所属させてください'
+        : 'この人は店舗に所属していないので、本部から外せません。使わなくなった人は「無効にする」で止めてください');
+    }
+    // 店長・本部は承認もできる立場。あとで外したときに visitor に戻って投稿が承認待ちに落ちないよう、trusted にしておく
+    await db.query(
+      `UPDATE users SET admin_scope = $2, trust_level = CASE WHEN $2 <> 'none' THEN 'trusted' ELSE trust_level END WHERE id = $1`,
+      [userId, patch.adminScope],
+    );
   }
   if (patch.email === null) {
     await db.query(`UPDATE users SET email = NULL WHERE id = $1`, [userId]);

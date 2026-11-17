@@ -250,7 +250,7 @@ button.tag { cursor: pointer; }
 
 /* ナレッジの詳細 */
 .knowledge .body { display: flex; flex-direction: column; gap: 14px; font-size: 17px; line-height: 1.9; white-space: pre-wrap; max-width: 36em; }
-.actions { display: flex; gap: 8px; margin-top: 8px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 
 /* 商品 */
 .product { display: flex; flex-direction: column; gap: 8px; padding: 16px 0 14px; position: relative; }
@@ -268,7 +268,9 @@ button.tag { cursor: pointer; }
 .rows { list-style: none; margin: 0; padding: 0; }
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 12px 0; }
 .row a { color: var(--ink); font-weight: 700; }
-.row-actions { display: flex; gap: 8px; margin-left: auto; }
+.row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-left: auto; }
+/* 行の操作が3つ並んでも、ボタンの中で字が折れないようにする（収まらないぶんは次の段へ送る） */
+.row-actions .small { white-space: nowrap; }
 .invite-link { font-size: 13px; }
 
 .write { display: flex; flex-direction: column; gap: 8px; }
